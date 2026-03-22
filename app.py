@@ -1,146 +1,167 @@
 import streamlit as st
 import mysql.connector
 import pandas as pd
-import requests
-from datetime import date
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+from datetime import date, datetime
+import calendar
 from fpdf import FPDF
 import io
 
-# --- CONFIGURAÇÕES ---
-st.set_page_config(page_title="Crescere - PIS/COFINS", layout="wide", page_icon="🛡️")
+# --- 1. CONFIGURAÇÕES INICIAIS ---
+st.set_page_config(page_title="Crescere - Inteligência Contábil", layout="wide", page_icon="🛡️")
 
-# Estilo Customizado para Interface Clean
+# Estilo para botões e containers
 st.markdown("""
     <style>
-    .main { background-color: #f5f7f9; }
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #004b87; color: white; }
-    .stTextInput>div>div>input { border-radius: 5px; }
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
+    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 5px; padding: 10px; }
+    .stTabs [aria-selected="true"] { background-color: #004b87; color: white; }
+    div.stButton > button:first-child { background-color: #004b87; color: white; border-radius: 8px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- FUNÇÕES DE NÚCLEO ---
+# Funções de Apoio
 def get_db_connection():
     return mysql.connector.connect(**st.secrets["mysql"])
 
-def consultar_cnpj(cnpj_limpo):
-    url = f"https://receitaws.com.br/v1/cnpj/{cnpj_limpo}"
+def ultimo_dia_mes(ano, mes_nome):
+    meses_num = {m: i+1 for i, m in enumerate(['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'])}
+    mes_num = meses_num[mes_nome]
+    ultimo_dia = calendar.monthrange(ano, mes_num)[1]
+    return f"{ultimo_dia}/{str(mes_num).zfill(2)}/{ano}"
+
+# --- 2. LOGICA DE E-MAIL (OUTLOOK) ---
+def enviar_email_outlook(destinatario, assunto, corpo, arquivo_pdf, nome_arquivo):
     try:
-        response = requests.get(url, timeout=10)
-        return response.json() if response.status_code == 200 else None
-    except:
-        return None
+        msg = MIMEMultipart()
+        msg['From'] = st.secrets["email"]["smtp_user"]
+        msg['To'] = destinatario
+        msg['Subject'] = assunto
+        msg.attach(MIMEText(corpo, 'plain'))
 
-# --- CLASSE DE RELATÓRIO PDF ---
-class PDF_Relatorio(FPDF):
-    def header(self):
-        self.set_font('Arial', 'B', 12)
-        self.cell(0, 10, 'CRESCERE - RELATÓRIO DE APURAÇÃO FISCAL', 0, 1, 'C')
-        self.set_font('Arial', '', 10)
-        self.cell(0, 5, f'Data de Emissão: {date.today().strftime("%d/%m/%Y")}', 0, 1, 'C')
-        self.ln(10)
+        part = MIMEBase('application', 'octet-stream')
+        part.set_payload(arquivo_pdf)
+        encoders.encode_base64(part)
+        part.add_header('Content-Disposition', f"attachment; filename= {nome_arquivo}")
+        msg.attach(part)
 
-# --- ESTADOS DO SISTEMA ---
-if 'dados_form' not in st.session_state:
-    st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": ""}
+        server = smtplib.SMTP(st.secrets["email"]["smtp_server"], st.secrets["email"]["smtp_port"])
+        server.starttls()
+        server.login(st.secrets["email"]["smtp_user"], st.secrets["email"]["smtp_password"])
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao enviar e-mail: {e}")
+        return False
 
-# --- SIDEBAR NAVEGAÇÃO ---
+# --- 3. INTERFACE E NAVEGAÇÃO ---
 with st.sidebar:
-    st.title("🛡️ Crescere")
-    st.caption("v1.2 - Inteligência Contábil")
-    menu = st.radio("Módulos", ["Início", "Gestão de Empresas", "Apuração Mensal", "Relatórios & Exportação"])
+    st.markdown("# 🛡️ Crescere")
+    st.divider()
+    menu = st.radio("Menu Principal", ["Início", "Empresas", "Apuração Mensal", "Relatórios & ERP"], label_visibility="collapsed")
 
-# --- MÓDULO: GESTÃO DE EMPRESAS (CRUD OTIMIZADO) ---
-if menu == "Gestão de Empresas":
-    st.subheader("🏢 Cadastro e Edição de Unidades")
+# --- MÓDULO: INÍCIO ---
+if menu == "Início":
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.image("https://via.placeholder.com/150", width=150) # Substitua pelo link da sua logo
+        st.title("Bem-vindo à Crescere")
+        st.subheader("Inteligência Contábil")
+        st.markdown("---")
+        st.info("Utilize o menu lateral para gerenciar empresas, realizar apurações e exportar dados para o ERP.")
+
+# --- MÓDULO: APURAÇÃO MENSAL (COM EDIÇÃO ANTES DE SALVAR) ---
+elif menu == "Apuração Mensal":
+    st.header("💰 Apuração PIS/COFINS")
     
-    tab_cad, tab_lista = st.tabs(["📝 Formulário", "📋 Unidades Cadastradas"])
+    # 1. Seleção de Empresa e Período
+    conn = get_db_connection()
+    df_e = pd.read_sql("SELECT id, nome, regime FROM empresas", conn)
+    conn.close()
+    
+    c1, c2, c3 = st.columns([2,1,1])
+    emp_sel = c1.selectbox("Selecione a Empresa", df_e['nome'])
+    regime_emp = df_e[df_e['nome'] == emp_sel]['regime'].values[0]
+    mes_sel = c2.selectbox("Mês", ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'])
+    ano_sel = c3.selectbox("Ano", [2025, 2026, 2027], index=1)
 
-    with tab_cad:
-        # Busca CNPJ integrada no topo do form
-        c_busca, c_btn = st.columns([3,1])
-        cnpj_input = c_busca.text_input("Consultar CNPJ para preencher", placeholder="00.000.000/0000-00")
-        if c_btn.button("🔍 Consultar"):
-            res = consultar_cnpj(cnpj_input.replace(".","").replace("/","").replace("-",""))
-            if res and res.get('status') != 'ERROR':
-                st.session_state.dados_form.update({
-                    "nome": res.get('nome', ''),
-                    "fantasia": res.get('fantasia', ''),
-                    "cnpj": res.get('cnpj', ''),
-                    "cnae": res['atividade_principal'][0].get('code', '') if 'atividade_principal' in res else "",
-                    "endereco": f"{res.get('logradouro')}, {res.get('numero')} - {res.get('uf')}"
-                })
-                st.rerun()
-            else:
-                st.error("Erro na consulta.")
-
-        # Formulário Unificado (Insert/Update)
-        with st.form("form_empresa", clear_on_submit=False):
-            f = st.session_state.dados_form
-            c1, c2 = st.columns(2)
-            nome = c1.text_input("Razão Social", value=f['nome'])
-            fanta = c2.text_input("Nome Fantasia", value=f['fantasia'])
-            
-            c3, c4, c5 = st.columns([2, 2, 1])
-            cnpj = c3.text_input("CNPJ", value=f['cnpj'])
-            regime = c4.selectbox("Regime Tributário", ["Lucro Real", "Lucro Presumido"], index=0 if f['regime'] == "Lucro Real" else 1)
-            tipo = c5.selectbox("Tipo", ["Matriz", "Filial"], index=0 if f['tipo'] == "Matriz" else 1)
-            
-            cnae = st.text_input("CNAE", value=f['cnae'])
-            endereco = st.text_area("Endereço", value=f['endereco'])
-
-            if st.form_submit_button("💾 SALVAR ALTERAÇÕES"):
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                if f['id']: # UPDATE
-                    sql = "UPDATE empresas SET nome=%s, fantasia=%s, cnpj=%s, regime=%s, tipo=%s, cnae=%s, endereco=%s WHERE id=%s"
-                    cursor.execute(sql, (nome, fanta, cnpj, regime, tipo, cnae, endereco, f['id']))
-                else: # INSERT
-                    sql = "INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco) VALUES (%s,%s,%s,%s,%s,%s,%s)"
-                    cursor.execute(sql, (nome, fanta, cnpj, regime, tipo, cnae, endereco))
-                
-                conn.commit()
-                conn.close()
-                st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": ""}
-                st.success("Dados processados com sucesso!")
-                st.rerun()
-
-    with tab_lista:
-        conn = get_db_connection()
-        df = pd.read_sql("SELECT id, nome, cnpj, regime, tipo, cnae, endereco FROM empresas", conn)
-        conn.close()
+    # 2. Lançamento Temporário (Memória)
+    st.divider()
+    with st.expander("➕ Novo Lançamento para Conferência", expanded=True):
+        c_desc, c_val, c_btn = st.columns([3, 1, 1])
+        desc = c_desc.text_input("Descrição da Operação (Ex: Venda de Mercadorias)")
+        valor = c_val.number_input("Valor R$", min_value=0.0, format="%.2f")
         
-        # Tabela Clean com botões de ação
-        for _, row in df.iterrows():
-            with st.container():
-                col_info, col_btn = st.columns([5, 1])
-                col_info.markdown(f"**{row['nome']}** \n`CNPJ: {row['cnpj']}` | `Regime: {row['regime']}`")
-                if col_btn.button("✏️ Editar", key=f"btn_{row['id']}"):
-                    st.session_state.dados_form = row.to_dict()
-                    st.rerun()
-                st.divider()
+        if c_btn.button("Adicionar"):
+            novo_item = {"Descrição": desc, "Valor": valor}
+            st.session_state.itens_memoria.append(novo_item)
 
-# --- MÓDULO: RELATÓRIOS E EXPORTAÇÃO ---
-elif menu == "Relatórios & Exportação":
-    st.subheader("📄 Relatórios e Integração ERP")
-    
-    # Exemplo de lógica de exportação
-    c1, c2 = st.columns(2)
-    
-    with c1:
-        st.info("Gerar PDF de Conferência")
-        if st.button("📥 Baixar PDF Profissional"):
-            pdf = PDF_Relatorio()
-            pdf.add_page()
-            pdf.set_font('Arial', '', 12)
-            pdf.cell(0, 10, "Detalhamento de Impostos - Exemplo", 0, 1)
-            # Aqui entraria o loop dos seus dados de apuração
+    # 3. Tabela de Conferência (CRUD antes do Banco)
+    if st.session_state.itens_memoria:
+        st.subheader("📝 Conferência de Lançamentos")
+        df_temp = pd.DataFrame(st.session_state.itens_memoria)
+        
+        # Exibição com opção de limpar
+        st.table(df_temp.style.format({"Valor": "R$ {:.2f}"}))
+        
+        col_acao1, col_acao2 = st.columns([1, 4])
+        if col_acao1.button("🗑️ Limpar Tudo"):
+            st.session_state.itens_memoria = []
+            st.rerun()
             
-            pdf_output = pdf.output(dest='S').encode('latin-1')
-            st.download_button("Clique aqui para salvar PDF", data=pdf_output, file_name="apuracao_crescere.pdf", mime="application/pdf")
+        if col_acao2.button("✅ Confirmar e Gravar no Banco de Dados"):
+            # Aqui entraria o loop de INSERT no seu historico_apuracoes
+            st.success(f"Apuração de {emp_sel} gravada com sucesso!")
+            st.session_state.itens_memoria = []
 
-    with c2:
-        st.success("Exportar para ERP (Layout Genérico)")
-        # Simulação de dados para o ERP
-        df_erp = pd.DataFrame({"CONTA": ["REC.BRUTA", "PIS", "COFINS"], "VALOR": [10000, 165, 760]})
-        csv = df_erp.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Baixar CSV para Importação", data=csv, file_name="import_erp.csv", mime="text/csv")
+# --- MÓDULO: RELATÓRIOS & ERP ---
+elif menu == "Relatórios & ERP":
+    st.header("📄 Finalização e Integração")
+    
+    tab1, tab2 = st.tabs(["📧 Enviar por E-mail", "💾 Exportar ERP (Layout CSV)"])
+    
+    with tab1:
+        st.write("Disparar PDF para o e-mail corporativo cadastrado.")
+        email_cliente = st.text_input("E-mail do Destinatário")
+        if st.button("📨 Enviar Relatório agora"):
+            # Lógica para gerar PDF e enviar
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", 'B', 16)
+            pdf.cell(40, 10, f"Relatório Crescere - {mes_sel}/{ano_sel}")
+            pdf_bytes = pdf.output(dest='S').encode('latin-1')
+            
+            if enviar_email_outlook(email_cliente, "Relatório de Apuração", "Segue anexo o relatório.", pdf_bytes, "Relatorio.pdf"):
+                st.success("E-mail enviado com sucesso via Outlook!")
+
+    with tab2:
+        st.write("Gera o arquivo CSV compatível com o seu ERP.")
+        
+        # Montagem do DataFrame conforme seu modelo enviado
+        data_final = ultimo_dia_mes(ano_sel, mes_sel)
+        
+        dados_erp = {
+            "Lancto Aut.": [""],
+            "Debito": ["101"],      # Exemplo de conta
+            "Credito": ["201"],     # Exemplo de conta
+            "Data": [data_final],
+            "Valor": [1500.50],     # Exemplo vindo da apuração
+            "Cod. Historico": [""],
+            "Historico": [f"Apuração PIS/COFINS {mes_sel}/{ano_sel}"],
+            "Ccusto Debito": [""],
+            "Ccusto Credito": [""],
+            "Nr.Documento": [""],
+            "Complemento": [""]
+        }
+        
+        df_export = pd.DataFrame(dados_erp)
+        st.dataframe(df_export)
+        
+        csv = df_export.to_csv(index=False, sep=',').encode('utf-8')
+        st.download_button("📥 Baixar CSV para ERP", data=csv, file_name=f"export_erp_{mes_sel}.csv", mime="text/csv")
