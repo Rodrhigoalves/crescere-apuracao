@@ -2,143 +2,172 @@ import streamlit as st
 import mysql.connector
 import pandas as pd
 import json
-from datetime import datetime, date
+import requests
+from datetime import datetime
 from fpdf import FPDF
 
-# --- 1. CONFIGURAÇÃO ---
-st.set_page_config(page_title="🛡️ Crescere - Apuração Cloud", layout="wide")
+# --- 1. CONFIGURAÇÕES INICIAIS ---
+st.set_page_config(page_title="Crescere - Inteligência Contábil", layout="wide")
 
-# Inicialização de Session State
-for key in ['itens_memoria', 'id_editando', 'v_key']:
-    if key not in st.session_state: st.session_state[key] = [] if 'itens' in key else 0
+# Inicialização de estados para não perder dados ao clicar em botões
+if 'itens_memoria' not in st.session_state: st.session_state.itens_memoria = []
+if 'v_key' not in st.session_state: st.session_state.v_key = 0
+if 'dados_cnpj' not in st.session_state: st.session_state.dados_cnpj = {}
 
 def formata_real(valor):
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-# --- 2. CONEXÃO UOL ---
+# --- 2. BANCO DE DADOS (UOL) ---
 def get_db_connection():
-    return mysql.connector.connect(
-        host=st.secrets["mysql"]["host"],
-        user=st.secrets["mysql"]["user"],
-        password=st.secrets["mysql"]["password"],
-        database=st.secrets["mysql"]["database"]
-    )
+    return mysql.connector.connect(**st.secrets["mysql"])
 
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-    # Tabela de Empresas (Adicionado regime e matriz_id)
+    # Tabela de Empresas Reforçada (Com CNAE e Endereço para o PDF Profissional)
     cursor.execute('''CREATE TABLE IF NOT EXISTS empresas 
-                      (id INT AUTO_INCREMENT PRIMARY KEY, nome VARCHAR(255), cnpj VARCHAR(20), 
-                       regime VARCHAR(50), tipo VARCHAR(20), matriz_id INT)''')
-    # Tabela de Histórico
+                      (id INT AUTO_INCREMENT PRIMARY KEY, 
+                       nome VARCHAR(255), fantasia VARCHAR(255), cnpj VARCHAR(20), 
+                       regime VARCHAR(50), tipo VARCHAR(20), matriz_id INT,
+                       cnae VARCHAR(255), endereco TEXT)''')
+    
     cursor.execute('''CREATE TABLE IF NOT EXISTS historico_apuracoes (
         id INT AUTO_INCREMENT PRIMARY KEY, empresa_id INT, competencia VARCHAR(20), 
         detalhamento_json LONGTEXT, pis_total DECIMAL(15,2), cofins_total DECIMAL(15,2), 
-        data_reg VARCHAR(50), log_reprocessamento TEXT, saldo_ant_pis DECIMAL(15,2), saldo_ant_cof DECIMAL(15,2))''')
+        data_reg VARCHAR(50))''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- 3. MENU LATERAL ---
+# --- 3. FUNÇÃO DE CONSULTA CNPJ (API) ---
+def consultar_cnpj(cnpj_limpo):
+    url = f"https://receitaws.com.br/v1/cnpj/{cnpj_limpo}"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_status == 200:
+            return response.json()
+    except:
+        return None
+    return None
+
+# --- 4. INTERFACE ---
 with st.sidebar:
     st.title("🛡️ Crescere")
-    menu = st.radio("Navegação", ["Início", "Cadastrar Empresa", "Nova Apuração", "Histórico"])
+    menu = st.radio("Módulos", ["Início", "Cadastro de Unidades", "Apuração Mensal", "Relatórios/PDF"])
     st.divider()
-    if st.button("⚠️ Limpar Testes (Zerar Banco)"):
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("TRUNCATE TABLE historico_apuracoes")
-        conn.commit(); conn.close()
-        st.rerun()
+    st.caption("Usuário: Rodrigo")
 
-# --- PÁGINA: CADASTRO ---
-if menu == "Cadastrar Empresa":
-    st.header("🏢 Cadastro de Unidades")
-    conn = get_db_connection()
-    matrizes = pd.read_sql("SELECT id, nome FROM empresas WHERE tipo = 'Matriz'", conn)
-    conn.close()
+# --- MÓDULO: CADASTRO COM AUTOMAÇÃO ---
+if menu == "Cadastro de Unidades":
+    st.header("🏢 Cadastro de Empresas e Filiais")
+    
+    with st.container(border=True):
+        col_cnpj, col_btn = st.columns([3, 1])
+        cnpj_input = col_cnpj.text_input("Digite apenas os números do CNPJ")
+        
+        if col_btn.button("🔍 Consultar Receita"):
+            with st.spinner("Buscando dados na Receita..."):
+                info = consultar_cnpj(cnpj_input.replace(".", "").replace("/", "").replace("-", ""))
+                if info and info.get('status') != 'ERROR':
+                    st.session_state.dados_cnpj = info
+                    st.success("Dados encontrados!")
+                else:
+                    st.error("CNPJ não encontrado ou limite de consultas atingido.")
 
-    with st.form("form_emp"):
+    # Formulário de Cadastro
+    with st.form("form_cadastro"):
+        d = st.session_state.dados_cnpj
         col1, col2 = st.columns(2)
-        nome = col1.text_input("Razão Social / Nome Unidade")
-        cnpj = col2.text_input("CNPJ (completo)")
-        tipo = st.selectbox("Esta unidade é:", ["Matriz", "Filial"])
-        regime = st.selectbox("Regime Tributário", ["Lucro Presumido", "Lucro Real"])
         
-        m_id = None
-        if tipo == "Filial" and not matrizes.empty:
-            m_id_sel = st.selectbox("Vincular à Matriz:", matrizes['nome'])
-            m_id = int(matrizes[matrizes['nome'] == m_id_sel]['id'].values[0])
+        nome_social = col1.text_input("Razão Social", value=d.get('nome', ''))
+        nome_fantasia = col2.text_input("Nome Fantasia", value=d.get('fantasia', ''))
         
-        if st.form_submit_button("💾 Salvar Unidade"):
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO empresas (nome, cnpj, regime, tipo, matriz_id) VALUES (%s, %s, %s, %s, %s)", 
-                           (nome, cnpj, regime, tipo, m_id))
-            conn.commit(); conn.close()
-            st.success("Unidade cadastrada com sucesso!")
+        c1, c2, c3 = st.columns([2, 2, 1])
+        cnpj_final = c1.text_input("CNPJ Confirmado", value=d.get('cnpj', cnpj_input))
+        regime = c2.selectbox("Regime Tributário", ["Lucro Real", "Lucro Presumido"])
+        tipo = c3.selectbox("Tipo", ["Matriz", "Filial"])
+        
+        cnae = st.text_input("CNAE Principal", value=f"{d.get('atividade_principal', [{}])[0].get('code', '')} - {d.get('atividade_principal', [{}])[0].get('text', '')}")
+        endereco = st.text_area("Endereço Completo", value=f"{d.get('logradouro', '')}, {d.get('numero', '')} - {d.get('bairro', '')}, {d.get('municipio', '')}/{d.get('uf', '')}")
 
-# --- PÁGINA: APURAÇÃO ---
-elif menu == "Nova Apuração":
-    st.header("💰 Lançamentos Mensais")
+        # Lógica de Matriz/Filial
+        conn = get_db_connection()
+        df_matrizes = pd.read_sql("SELECT id, nome FROM empresas WHERE tipo = 'Matriz'", conn)
+        conn.close()
+        
+        matriz_vinculo = None
+        if tipo == "Filial":
+            sel_m = st.selectbox("Selecione a Matriz desta Filial", df_matrizes['nome'] if not df_matrizes.empty else ["Nenhuma Matriz Cadastrada"])
+            if not df_matrizes.empty:
+                matriz_vinculo = int(df_matrizes[df_matrizes['nome'] == sel_m]['id'].values[0])
+
+        if st.form_submit_button("💾 Salvar no Banco de Dados"):
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                sql = "INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, matriz_id, cnae, endereco) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                cursor.execute(sql, (nome_social, nome_fantasia, cnpj_final, regime, tipo, matriz_vinculo, cnae, endereco))
+                conn.commit()
+                conn.close()
+                st.success(f"Unidade {nome_fantasia} cadastrada com sucesso!")
+                st.session_state.dados_cnpj = {} # Limpa após salvar
+            except Exception as e:
+                st.error(f"Erro ao salvar: {e}")
+
+# --- MÓDULO: APURAÇÃO ---
+elif menu == "Apuração Mensal":
+    st.header("💰 Lançamentos de Notas e Operações")
     conn = get_db_connection()
     df_e = pd.read_sql("SELECT * FROM empresas", conn)
     conn.close()
 
     if df_e.empty:
-        st.warning("Cadastre a Matriz primeiro.")
+        st.warning("Cadastre uma empresa primeiro.")
     else:
-        with st.expander("📌 Configuração da Apuração", expanded=True):
-            col_e, col_m, col_a = st.columns([2,1,1])
-            emp_sel = col_e.selectbox("Selecione a Unidade (Matriz ou Filial)", df_e['nome'])
-            mes = col_m.selectbox("Mês", ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"])
-            ano = col_a.selectbox("Ano", ["2025", "2026"])
-            
-            dados_emp = df_e[df_e['nome'] == emp_sel].iloc[0]
-            st.caption(f"CNPJ: {dados_emp['cnpj']} | Regime: {dados_emp['regime']}")
-
-        # OPERAÇÕES NATIVAS (Seus Prints)
-        op_d = ["Venda de Mercadorias", "Receita Financeira", "Serviços Prestados"]
-        op_c = ["Compra Insumos", "Energia", "Diesel/Combustível", "Aluguel PJ", "Fretes"]
+        col_e, col_m, col_a = st.columns([2,1,1])
+        emp_sel = col_e.selectbox("Empresa", df_e['nome'])
+        comp = f"{col_m.selectbox('Mês', ['01','02','03','04','05','06','07','08','09','10','11','12'])}/{col_a.selectbox('Ano', ['2025','2026'])}"
+        
+        dados_e = df_e[df_e['nome'] == emp_sel].iloc[0]
 
         with st.container(border=True):
-            c1, c2, c3 = st.columns([2,1,1])
-            operacao = c1.selectbox("Natureza da Operação", op_d + op_c)
-            valor = c2.number_input("Valor Base (R$)", min_value=0.0, key=f"v_{st.session_state.v_key}")
+            c1, c2, c3 = st.columns([2, 1, 1])
+            ops_deb = ["Venda de Mercadorias", "Receita Financeira", "Serviços"]
+            ops_cre = ["Compra Insumos", "Energia", "Aluguel PJ", "Fretes"]
+            
+            op = c1.selectbox("Operação", ops_deb + ops_cre)
+            val = c2.number_input("Valor R$", min_value=0.0, key=f"v_{st.session_state.v_key}")
+            
             if c3.button("➕ Adicionar"):
-                tipo_op = "Débito" if operacao in op_d else "Crédito"
-                # Regra de Alíquota
-                if "Financeira" in operacao and dados_emp['regime'] == "Lucro Real":
+                tipo_op = "Débito" if op in ops_deb else "Crédito"
+                # Regra PIS/COFINS (Financeira vs Normal)
+                if "Financeira" in op and dados_e['regime'] == "Lucro Real":
                     al_p, al_c = 0.0065, 0.04
-                elif dados_emp['regime'] == "Lucro Real":
+                elif dados_e['regime'] == "Lucro Real":
                     al_p, al_c = 0.0165, 0.076
                 else:
                     al_p, al_c = 0.0065, 0.03
                 
                 st.session_state.itens_memoria.append({
-                    "Unidade": emp_sel, "Operação": operacao, "Base": valor, 
-                    "PIS": valor * al_p, "COF": valor * al_c, "Tipo": tipo_op
+                    "Operação": op, "Base": val, "PIS": val * al_p, "COF": val * al_c, "Tipo": tipo_op
                 })
-                st.session_state.v_key += 1; st.rerun()
+                st.session_state.v_key += 1
+                st.rerun()
 
         if st.session_state.itens_memoria:
-            st.subheader("📋 Resumo da Memória")
-            st.dataframe(pd.DataFrame(st.session_state.itens_memoria), use_container_width=True)
-            
-            if st.button("💾 FINALIZAR E GRAVAR NO UOL"):
+            df_temp = pd.DataFrame(st.session_state.itens_memoria)
+            st.table(df_temp)
+            if st.button("🏁 Finalizar e Salvar"):
                 js = json.dumps(st.session_state.itens_memoria)
-                agora = datetime.now().strftime("%d/%m/%Y %H:%M")
                 conn = get_db_connection()
                 cursor = conn.cursor()
-                cursor.execute("INSERT INTO historico_apuracoes (empresa_id, competencia, detalhamento_json, data_reg) VALUES (%s, %s, %s, %s)", 
-                               (int(dados_emp['id']), f"{mes}/{ano}", js, agora))
+                cursor.execute("INSERT INTO historico_apuracoes (empresa_id, competencia, detalhamento_json, data_reg) VALUES (%s, %s, %s, %s)",
+                               (int(dados_e['id']), comp, js, datetime.now().strftime("%d/%m/%Y %H:%M")))
                 conn.commit(); conn.close()
                 st.session_state.itens_memoria = []
-                st.success("Apuração salva!")
+                st.success("Apuração salva no UOL!")
 
-# --- PÁGINA: INÍCIO ---
 else:
-    st.title("🛡️ Sistema de Apuração Crescere")
-    st.info("Selecione uma opção no menu lateral para começar.")
+    st.subheader("Bem-vindo, Rodrigo!")
+    st.write("Use o menu ao lado para gerenciar a Crescere.")
