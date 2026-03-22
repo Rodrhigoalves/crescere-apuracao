@@ -1,124 +1,146 @@
 import streamlit as st
 import mysql.connector
 import pandas as pd
-import json
 import requests
-from datetime import datetime, date
+from datetime import date
 from fpdf import FPDF
+import io
 
-# --- 1. CONFIGURAÇÕES E ESTADOS ---
-st.set_page_config(page_title="Crescere - Inteligência Contábil", layout="wide")
+# --- CONFIGURAÇÕES ---
+st.set_page_config(page_title="Crescere - PIS/COFINS", layout="wide", page_icon="🛡️")
 
-# Lógica para mês anterior automático
-hoje = date.today()
-mes_anterior_idx = (hoje.month - 2) if hoje.month > 1 else 11
-lista_meses = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
+# Estilo Customizado para Interface Clean
+st.markdown("""
+    <style>
+    .main { background-color: #f5f7f9; }
+    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #004b87; color: white; }
+    .stTextInput>div>div>input { border-radius: 5px; }
+    </style>
+    """, unsafe_allow_html=True)
 
-if 'itens_memoria' not in st.session_state: st.session_state.itens_memoria = []
-if 'v_key' not in st.session_state: st.session_state.v_key = 0
-if 'dados_cnpj' not in st.session_state: st.session_state.dados_cnpj = {}
-if 'edit_emp_id' not in st.session_state: st.session_state.edit_emp_id = None
-
+# --- FUNÇÕES DE NÚCLEO ---
 def get_db_connection():
     return mysql.connector.connect(**st.secrets["mysql"])
 
-def formata_real(valor):
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-# --- 2. CONSULTA CNPJ ---
 def consultar_cnpj(cnpj_limpo):
     url = f"https://receitaws.com.br/v1/cnpj/{cnpj_limpo}"
     try:
-        response = requests.get(url, timeout=15)
-        if response.status_code == 200:
-            return response.json()
+        response = requests.get(url, timeout=10)
+        return response.json() if response.status_code == 200 else None
     except:
-        pass
-    return None
+        return None
 
-# --- 3. INTERFACE ---
+# --- CLASSE DE RELATÓRIO PDF ---
+class PDF_Relatorio(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 12)
+        self.cell(0, 10, 'CRESCERE - RELATÓRIO DE APURAÇÃO FISCAL', 0, 1, 'C')
+        self.set_font('Arial', '', 10)
+        self.cell(0, 5, f'Data de Emissão: {date.today().strftime("%d/%m/%Y")}', 0, 1, 'C')
+        self.ln(10)
+
+# --- ESTADOS DO SISTEMA ---
+if 'dados_form' not in st.session_state:
+    st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": ""}
+
+# --- SIDEBAR NAVEGAÇÃO ---
 with st.sidebar:
     st.title("🛡️ Crescere")
-    menu = st.radio("Navegação", ["Início", "Empresas", "Apuração Mensal", "Relatórios"])
+    st.caption("v1.2 - Inteligência Contábil")
+    menu = st.radio("Módulos", ["Início", "Gestão de Empresas", "Apuração Mensal", "Relatórios & Exportação"])
 
-# --- MÓDULO: EMPRESAS (CADASTRO E EDIÇÃO) ---
-if menu == "Empresas":
-    st.header("🏢 Gestão de Unidades")
+# --- MÓDULO: GESTÃO DE EMPRESAS (CRUD OTIMIZADO) ---
+if menu == "Gestão de Empresas":
+    st.subheader("🏢 Cadastro e Edição de Unidades")
     
-    # Campo de busca para consulta externa
-    with st.expander("🔍 Consultar Novo CNPJ (Receita Federal)", expanded=True):
-        c1, c2 = st.columns([3, 1])
-        cnpj_busca = c1.text_input("Digite o CNPJ para auto-preenchimento")
-        if c2.button("Buscar Dados"):
-            limpo = cnpj_busca.replace(".","").replace("/","").replace("-","")
-            res = consultar_cnpj(limpo)
+    tab_cad, tab_lista = st.tabs(["📝 Formulário", "📋 Unidades Cadastradas"])
+
+    with tab_cad:
+        # Busca CNPJ integrada no topo do form
+        c_busca, c_btn = st.columns([3,1])
+        cnpj_input = c_busca.text_input("Consultar CNPJ para preencher", placeholder="00.000.000/0000-00")
+        if c_btn.button("🔍 Consultar"):
+            res = consultar_cnpj(cnpj_input.replace(".","").replace("/","").replace("-",""))
             if res and res.get('status') != 'ERROR':
-                st.session_state.dados_cnpj = res
-                st.toast("✅ Dados carregados!")
+                st.session_state.dados_form.update({
+                    "nome": res.get('nome', ''),
+                    "fantasia": res.get('fantasia', ''),
+                    "cnpj": res.get('cnpj', ''),
+                    "cnae": res['atividade_principal'][0].get('code', '') if 'atividade_principal' in res else "",
+                    "endereco": f"{res.get('logradouro')}, {res.get('numero')} - {res.get('uf')}"
+                })
+                st.rerun()
             else:
-                st.error("CNPJ não encontrado ou limite de consultas atingido.")
+                st.error("Erro na consulta.")
 
-    # Formulário de Cadastro/Edição
-    with st.form("form_unidade"):
-        d = st.session_state.dados_cnpj
-        col1, col2 = st.columns(2)
-        nome = col1.text_input("Razão Social", value=d.get('nome', ''))
-        fanta = col2.text_input("Nome Fantasia", value=d.get('fantasia', ''))
-        
-        c3, c4, c5 = st.columns([2, 2, 1])
-        cnpj = c3.text_input("CNPJ", value=d.get('cnpj', ''))
-        regime = c4.selectbox("Regime Tributário", ["Lucro Real", "Lucro Presumido"])
-        tipo = c5.selectbox("Tipo", ["Matriz", "Filial"])
-        
-        cnae_val = f"{d['atividade_principal'][0].get('code', '')}" if 'atividade_principal' in d else ""
-        cnae = st.text_input("CNAE Principal", value=cnae_val)
-        
-        end_val = f"{d.get('logradouro','')}, {d.get('numero','')} - {d.get('bairro','')}, {d.get('municipio','')}/{d.get('uf','')}" if 'logradouro' in d else ""
-        endereco = st.text_area("Endereço Completo", value=end_val)
+        # Formulário Unificado (Insert/Update)
+        with st.form("form_empresa", clear_on_submit=False):
+            f = st.session_state.dados_form
+            c1, c2 = st.columns(2)
+            nome = c1.text_input("Razão Social", value=f['nome'])
+            fanta = c2.text_input("Nome Fantasia", value=f['fantasia'])
+            
+            c3, c4, c5 = st.columns([2, 2, 1])
+            cnpj = c3.text_input("CNPJ", value=f['cnpj'])
+            regime = c4.selectbox("Regime Tributário", ["Lucro Real", "Lucro Presumido"], index=0 if f['regime'] == "Lucro Real" else 1)
+            tipo = c5.selectbox("Tipo", ["Matriz", "Filial"], index=0 if f['tipo'] == "Matriz" else 1)
+            
+            cnae = st.text_input("CNAE", value=f['cnae'])
+            endereco = st.text_area("Endereço", value=f['endereco'])
 
-        if st.form_submit_button("💾 Salvar Unidade"):
-            conn = get_db_connection(); cursor = conn.cursor()
-            sql = "INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco) VALUES (%s,%s,%s,%s,%s,%s,%s)"
-            cursor.execute(sql, (nome, fanta, cnpj, regime, tipo, cnae, endereco))
-            conn.commit(); conn.close()
-            st.session_state.dados_cnpj = {}
-            st.success("✅ Unidade salva com sucesso!")
-            st.rerun()
+            if st.form_submit_button("💾 SALVAR ALTERAÇÕES"):
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                if f['id']: # UPDATE
+                    sql = "UPDATE empresas SET nome=%s, fantasia=%s, cnpj=%s, regime=%s, tipo=%s, cnae=%s, endereco=%s WHERE id=%s"
+                    cursor.execute(sql, (nome, fanta, cnpj, regime, tipo, cnae, endereco, f['id']))
+                else: # INSERT
+                    sql = "INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+                    cursor.execute(sql, (nome, fanta, cnpj, regime, tipo, cnae, endereco))
+                
+                conn.commit()
+                conn.close()
+                st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": ""}
+                st.success("Dados processados com sucesso!")
+                st.rerun()
 
-    # Tabela de Edição
-    st.divider()
-    st.subheader("📝 Unidades Cadastradas")
-    conn = get_db_connection()
-    df_lista = pd.read_sql("SELECT id, nome, cnpj, tipo, regime FROM empresas", conn)
-    conn.close()
+    with tab_lista:
+        conn = get_db_connection()
+        df = pd.read_sql("SELECT id, nome, cnpj, regime, tipo, cnae, endereco FROM empresas", conn)
+        conn.close()
+        
+        # Tabela Clean com botões de ação
+        for _, row in df.iterrows():
+            with st.container():
+                col_info, col_btn = st.columns([5, 1])
+                col_info.markdown(f"**{row['nome']}** \n`CNPJ: {row['cnpj']}` | `Regime: {row['regime']}`")
+                if col_btn.button("✏️ Editar", key=f"btn_{row['id']}"):
+                    st.session_state.dados_form = row.to_dict()
+                    st.rerun()
+                st.divider()
+
+# --- MÓDULO: RELATÓRIOS E EXPORTAÇÃO ---
+elif menu == "Relatórios & Exportação":
+    st.subheader("📄 Relatórios e Integração ERP")
     
-    for _, row in df_lista.iterrows():
-        exp = st.expander(f"[{row['tipo'][0]}] {row['nome']}")
-        col_ed1, col_ed2 = exp.columns([4, 1])
-        col_ed1.write(f"CNPJ: {row['cnpj']} | Regime: {row['regime']}")
-        if col_ed2.button("✏️ Editar", key=f"edit_{row['id']}"):
-            st.info("Função de edição em carregamento... (Dados movidos para o formulário)")
-
-# --- MÓDULO: APURAÇÃO ---
-elif menu == "Apuração Mensal":
-    st.header("💰 Lançamentos Mensais")
+    # Exemplo de lógica de exportação
+    c1, c2 = st.columns(2)
     
-    conn = get_db_connection()
-    df_e = pd.read_sql("SELECT id, nome, tipo, regime FROM empresas", conn)
-    conn.close()
+    with c1:
+        st.info("Gerar PDF de Conferência")
+        if st.button("📥 Baixar PDF Profissional"):
+            pdf = PDF_Relatorio()
+            pdf.add_page()
+            pdf.set_font('Arial', '', 12)
+            pdf.cell(0, 10, "Detalhamento de Impostos - Exemplo", 0, 1)
+            # Aqui entraria o loop dos seus dados de apuração
+            
+            pdf_output = pdf.output(dest='S').encode('latin-1')
+            st.download_button("Clique aqui para salvar PDF", data=pdf_output, file_name="apuracao_crescere.pdf", mime="application/pdf")
 
-    if df_e.empty:
-        st.warning("Cadastre uma empresa primeiro.")
-    else:
-        df_e['display'] = df_e.apply(lambda x: f"[{x['tipo'][0]}] {x['nome']}", axis=1)
-        
-        c_emp, c_mes, c_ano = st.columns([2,1,1])
-        emp_sel_display = c_emp.selectbox("Unidade", df_e['display'])
-        emp_id = int(df_e[df_e['display'] == emp_sel_display]['id'].values[0])
-        regime_sel = df_e[df_e['display'] == emp_sel_display]['regime'].values[0]
-        
-        mes_sel = c_mes.selectbox("Mês", lista_meses, index=mes_anterior_idx)
-        ano_sel = c_ano.selectbox("Ano", [2025, 2026, 2027], index=1)
-
-        # ... Lógica de lançamentos (igual à anterior) ...
-        # (Adicionado float() na gravação para evitar erro no MySQL do UOL)
+    with c2:
+        st.success("Exportar para ERP (Layout Genérico)")
+        # Simulação de dados para o ERP
+        df_erp = pd.DataFrame({"CONTA": ["REC.BRUTA", "PIS", "COFINS"], "VALOR": [10000, 165, 760]})
+        csv = df_erp.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Baixar CSV para Importação", data=csv, file_name="import_erp.csv", mime="text/csv")
