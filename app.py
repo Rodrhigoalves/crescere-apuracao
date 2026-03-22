@@ -13,7 +13,7 @@ if 'itens_memoria' not in st.session_state: st.session_state.itens_memoria = []
 if 'v_key' not in st.session_state: st.session_state.v_key = 0
 if 'dados_cnpj' not in st.session_state: st.session_state.dados_cnpj = {}
 
-# --- 2. BANCO DE DADOS (UOL) COM UPGRADE AUTOMÁTICO ---
+# --- 2. BANCO DE DADOS (UOL) ---
 def get_db_connection():
     return mysql.connector.connect(**st.secrets["mysql"])
 
@@ -21,12 +21,18 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # 1. Cria a tabela base se não existir
+    # Criar tabela de empresas se não existir
     cursor.execute('''CREATE TABLE IF NOT EXISTS empresas 
                       (id INT AUTO_INCREMENT PRIMARY KEY, nome VARCHAR(255), cnpj VARCHAR(20))''')
     
-    # 2. ADICIONA COLUNAS NOVAS (Se já existirem, o try/except ignora o erro)
-    colunas = [
+    # Criar tabela de histórico se não existir
+    cursor.execute('''CREATE TABLE IF NOT EXISTS historico_apuracoes (
+        id INT AUTO_INCREMENT PRIMARY KEY, empresa_id INT, competencia VARCHAR(20), 
+        detalhamento_json LONGTEXT, pis_total DECIMAL(15,2), cofins_total DECIMAL(15,2), 
+        data_reg VARCHAR(50), log_reprocessamento TEXT)''')
+
+    # MANDAR O COMANDO DE ALERTA PARA CADA COLUNA (Garante que o banco se atualize)
+    colunas_novas = [
         ("fantasia", "VARCHAR(255)"),
         ("regime", "VARCHAR(50)"),
         ("tipo", "VARCHAR(20)"),
@@ -35,21 +41,16 @@ def init_db():
         ("endereco", "TEXT")
     ]
     
-    for col, tipo in colunas:
+    for col, tipo in colunas_novas:
         try:
             cursor.execute(f"ALTER TABLE empresas ADD COLUMN {col} {tipo}")
         except:
-            pass # Coluna já existe
+            pass # Se a coluna já existir, ele pula
             
-    # Tabela de Histórico
-    cursor.execute('''CREATE TABLE IF NOT EXISTS historico_apuracoes (
-        id INT AUTO_INCREMENT PRIMARY KEY, empresa_id INT, competencia VARCHAR(20), 
-        detalhamento_json LONGTEXT, pis_total DECIMAL(15,2), cofins_total DECIMAL(15,2), 
-        data_reg VARCHAR(50), log_reprocessamento TEXT)''')
-    
     conn.commit()
     conn.close()
 
+# Executa a inicialização logo de cara
 init_db()
 
 # --- 3. CONSULTA CNPJ (ReceitaWS) ---
@@ -59,10 +60,8 @@ def consultar_cnpj(cnpj_limpo):
         response = requests.get(url, timeout=15)
         if response.status_code == 200:
             return response.json()
-        elif response.status_code == 429:
-            st.error("⚠️ Limite atingido. Aguarde 60 segundos.")
     except:
-        st.error("Erro na conexão com a Receita.")
+        pass
     return None
 
 # --- 4. INTERFACE ---
@@ -82,7 +81,9 @@ if menu == "Cadastro de Unidades":
             info = consultar_cnpj(limpo)
             if info and info.get('status') != 'ERROR':
                 st.session_state.dados_cnpj = info
-                st.toast("✅ Dados carregados!")
+                st.toast("✅ Dados importados da Receita!")
+            else:
+                st.error("Limite da Receita atingido. Tente em 1 minuto.")
 
     with st.form("cad_final"):
         d = st.session_state.dados_cnpj
@@ -109,7 +110,7 @@ if menu == "Cadastro de Unidades":
             conn.commit()
             conn.close()
             st.session_state.dados_cnpj = {}
-            st.success("✅ Empresa salva no UOL!")
+            st.success("✅ Empresa salva no UOL com sucesso!")
             st.rerun()
 
 # --- MÓDULO: APURAÇÃO ---
@@ -129,6 +130,7 @@ elif menu == "Apuração Mensal":
             col1, col2, col3 = st.columns([2,1,1])
             op = col1.selectbox("Operação", ["Venda Mercadorias", "Receita Financeira", "Compra Insumos", "Energia"])
             val = col2.number_input("Valor R$", min_value=0.0, key=f"v_{st.session_state.v_key}")
+            
             if col3.button("➕ Inserir"):
                 tp = "Débito" if "Venda" in op or "Receita" in op else "Crédito"
                 al_p, al_c = (0.0065, 0.04) if "Financeira" in op else (0.0165, 0.076) if dados_e['regime'] == "Lucro Real" else (0.0065, 0.03)
@@ -138,10 +140,9 @@ elif menu == "Apuração Mensal":
 
         if st.session_state.itens_memoria:
             st.table(pd.DataFrame(st.session_state.itens_memoria))
-            if st.button("💾 Gravar Apuração"):
-                # Lógica de salvar...
-                st.success("Salvo no UOL!")
+            if st.button("💾 Gravar no UOL"):
+                st.success("Pronto para gravar!")
 
 else:
-    st.title("🛡️ Crescere")
-    st.write("Aguardando comandos...")
+    st.title("🛡️ Sistema Crescere")
+    st.info("Utilize o menu lateral para navegar.")
