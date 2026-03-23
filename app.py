@@ -10,7 +10,7 @@ DIA_CORTE_RETROATIVO = 25
 
 
 # 
-# UTILITÁRIOS GERAIS
+# UTILITÁRIOS
 # 
 
 def agora_str() -> str:
@@ -19,47 +19,6 @@ def agora_str() -> str:
 
 def hoje_str() -> str:
     return date.today().strftime("%Y-%m-%d")
-
-
-def normalizar_competencia(comp: str) -> str:
-    """
-    Aceita formatos simples como:
-    - 2026-03
-    - 03/2026
-    Retorna sempre YYYY-MM
-    """
-    comp = comp.strip()
-    if "/" in comp:
-        mes, ano = comp.split("/")
-        return f"{ano}-{mes.zfill(2)}"
-    if len(comp) == 7 and "-" in comp:
-        return comp
-    raise ValueError(f"Competência inválida: {comp}")
-
-
-def primeiro_dia_competencia(comp: str) -> str:
-    comp = normalizar_competencia(comp)
-    return f"{comp}-01"
-
-
-def competencia_anterior(comp: str) -> str:
-    comp = normalizar_competencia(comp)
-    ano, mes = map(int, comp.split("-"))
-    if mes == 1:
-        return f"{ano - 1}-12"
-    return f"{ano}-{str(mes - 1).zfill(2)}"
-
-
-def competencia_posterior(comp: str) -> str:
-    comp = normalizar_competencia(comp)
-    ano, mes = map(int, comp.split("-"))
-    if mes == 12:
-        return f"{ano + 1}-01"
-    return f"{ano}-{str(mes + 1).zfill(2)}"
-
-
-def parse_data(data_str: str) -> date:
-    return datetime.strptime(data_str, "%Y-%m-%d").date()
 
 
 def json_dumps(data: Any) -> str:
@@ -74,8 +33,61 @@ def hash_senha(senha: str, salt: str) -> str:
     return hashlib.sha256((senha + salt).encode("utf-8")).hexdigest()
 
 
+def normalizar_competencia(comp: str) -> str:
+    """
+    Aceita:
+    - YYYY-MM
+    - MM/YYYY
+    Retorna sempre YYYY-MM
+    """
+    comp = comp.strip()
+
+    if "/" in comp:
+        mes, ano = comp.split("/")
+        mes = mes.zfill(2)
+        if len(ano) != 4:
+            raise ValueError(f"Competência inválida: {comp}")
+        return f"{ano}-{mes}"
+
+    if "-" in comp and len(comp) == 7:
+        ano, mes = comp.split("-")
+        if len(ano) != 4:
+            raise ValueError(f"Competência inválida: {comp}")
+        return f"{ano}-{mes.zfill(2)}"
+
+    raise ValueError(f"Competência inválida: {comp}")
+
+
+def competencia_anterior(comp: str) -> str:
+    comp = normalizar_competencia(comp)
+    ano, mes = map(int, comp.split("-"))
+
+    if mes == 1:
+        return f"{ano - 1}-12"
+    return f"{ano}-{str(mes - 1).zfill(2)}"
+
+
+def competencia_posterior(comp: str) -> str:
+    comp = normalizar_competencia(comp)
+    ano, mes = map(int, comp.split("-"))
+
+    if mes == 12:
+        return f"{ano + 1}-01"
+    return f"{ano}-{str(mes + 1).zfill(2)}"
+
+
+def parse_data(data_str: str) -> date:
+    return datetime.strptime(data_str, "%Y-%m-%d").date()
+
+
+def to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+    if row is None:
+        return None
+    return dict(row)
+
+
 # 
-# BANCO DE DADOS E MIGRAÇÃO SEGURA
+# BANCO DE DADOS
 # 
 
 class Database:
@@ -88,6 +100,11 @@ class Database:
     def execute(self, sql: str, params: Tuple = ()) -> sqlite3.Cursor:
         cur = self.conn.cursor()
         cur.execute(sql, params)
+        return cur
+
+    def executemany(self, sql: str, seq_of_params):
+        cur = self.conn.cursor()
+        cur.executemany(sql, seq_of_params)
         return cur
 
     def commit(self):
@@ -122,28 +139,30 @@ class Database:
             self.commit()
 
     def create_index_if_not_exists(self, index_name: str, table_name: str, columns: str):
-        self.execute(
-            f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({columns})"
-        )
+        self.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({columns})")
         self.commit()
 
+
+# 
+# MIGRAÇÃO INCREMENTAL SEGURA
+# 
 
 class Migrator:
     def __init__(self, db: Database):
         self.db = db
 
     def migrate(self):
-        self._criar_tabela_usuarios()
-        self._criar_tabela_empresas()
-        self._criar_tabela_operacoes()
-        self._criar_tabela_mapeamentos_erp()
-        self._criar_tabela_lancamentos()
-        self._criar_tabela_fechamentos()
-        self._criar_tabela_auditoria()
-        self._criar_tabela_custos()
+        self._migrar_usuarios()
+        self._migrar_empresas()
+        self._migrar_operacoes()
+        self._migrar_mapeamentos_erp()
+        self._migrar_lancamentos()
+        self._migrar_fechamentos()
+        self._migrar_auditoria()
+        self._migrar_custos()
         self._criar_indices()
 
-    def _criar_tabela_usuarios(self):
+    def _migrar_usuarios(self):
         if not self.db.table_exists("usuarios"):
             self.db.execute("""
                 CREATE TABLE usuarios (
@@ -160,13 +179,19 @@ class Migrator:
             """)
             self.db.commit()
         else:
-            self.db.add_column_if_not_exists("usuarios", "nome TEXT")
-            self.db.add_column_if_not_exists("usuarios", "perfil TEXT DEFAULT 'operador'")
-            self.db.add_column_if_not_exists("usuarios", "ativo INTEGER NOT NULL DEFAULT 1")
-            self.db.add_column_if_not_exists("usuarios", "created_at TEXT")
-            self.db.add_column_if_not_exists("usuarios", "updated_at TEXT")
+            cols = [
+                "nome TEXT",
+                "password_hash TEXT",
+                "salt TEXT",
+                "perfil TEXT DEFAULT 'operador'",
+                "ativo INTEGER NOT NULL DEFAULT 1",
+                "created_at TEXT",
+                "updated_at TEXT",
+            ]
+            for c in cols:
+                self.db.add_column_if_not_exists("usuarios", c)
 
-    def _criar_tabela_empresas(self):
+    def _migrar_empresas(self):
         if not self.db.table_exists("empresas"):
             self.db.execute("""
                 CREATE TABLE empresas (
@@ -174,8 +199,8 @@ class Migrator:
                     nome TEXT NOT NULL,
                     cnpj TEXT,
                     regime_tributario TEXT DEFAULT 'Lucro Real',
-                    tipo_empresa TEXT, -- comercio, servico, industria
-                    tipo_estabelecimento TEXT, -- matriz, filial
+                    tipo_empresa TEXT,
+                    tipo_estabelecimento TEXT,
                     grupo_empresarial TEXT,
                     empresa_matriz_id INTEGER,
                     cnae TEXT,
@@ -188,7 +213,7 @@ class Migrator:
             """)
             self.db.commit()
         else:
-            colunas = [
+            cols = [
                 "cnpj TEXT",
                 "regime_tributario TEXT DEFAULT 'Lucro Real'",
                 "tipo_empresa TEXT",
@@ -201,16 +226,16 @@ class Migrator:
                 "created_at TEXT",
                 "updated_at TEXT",
             ]
-            for c in colunas:
+            for c in cols:
                 self.db.add_column_if_not_exists("empresas", c)
 
-    def _criar_tabela_operacoes(self):
+    def _migrar_operacoes(self):
         if not self.db.table_exists("operacoes"):
             self.db.execute("""
                 CREATE TABLE operacoes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     nome TEXT NOT NULL,
-                    natureza TEXT NOT NULL, -- debito, credito
+                    natureza TEXT NOT NULL,
                     categoria_fiscal TEXT,
                     receita_financeira INTEGER NOT NULL DEFAULT 0,
                     ativo INTEGER NOT NULL DEFAULT 1,
@@ -220,7 +245,7 @@ class Migrator:
             """)
             self.db.commit()
         else:
-            colunas = [
+            cols = [
                 "nome TEXT",
                 "natureza TEXT",
                 "categoria_fiscal TEXT",
@@ -229,10 +254,10 @@ class Migrator:
                 "created_at TEXT",
                 "updated_at TEXT",
             ]
-            for c in colunas:
+            for c in cols:
                 self.db.add_column_if_not_exists("operacoes", c)
 
-    def _criar_tabela_mapeamentos_erp(self):
+    def _migrar_mapeamentos_erp(self):
         if not self.db.table_exists("mapeamentos_erp"):
             self.db.execute("""
                 CREATE TABLE mapeamentos_erp (
@@ -249,7 +274,7 @@ class Migrator:
             """)
             self.db.commit()
         else:
-            colunas = [
+            cols = [
                 "tipo_lancamento TEXT",
                 "conta_debito TEXT",
                 "conta_credito TEXT",
@@ -259,35 +284,32 @@ class Migrator:
                 "created_at TEXT",
                 "updated_at TEXT",
             ]
-            for c in colunas:
+            for c in cols:
                 self.db.add_column_if_not_exists("mapeamentos_erp", c)
 
-    def _criar_tabela_lancamentos(self):
+    def _migrar_lancamentos(self):
         if not self.db.table_exists("lancamentos"):
             self.db.execute("""
                 CREATE TABLE lancamentos (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     empresa_id INTEGER NOT NULL,
                     operacao_id INTEGER NOT NULL,
-                    competencia TEXT NOT NULL, -- YYYY-MM
+                    competencia TEXT NOT NULL,
                     valor_base REAL NOT NULL,
-                    natureza TEXT NOT NULL, -- debito, credito
+                    natureza TEXT NOT NULL,
                     pis_individual REAL NOT NULL DEFAULT 0,
                     cofins_individual REAL NOT NULL DEFAULT 0,
                     observacao TEXT,
-
                     origem_retroativa INTEGER NOT NULL DEFAULT 0,
                     competencia_origem TEXT,
                     data_apresentacao TEXT,
                     competencia_aproveitamento TEXT,
                     aproveitado_em_competencia TEXT,
                     status TEXT DEFAULT 'disponivel',
-
                     created_by INTEGER,
                     created_at TEXT,
                     updated_by INTEGER,
                     updated_at TEXT,
-
                     FOREIGN KEY (empresa_id) REFERENCES empresas(id),
                     FOREIGN KEY (operacao_id) REFERENCES operacoes(id),
                     FOREIGN KEY (created_by) REFERENCES usuarios(id),
@@ -296,7 +318,7 @@ class Migrator:
             """)
             self.db.commit()
         else:
-            colunas = [
+            cols = [
                 "empresa_id INTEGER",
                 "operacao_id INTEGER",
                 "competencia TEXT",
@@ -316,10 +338,10 @@ class Migrator:
                 "updated_by INTEGER",
                 "updated_at TEXT",
             ]
-            for c in colunas:
+            for c in cols:
                 self.db.add_column_if_not_exists("lancamentos", c)
 
-    def _criar_tabela_fechamentos(self):
+    def _migrar_fechamentos(self):
         if not self.db.table_exists("fechamentos"):
             self.db.execute("""
                 CREATE TABLE fechamentos (
@@ -332,25 +354,20 @@ class Migrator:
                     credito_retroativo_pis REAL NOT NULL DEFAULT 0,
                     resultado_pis REAL NOT NULL DEFAULT 0,
                     saldo_transportar_pis REAL NOT NULL DEFAULT 0,
-
                     total_debito_cofins REAL NOT NULL DEFAULT 0,
                     total_credito_cofins REAL NOT NULL DEFAULT 0,
                     saldo_anterior_cofins REAL NOT NULL DEFAULT 0,
                     credito_retroativo_cofins REAL NOT NULL DEFAULT 0,
                     resultado_cofins REAL NOT NULL DEFAULT 0,
                     saldo_transportar_cofins REAL NOT NULL DEFAULT 0,
-
-                    status TEXT NOT NULL DEFAULT 'aberto', -- aberto, fechado, reaberto
+                    status TEXT NOT NULL DEFAULT 'aberto',
                     observacao TEXT,
-
                     fechado_por INTEGER,
                     fechado_em TEXT,
                     reaberto_por INTEGER,
                     reaberto_em TEXT,
-
                     created_at TEXT,
                     updated_at TEXT,
-
                     FOREIGN KEY (empresa_id) REFERENCES empresas(id),
                     FOREIGN KEY (fechado_por) REFERENCES usuarios(id),
                     FOREIGN KEY (reaberto_por) REFERENCES usuarios(id),
@@ -359,7 +376,7 @@ class Migrator:
             """)
             self.db.commit()
         else:
-            colunas = [
+            cols = [
                 "total_debito_pis REAL NOT NULL DEFAULT 0",
                 "total_credito_pis REAL NOT NULL DEFAULT 0",
                 "saldo_anterior_pis REAL NOT NULL DEFAULT 0",
@@ -381,10 +398,10 @@ class Migrator:
                 "created_at TEXT",
                 "updated_at TEXT",
             ]
-            for c in colunas:
+            for c in cols:
                 self.db.add_column_if_not_exists("fechamentos", c)
 
-    def _criar_tabela_auditoria(self):
+    def _migrar_auditoria(self):
         if not self.db.table_exists("auditoria"):
             self.db.execute("""
                 CREATE TABLE auditoria (
@@ -403,14 +420,14 @@ class Migrator:
             """)
             self.db.commit()
 
-    def _criar_tabela_custos(self):
+    def _migrar_custos(self):
         if not self.db.table_exists("custos"):
             self.db.execute("""
                 CREATE TABLE custos (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     empresa_id INTEGER NOT NULL,
                     competencia TEXT NOT NULL,
-                    tipo_custo TEXT NOT NULL, -- CPV, CMV, CSV
+                    tipo_custo TEXT NOT NULL,
                     valor_bruto REAL NOT NULL,
                     pis_custo REAL NOT NULL DEFAULT 0,
                     cofins_custo REAL NOT NULL DEFAULT 0,
@@ -431,7 +448,7 @@ class Migrator:
         self.db.create_index_if_not_exists("idx_lanc_empresa_comp", "lancamentos", "empresa_id, competencia")
         self.db.create_index_if_not_exists("idx_lanc_comp_aprov", "lancamentos", "competencia_aproveitamento")
         self.db.create_index_if_not_exists("idx_fech_empresa_comp", "fechamentos", "empresa_id, competencia")
-        self.db.create_index_if_not_exists("idx_auditoria_comp", "auditoria", "competencia")
+        self.db.create_index_if_not_exists("idx_aud_comp", "auditoria", "competencia")
 
 
 # 
@@ -450,8 +467,8 @@ class AuditoriaService:
         registro_id: Optional[int],
         competencia: Optional[str],
         motivo: Optional[str],
-        antes: Optional[Dict],
-        depois: Optional[Dict],
+        antes: Optional[Dict[str, Any]],
+        depois: Optional[Dict[str, Any]],
     ):
         self.db.execute("""
             INSERT INTO auditoria (
@@ -460,8 +477,13 @@ class AuditoriaService:
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            usuario_id, acao, entidade, registro_id, competencia,
-            motivo, json_dumps(antes) if antes else None,
+            usuario_id,
+            acao,
+            entidade,
+            registro_id,
+            competencia,
+            motivo,
+            json_dumps(antes) if antes else None,
             json_dumps(depois) if depois else None,
             agora_str()
         ))
@@ -476,20 +498,25 @@ class AuthService:
     def __init__(self, db: Database):
         self.db = db
 
+    def buscar_usuario_por_username(self, username: str) -> Optional[sqlite3.Row]:
+        cur = self.db.execute("SELECT * FROM usuarios WHERE username = ?", (username,))
+        return cur.fetchone()
+
     def criar_usuario(self, username: str, senha: str, perfil: str = "operador", nome: str = "") -> int:
+        if perfil not in ("admin", "operador", "consulta"):
+            raise ValueError("Perfil inválido.")
+
         salt = gerar_salt()
         senha_hash = hash_senha(senha, salt)
 
         cur = self.db.execute("""
-            INSERT INTO usuarios (username, nome, password_hash, salt, perfil, ativo, created_at, updated_at)
+            INSERT INTO usuarios (
+                username, nome, password_hash, salt, perfil, ativo, created_at, updated_at
+            )
             VALUES (?, ?, ?, ?, ?, 1, ?, ?)
         """, (username, nome, senha_hash, salt, perfil, agora_str(), agora_str()))
         self.db.commit()
         return cur.lastrowid
-
-    def buscar_usuario_por_username(self, username: str) -> Optional[sqlite3.Row]:
-        cur = self.db.execute("SELECT * FROM usuarios WHERE username = ?", (username,))
-        return cur.fetchone()
 
     def autenticar(self, username: str, senha: str) -> Optional[sqlite3.Row]:
         user = self.buscar_usuario_por_username(username)
@@ -504,10 +531,9 @@ class AuthService:
 
     def garantir_admin_padrao(self):
         user = self.buscar_usuario_por_username("admin")
-        if user:
-            return
-        self.criar_usuario("admin", "admin123", perfil="admin", nome="Administrador")
-        print("Usuário admin criado com senha padrão: admin123")
+        if not user:
+            self.criar_usuario("admin", "admin123", perfil="admin", nome="Administrador")
+            print("Usuário admin criado com senha padrão: admin123")
 
 
 # 
@@ -531,6 +557,11 @@ class EmpresaService:
         descricao_cnae: str = "",
         ativo: int = 1
     ) -> int:
+        if tipo_empresa not in ("comercio", "servico", "industria"):
+            raise ValueError("tipo_empresa inválido.")
+        if tipo_estabelecimento not in ("matriz", "filial"):
+            raise ValueError("tipo_estabelecimento inválido.")
+
         cur = self.db.execute("""
             INSERT INTO empresas (
                 nome, cnpj, regime_tributario, tipo_empresa, tipo_estabelecimento,
@@ -550,6 +581,10 @@ class EmpresaService:
         cur = self.db.execute("SELECT * FROM empresas WHERE id = ?", (empresa_id,))
         return cur.fetchone()
 
+    def listar_empresas(self) -> List[sqlite3.Row]:
+        cur = self.db.execute("SELECT * FROM empresas ORDER BY id")
+        return cur.fetchall()
+
 
 # 
 # OPERAÇÕES
@@ -567,10 +602,12 @@ class OperacaoService:
         receita_financeira: int = 0,
         ativo: int = 1
     ) -> int:
+        if natureza not in ("debito", "credito"):
+            raise ValueError("natureza inválida.")
+
         cur = self.db.execute("""
             INSERT INTO operacoes (
-                nome, natureza, categoria_fiscal, receita_financeira,
-                ativo, created_at, updated_at
+                nome, natureza, categoria_fiscal, receita_financeira, ativo, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
@@ -584,9 +621,13 @@ class OperacaoService:
         cur = self.db.execute("SELECT * FROM operacoes WHERE id = ?", (operacao_id,))
         return cur.fetchone()
 
+    def listar_operacoes(self) -> List[sqlite3.Row]:
+        cur = self.db.execute("SELECT * FROM operacoes ORDER BY id")
+        return cur.fetchall()
+
 
 # 
-# ERP - BASE DE MAPEAMENTO
+# MAPEAMENTO ERP
 # 
 
 class ERPService:
@@ -622,7 +663,6 @@ class ERPService:
 class RegraFiscalService:
     ALIQ_PIS = 0.0165
     ALIQ_COFINS = 0.076
-
     ALIQ_PIS_FIN = 0.0065
     ALIQ_COFINS_FIN = 0.04
 
@@ -637,7 +677,7 @@ class RegraFiscalService:
         """
         Regra:
         - Se apresentada antes do dia de corte, aproveita na competência anterior ao mês da apresentação.
-        - Se apresentada no dia de corte ou depois, aproveita na competência do próprio mês da apresentação.
+        - Se apresentada no dia de corte ou depois, aproveita na própria competência do mês da apresentação.
         """
         d = parse_data(data_apresentacao)
         comp_apresentacao = f"{d.year}-{str(d.month).zfill(2)}"
@@ -648,7 +688,7 @@ class RegraFiscalService:
 
 
 # 
-# FECHAMENTO / STATUS
+# FECHAMENTOS
 # 
 
 class FechamentoService:
@@ -675,7 +715,10 @@ class FechamentoService:
         fechamento_ant = self.buscar_fechamento(empresa_id, comp_ant)
         if not fechamento_ant:
             return 0.0, 0.0
-        return fechamento_ant["saldo_transportar_pis"], fechamento_ant["saldo_transportar_cofins"]
+        return (
+            round(fechamento_ant["saldo_transportar_pis"] or 0, 2),
+            round(fechamento_ant["saldo_transportar_cofins"] or 0, 2),
+        )
 
     def fechar_competencia(self, empresa_id: int, competencia: str, usuario_id: int, observacao: str = "") -> int:
         competencia = normalizar_competencia(competencia)
@@ -719,25 +762,49 @@ class FechamentoService:
         saldo_transportar_pis = abs(resultado_pis) if resultado_pis &lt; 0 else 0.0
         saldo_transportar_cofins = abs(resultado_cofins) if resultado_cofins &lt; 0 else 0.0
 
-        antes = None
         existente = self.buscar_fechamento(empresa_id, competencia)
+        antes = to_dict(existente)
+
         if existente:
-            antes = dict(existente)
             self.db.execute("""
                 UPDATE fechamentos
-                SET total_debito_pis = ?, total_credito_pis = ?, saldo_anterior_pis = ?, credito_retroativo_pis = ?,
-                    resultado_pis = ?, saldo_transportar_pis = ?,
-                    total_debito_cofins = ?, total_credito_cofins = ?, saldo_anterior_cofins = ?, credito_retroativo_cofins = ?,
-                    resultado_cofins = ?, saldo_transportar_cofins = ?,
-                    status = 'fechado', observacao = ?, fechado_por = ?, fechado_em = ?, updated_at = ?
+                SET total_debito_pis = ?,
+                    total_credito_pis = ?,
+                    saldo_anterior_pis = ?,
+                    credito_retroativo_pis = ?,
+                    resultado_pis = ?,
+                    saldo_transportar_pis = ?,
+                    total_debito_cofins = ?,
+                    total_credito_cofins = ?,
+                    saldo_anterior_cofins = ?,
+                    credito_retroativo_cofins = ?,
+                    resultado_cofins = ?,
+                    saldo_transportar_cofins = ?,
+                    status = 'fechado',
+                    observacao = ?,
+                    fechado_por = ?,
+                    fechado_em = ?,
+                    updated_at = ?
                 WHERE empresa_id = ? AND competencia = ?
             """, (
-                total_debito_pis, total_credito_pis, saldo_ant_pis, credito_retro_pis,
-                resultado_pis, saldo_transportar_pis,
-                total_debito_cofins, total_credito_cofins, saldo_ant_cofins, credito_retro_cofins,
-                resultado_cofins, saldo_transportar_cofins,
-                observacao, usuario_id, agora_str(), agora_str(),
-                empresa_id, competencia
+                total_debito_pis,
+                total_credito_pis,
+                saldo_ant_pis,
+                credito_retro_pis,
+                resultado_pis,
+                saldo_transportar_pis,
+                total_debito_cofins,
+                total_credito_cofins,
+                saldo_ant_cofins,
+                credito_retro_cofins,
+                resultado_cofins,
+                saldo_transportar_cofins,
+                observacao,
+                usuario_id,
+                agora_str(),
+                agora_str(),
+                empresa_id,
+                competencia
             ))
             fechamento_id = existente["id"]
         else:
@@ -750,25 +817,49 @@ class FechamentoService:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'fechado', ?, ?, ?, ?, ?)
             """, (
-                empresa_id, competencia,
-                total_debito_pis, total_credito_pis, saldo_ant_pis, credito_retro_pis, resultado_pis, saldo_transportar_pis,
-                total_debito_cofins, total_credito_cofins, saldo_ant_cofins, credito_retro_cofins, resultado_cofins, saldo_transportar_cofins,
-                observacao, usuario_id, agora_str(), agora_str(), agora_str()
+                empresa_id,
+                competencia,
+                total_debito_pis,
+                total_credito_pis,
+                saldo_ant_pis,
+                credito_retro_pis,
+                resultado_pis,
+                saldo_transportar_pis,
+                total_debito_cofins,
+                total_credito_cofins,
+                saldo_ant_cofins,
+                credito_retro_cofins,
+                resultado_cofins,
+                saldo_transportar_cofins,
+                observacao,
+                usuario_id,
+                agora_str(),
+                agora_str(),
+                agora_str()
             ))
             fechamento_id = cur2.lastrowid
 
         self.db.execute("""
             UPDATE lancamentos
-            SET status = 'aproveitado', aproveitado_em_competencia = ?, updated_at = ?, updated_by = ?
+            SET status = 'aproveitado',
+                aproveitado_em_competencia = ?,
+                updated_at = ?,
+                updated_by = ?
             WHERE empresa_id = ?
               AND origem_retroativa = 1
               AND competencia_aproveitamento = ?
               AND (aproveitado_em_competencia IS NULL OR aproveitado_em_competencia = '')
-        """, (competencia, agora_str(), usuario_id, empresa_id, competencia))
+        """, (
+            competencia,
+            agora_str(),
+            usuario_id,
+            empresa_id,
+            competencia
+        ))
 
         self.db.commit()
 
-        depois = dict(self.buscar_fechamento(empresa_id, competencia))
+        depois = to_dict(self.buscar_fechamento(empresa_id, competencia))
         self.auditoria.registrar(
             usuario_id=usuario_id,
             acao="FECHAR_COMPETENCIA",
@@ -783,14 +874,16 @@ class FechamentoService:
         return fechamento_id
 
     def reabrir_competencia(self, empresa_id: int, competencia: str, usuario_id: int, motivo: str):
+        competencia = normalizar_competencia(competencia)
+
         if not motivo.strip():
             raise ValueError("Motivo é obrigatório para reabrir competência.")
 
         fechamento = self.buscar_fechamento(empresa_id, competencia)
         if not fechamento:
-            raise ValueError("Competência ainda não possui fechamento.")
+            raise ValueError("Competência não possui fechamento.")
 
-        antes = dict(fechamento)
+        antes = to_dict(fechamento)
 
         self.db.execute("""
             UPDATE fechamentos
@@ -799,11 +892,16 @@ class FechamentoService:
                 reaberto_em = ?,
                 updated_at = ?
             WHERE empresa_id = ? AND competencia = ?
-        """, (usuario_id, agora_str(), agora_str(), empresa_id, normalizar_competencia(competencia)))
-
+        """, (
+            usuario_id,
+            agora_str(),
+            agora_str(),
+            empresa_id,
+            competencia
+        ))
         self.db.commit()
 
-        depois = dict(self.buscar_fechamento(empresa_id, competencia))
+        depois = to_dict(self.buscar_fechamento(empresa_id, competencia))
         self.auditoria.registrar(
             usuario_id=usuario_id,
             acao="REABRIR_COMPETENCIA",
@@ -826,6 +924,10 @@ class LancamentoService:
         self.auditoria = auditoria
         self.fechamento_service = fechamento_service
 
+    def buscar_lancamento(self, lancamento_id: int) -> Optional[sqlite3.Row]:
+        cur = self.db.execute("SELECT * FROM lancamentos WHERE id = ?", (lancamento_id,))
+        return cur.fetchone()
+
     def criar_lancamento(
         self,
         empresa_id: int,
@@ -842,9 +944,12 @@ class LancamentoService:
     ) -> int:
         competencia = normalizar_competencia(competencia)
 
+        if valor_base &lt;= 0:
+            raise ValueError("valor_base deve ser maior que zero.")
+
         if self.fechamento_service.competencia_fechada(empresa_id, competencia):
             if not motivo_edicao_mes_fechado.strip():
-                raise ValueError("Alteração em mês já fechado exige motivo obrigatório.")
+                raise ValueError("Alteração em competência fechada exige motivo obrigatório.")
 
         operacao = self.db.execute("SELECT * FROM operacoes WHERE id = ?", (operacao_id,)).fetchone()
         if not operacao:
@@ -855,20 +960,22 @@ class LancamentoService:
 
         pis, cofins = RegraFiscalService.calcular_pis_cofins(valor_base, receita_financeira)
 
-        status = "disponivel"
+        status = "normal"
         comp_aprov = competencia_aproveitamento
+        comp_origem = competencia_origem
 
         if origem_retroativa:
-            if not competencia_origem:
+            status = "disponivel"
+
+            if not comp_origem:
                 raise ValueError("Crédito retroativo exige competencia_origem.")
             if not data_apresentacao:
                 raise ValueError("Crédito retroativo exige data_apresentacao.")
-            competencia_origem = normalizar_competencia(competencia_origem)
+
+            comp_origem = normalizar_competencia(comp_origem)
 
             if not comp_aprov:
                 comp_aprov = RegraFiscalService.determinar_competencia_aproveitamento(data_apresentacao)
-
-            status = "disponivel"
 
         cur = self.db.execute("""
             INSERT INTO lancamentos (
@@ -880,16 +987,29 @@ class LancamentoService:
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            empresa_id, operacao_id, competencia, round(valor_base, 2), natureza,
-            pis, cofins, observacao,
-            origem_retroativa, competencia_origem, data_apresentacao,
-            comp_aprov, None, status,
-            usuario_id, agora_str(), usuario_id, agora_str()
+            empresa_id,
+            operacao_id,
+            competencia,
+            round(valor_base, 2),
+            natureza,
+            pis,
+            cofins,
+            observacao,
+            origem_retroativa,
+            comp_origem,
+            data_apresentacao,
+            comp_aprov,
+            None,
+            status,
+            usuario_id,
+            agora_str(),
+            usuario_id,
+            agora_str()
         ))
         self.db.commit()
 
         lancamento_id = cur.lastrowid
-        depois = self.buscar_lancamento(lancamento_id)
+        depois = to_dict(self.buscar_lancamento(lancamento_id))
 
         self.auditoria.registrar(
             usuario_id=usuario_id,
@@ -899,23 +1019,20 @@ class LancamentoService:
             competencia=competencia,
             motivo=motivo_edicao_mes_fechado if motivo_edicao_mes_fechado else observacao,
             antes=None,
-            depois=dict(depois) if depois else None
+            depois=depois
         )
 
         return lancamento_id
 
-    def buscar_lancamento(self, lancamento_id: int) -> Optional[sqlite3.Row]:
-        cur = self.db.execute("SELECT * FROM lancamentos WHERE id = ?", (lancamento_id,))
-        return cur.fetchone()
-
     def listar_lancamentos_por_competencia(self, empresa_id: int, competencia: str) -> List[sqlite3.Row]:
+        competencia = normalizar_competencia(competencia)
         cur = self.db.execute("""
             SELECT l.*, o.nome AS operacao_nome
             FROM lancamentos l
             JOIN operacoes o ON o.id = l.operacao_id
             WHERE l.empresa_id = ? AND l.competencia = ?
             ORDER BY l.id
-        """, (empresa_id, normalizar_competencia(competencia)))
+        """, (empresa_id, competencia))
         return cur.fetchall()
 
 
@@ -928,14 +1045,14 @@ class CustoService:
         self.db = db
         self.auditoria = auditoria
 
-    def _tipo_custo_por_empresa(self, tipo_empresa: str) -> str:
+    def tipo_custo_por_tipo_empresa(self, tipo_empresa: str) -> str:
         mapa = {
             "industria": "CPV",
             "comercio": "CMV",
             "servico": "CSV",
         }
         if tipo_empresa not in mapa:
-            raise ValueError("tipo_empresa inválido para cálculo de custo.")
+            raise ValueError("tipo_empresa inválido.")
         return mapa[tipo_empresa]
 
     def calcular_e_registrar_custo(
@@ -946,12 +1063,14 @@ class CustoService:
         observacao: str,
         usuario_id: int
     ) -> int:
+        if valor_bruto &lt;= 0:
+            raise ValueError("valor_bruto deve ser maior que zero.")
+
         empresa = self.db.execute("SELECT * FROM empresas WHERE id = ?", (empresa_id,)).fetchone()
         if not empresa:
             raise ValueError("Empresa não encontrada.")
 
-        tipo_custo = self._tipo_custo_por_empresa(empresa["tipo_empresa"])
-
+        tipo_custo = self.tipo_custo_por_tipo_empresa(empresa["tipo_empresa"])
         pis_custo, cofins_custo = RegraFiscalService.calcular_pis_cofins(valor_bruto, receita_financeira=False)
         valor_liquido = round(valor_bruto - pis_custo - cofins_custo, 2)
 
@@ -963,9 +1082,18 @@ class CustoService:
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            empresa_id, normalizar_competencia(competencia), tipo_custo, round(valor_bruto, 2),
-            pis_custo, cofins_custo, valor_liquido,
-            observacao, usuario_id, agora_str(), usuario_id, agora_str()
+            empresa_id,
+            normalizar_competencia(competencia),
+            tipo_custo,
+            round(valor_bruto, 2),
+            pis_custo,
+            cofins_custo,
+            valor_liquido,
+            observacao,
+            usuario_id,
+            agora_str(),
+            usuario_id,
+            agora_str()
         ))
         self.db.commit()
 
@@ -980,14 +1108,14 @@ class CustoService:
             competencia=competencia,
             motivo=observacao,
             antes=None,
-            depois=dict(custo) if custo else None
+            depois=to_dict(custo)
         )
 
         return custo_id
 
 
 # 
-# RELATÓRIOS SIMPLES DE CONSOLE
+# RELATÓRIOS SIMPLES
 # 
 
 class RelatorioService:
@@ -1023,12 +1151,12 @@ class RelatorioService:
             "pis_credito": round((row["pis_credito"] or 0), 2),
             "cofins_debito": round((row["cofins_debito"] or 0), 2),
             "cofins_credito": round((row["cofins_credito"] or 0), 2),
-            "fechamento": dict(fechamento) if fechamento else None
+            "fechamento": to_dict(fechamento)
         }
 
 
 # 
-# EXEMPLO DE USO / TESTES INICIAIS
+# FUNÇÕES DE TESTE
 # 
 
 def inicializar_banco():
@@ -1041,7 +1169,6 @@ def inicializar_banco():
 
 def cadastrar_dados_exemplo():
     db = Database()
-    auditoria = AuditoriaService(db)
 
     empresa_service = EmpresaService(db)
     operacao_service = OperacaoService(db)
@@ -1060,8 +1187,6 @@ def cadastrar_dados_exemplo():
             descricao_cnae="Preparação de massa de concreto e argamassa para construção"
         )
         print(f"Empresa exemplo criada. ID={empresa_id}")
-    else:
-        empresa_id = db.execute("SELECT id FROM empresas LIMIT 1").fetchone()["id"]
 
     cur = db.execute("SELECT COUNT(*) AS total FROM operacoes")
     if cur.fetchone()["total"] == 0:
@@ -1096,7 +1221,13 @@ def testar_fluxo_basico():
         raise RuntimeError("Não foi possível autenticar admin/admin123")
 
     usuario_id = user["id"]
-    empresa_id = db.execute("SELECT id FROM empresas LIMIT 1").fetchone()["id"]
+
+    empresa = db.execute("SELECT id FROM empresas LIMIT 1").fetchone()
+    if not empresa:
+        db.close()
+        raise RuntimeError("Nenhuma empresa cadastrada.")
+
+    empresa_id = empresa["id"]
 
     operacoes = db.execute("SELECT id, nome FROM operacoes ORDER BY id").fetchall()
     mapa_ops = {o["nome"]: o["id"] for o in operacoes}
