@@ -1,670 +1,1180 @@
-import streamlit as st
-import mysql.connector
-import pandas as pd
-import requests
-import io
-from datetime import date, datetime
-from calendar import monthrange
-from decimal import Decimal, ROUND_HALF_UP
-from fpdf import FPDF
+import sqlite3
+import hashlib
+import os
+import json
+from datetime import datetime, date
+from typing import Optional, Dict, Any, List, Tuple
 
-st.set_page_config(
-    page_title="Crescere - PIS/COFINS",
-    layout="wide",
-    page_icon="🛡️"
-)
+DB_PATH = "apuracao_piscofins.db"
+DIA_CORTE_RETROATIVO = 25
 
-st.markdown("""
-<style>
-    .main {
-        background-color: #f5f7f9;
-    }
-    .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 1rem;
-    }
-    .stButton > button {
-        width: 100%;
-        border-radius: 6px;
-        height: 2.9em;
-        background-color: #004b87;
-        color: white;
-        border: 0;
-        font-weight: 600;
-    }
-    .stButton > button:hover {
-        background-color: #003964;
-        color: white;
-    }
-    .stDownloadButton > button {
-        width: 100%;
-        border-radius: 6px;
-        height: 2.9em;
-        font-weight: 600;
-    }
-    .stTextInput > div > div > input,
-    .stTextArea textarea,
-    .stSelectbox div[data-baseweb="select"] > div,
-    .stNumberInput input {
-        border-radius: 6px !important;
-    }
-    .top-card {
-        background: white;
-        padding: 14px 18px;
-        border-radius: 10px;
-        border: 1px solid #e8ecef;
-        margin-bottom: 12px;
-    }
-    .small-muted {
-        color: #6c757d;
-        font-size: 0.92rem;
-    }
-    .section-title {
-        font-size: 1.15rem;
-        font-weight: 700;
-        color: #1f2937;
-        margin-bottom: 8px;
-    }
-</style>
-""", unsafe_allow_html=True)
 
-MESES = [
-    "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
-    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
-]
+# 
+# UTILITÁRIOS GERAIS
+# 
 
-OPERACOES = [
-    "Compra Mercador/Insumos",
-    "Combustível (Diesel)",
-    "Manutenção",
-    "Depreciação",
-    "Locação Aluguel (PJ)",
-    "Energia Elétrica",
-    "Fretes",
-    "Serviço c/ sessão de mão de obra",
-    "Venda de Mercadorias / Produtos",
-    "Venda de Serviços",
-    "Receita Financeira"
-]
+def agora_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-MAPEAMENTO_ERP = {
-    "Compra Mercador/Insumos": {"debito": "3101", "credito": "2101", "historico": "COMPRA MERCADORIA/INSUMOS"},
-    "Combustível (Diesel)": {"debito": "3102", "credito": "2101", "historico": "COMBUSTIVEL DIESEL"},
-    "Manutenção": {"debito": "3103", "credito": "2101", "historico": "MANUTENCAO"},
-    "Depreciação": {"debito": "3104", "credito": "1601", "historico": "DEPRECIACAO"},
-    "Locação Aluguel (PJ)": {"debito": "3105", "credito": "2101", "historico": "LOCACAO ALUGUEL PJ"},
-    "Energia Elétrica": {"debito": "3106", "credito": "2101", "historico": "ENERGIA ELETRICA"},
-    "Fretes": {"debito": "3107", "credito": "2101", "historico": "FRETES"},
-    "Serviço c/ sessão de mão de obra": {"debito": "3108", "credito": "2101", "historico": "SERVICO CESSAO DE MAO DE OBRA"},
-    "Venda de Mercadorias / Produtos": {"debito": "1101", "credito": "4101", "historico": "VENDA DE MERCADORIAS / PRODUTOS"},
-    "Venda de Serviços": {"debito": "1101", "credito": "4102", "historico": "VENDA DE SERVICOS"},
-    "Receita Financeira": {"debito": "1101", "credito": "4201", "historico": "RECEITA FINANCEIRA"}
-}
 
-def estado_form_empresa():
-    return {
-        "id": None,
-        "nome": "",
-        "fantasia": "",
-        "cnpj": "",
-        "regime": "Lucro Real",
-        "tipo": "Matriz",
-        "cnae": "",
-        "endereco": ""
-    }
+def hoje_str() -> str:
+    return date.today().strftime("%Y-%m-%d")
 
-if "dados_form" not in st.session_state:
-    st.session_state.dados_form = estado_form_empresa()
 
-if "itens_apuracao" not in st.session_state:
-    st.session_state.itens_apuracao = []
-
-if "filtro_empresa" not in st.session_state:
-    st.session_state.filtro_empresa = ""
-
-def get_db_connection():
-    return mysql.connector.connect(**st.secrets["mysql"])
-
-def limpar_cnpj(cnpj):
-    return "".join(filter(str.isdigit, str(cnpj)))
-
-def formatar_cnpj(cnpj):
-    cnpj = limpar_cnpj(cnpj)
-    if len(cnpj) != 14:
-        return cnpj
-    return f"{cnpj[:2]}.{cnpj[2:5]}.{cnpj[5:8]}/{cnpj[8:12]}-{cnpj[12:]}"
-
-def decimal_2(valor):
-    return Decimal(str(valor)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-def formata_real(valor):
-    valor = float(valor or 0)
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-def ultimo_dia_mes(ano, mes):
-    ultimo = monthrange(ano, mes)[1]
-    return date(ano, mes, ultimo)
-
-def reset_form_empresa():
-    st.session_state.dados_form = estado_form_empresa()
-
-def consultar_cnpj(cnpj_limpo):
-    url = f"https://receitaws.com.br/v1/cnpj/{cnpj_limpo}"
-    try:
-        response = requests.get(url, timeout=15)
-        if response.status_code == 200:
-            return response.json()
-    except requests.RequestException:
-        return None
-    return None
-
-def montar_endereco_receita(dados):
-    partes = [
-        dados.get("logradouro", ""),
-        dados.get("numero", ""),
-        dados.get("complemento", ""),
-        dados.get("bairro", ""),
-        dados.get("municipio", ""),
-        dados.get("uf", ""),
-        dados.get("cep", "")
-    ]
-    partes = [p for p in partes if str(p).strip()]
-    return ", ".join(partes)
-
-def calcular_aliquotas(operacao):
-    if operacao == "Receita Financeira":
-        return Decimal("0.0065"), Decimal("0.04")
-    return Decimal("0.0165"), Decimal("0.076")
-
-def calcular_impostos(operacao, valor):
-    valor_dec = decimal_2(valor)
-    aliq_pis, aliq_cofins = calcular_aliquotas(operacao)
-    pis = decimal_2(valor_dec * aliq_pis)
-    cofins = decimal_2(valor_dec * aliq_cofins)
-    return valor_dec, pis, cofins
-
-def listar_empresas(filtro=""):
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    sql = """
-        SELECT id, nome, fantasia, cnpj, regime, tipo, cnae, endereco
-        FROM empresas
-        WHERE 1=1
+def normalizar_competencia(comp: str) -> str:
     """
-    params = []
+    Aceita formatos simples como:
+    - 2026-03
+    - 03/2026
+    Retorna sempre YYYY-MM
+    """
+    comp = comp.strip()
+    if "/" in comp:
+        mes, ano = comp.split("/")
+        return f"{ano}-{mes.zfill(2)}"
+    if len(comp) == 7 and "-" in comp:
+        return comp
+    raise ValueError(f"Competência inválida: {comp}")
 
-    if filtro:
-        sql += " AND (nome LIKE %s OR cnpj LIKE %s)"
-        termo = f"%{filtro}%"
-        params.extend([termo, termo])
 
-    sql += " ORDER BY nome"
-    cursor.execute(sql, params)
-    rows = cursor.fetchall()
-    conn.close()
-    return pd.DataFrame(rows)
+def primeiro_dia_competencia(comp: str) -> str:
+    comp = normalizar_competencia(comp)
+    return f"{comp}-01"
 
-def buscar_empresa_por_id(empresa_id):
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("""
-        SELECT id, nome, fantasia, cnpj, regime, tipo, cnae, endereco
-        FROM empresas
-        WHERE id = %s
-    """, (empresa_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
 
-def cnpj_ja_existe(cnpj_limpo, id_atual=None):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    if id_atual:
-        cursor.execute("SELECT COUNT(*) FROM empresas WHERE cnpj = %s AND id <> %s", (cnpj_limpo, id_atual))
-    else:
-        cursor.execute("SELECT COUNT(*) FROM empresas WHERE cnpj = %s", (cnpj_limpo,))
-    total = cursor.fetchone()[0]
-    conn.close()
-    return total > 0
+def competencia_anterior(comp: str) -> str:
+    comp = normalizar_competencia(comp)
+    ano, mes = map(int, comp.split("-"))
+    if mes == 1:
+        return f"{ano - 1}-12"
+    return f"{ano}-{str(mes - 1).zfill(2)}"
 
-def salvar_empresa(dados):
-    conn = get_db_connection()
-    cursor = conn.cursor()
 
-    if dados["id"]:
-        sql = """
-            UPDATE empresas
-               SET nome=%s,
-                   fantasia=%s,
-                   cnpj=%s,
-                   regime=%s,
-                   tipo=%s,
-                   cnae=%s,
-                   endereco=%s
-             WHERE id=%s
-        """
-        params = (
-            dados["nome"],
-            dados["fantasia"],
-            dados["cnpj"],
-            dados["regime"],
-            dados["tipo"],
-            dados["cnae"],
-            dados["endereco"],
-            dados["id"]
+def competencia_posterior(comp: str) -> str:
+    comp = normalizar_competencia(comp)
+    ano, mes = map(int, comp.split("-"))
+    if mes == 12:
+        return f"{ano + 1}-01"
+    return f"{ano}-{str(mes + 1).zfill(2)}"
+
+
+def parse_data(data_str: str) -> date:
+    return datetime.strptime(data_str, "%Y-%m-%d").date()
+
+
+def json_dumps(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, default=str)
+
+
+def gerar_salt() -> str:
+    return os.urandom(16).hex()
+
+
+def hash_senha(senha: str, salt: str) -> str:
+    return hashlib.sha256((senha + salt).encode("utf-8")).hexdigest()
+
+
+# 
+# BANCO DE DADOS E MIGRAÇÃO SEGURA
+# 
+
+class Database:
+    def __init__(self, db_path: str = DB_PATH):
+        self.db_path = db_path
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys = ON")
+
+    def execute(self, sql: str, params: Tuple = ()) -> sqlite3.Cursor:
+        cur = self.conn.cursor()
+        cur.execute(sql, params)
+        return cur
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
+    def close(self):
+        self.conn.close()
+
+    def table_exists(self, table_name: str) -> bool:
+        cur = self.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,)
         )
-    else:
-        sql = """
-            INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """
-        params = (
-            dados["nome"],
-            dados["fantasia"],
-            dados["cnpj"],
-            dados["regime"],
-            dados["tipo"],
-            dados["cnae"],
-            dados["endereco"]
+        return cur.fetchone() is not None
+
+    def get_columns(self, table_name: str) -> List[str]:
+        if not self.table_exists(table_name):
+            return []
+        cur = self.execute(f"PRAGMA table_info({table_name})")
+        return [row["name"] for row in cur.fetchall()]
+
+    def column_exists(self, table_name: str, column_name: str) -> bool:
+        return column_name in self.get_columns(table_name)
+
+    def add_column_if_not_exists(self, table_name: str, column_definition: str):
+        col_name = column_definition.split()[0]
+        if not self.column_exists(table_name, col_name):
+            self.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_definition}")
+            self.commit()
+
+    def create_index_if_not_exists(self, index_name: str, table_name: str, columns: str):
+        self.execute(
+            f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({columns})"
         )
+        self.commit()
 
-    cursor.execute(sql, params)
-    conn.commit()
-    conn.close()
 
-def salvar_apuracao_no_banco(empresa_id, competencia, itens):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+class Migrator:
+    def __init__(self, db: Database):
+        self.db = db
 
-    for item in itens:
-        sql = """
-            INSERT INTO historico_apuracoes
-            (empresa_id, competencia, operacao, valor, pis, cofins, debito, credito, historico)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        params = (
-            empresa_id,
-            competencia,
-            item["operacao"],
-            float(item["valor"]),
-            float(item["pis"]),
-            float(item["cofins"]),
-            item["debito"],
-            item["credito"],
-            item["historico"]
-        )
-        cursor.execute(sql, params)
+    def migrate(self):
+        self._criar_tabela_usuarios()
+        self._criar_tabela_empresas()
+        self._criar_tabela_operacoes()
+        self._criar_tabela_mapeamentos_erp()
+        self._criar_tabela_lancamentos()
+        self._criar_tabela_fechamentos()
+        self._criar_tabela_auditoria()
+        self._criar_tabela_custos()
+        self._criar_indices()
 
-    conn.commit()
-    conn.close()
-
-class PDFRelatorio(FPDF):
-    def header(self):
-        self.set_fill_color(0, 75, 135)
-        self.rect(0, 0, 210, 22, "F")
-        self.set_text_color(255, 255, 255)
-        self.set_font("Arial", "B", 14)
-        self.cell(0, 12, "CRESCERE - RELATÓRIO DE APURAÇÃO PIS/COFINS", 0, 1, "C")
-        self.ln(2)
-        self.set_text_color(0, 0, 0)
-
-    def footer(self):
-        self.set_y(-12)
-        self.set_font("Arial", "I", 8)
-        self.set_text_color(120, 120, 120)
-        self.cell(0, 8, f"Página {self.page_no()}", 0, 0, "C")
-
-def gerar_pdf_apuracao(empresa, competencia, itens_df):
-    pdf = PDFRelatorio()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(0, 7, f"Empresa: {empresa['nome']}", 0, 1)
-    pdf.cell(0, 7, f"CNPJ: {formatar_cnpj(empresa['cnpj'])}", 0, 1)
-    pdf.cell(0, 7, f"Regime: {empresa['regime']}", 0, 1)
-    pdf.cell(0, 7, f"Competência: {competencia.strftime('%d/%m/%Y')}", 0, 1)
-    pdf.cell(0, 7, f"Emitido em: {datetime.now().strftime('%d/%m/%Y %H:%M')}", 0, 1)
-    pdf.ln(4)
-
-    pdf.set_font("Arial", "B", 9)
-    pdf.set_fill_color(220, 230, 241)
-    pdf.cell(70, 8, "Operação", 1, 0, "L", True)
-    pdf.cell(30, 8, "Base", 1, 0, "R", True)
-    pdf.cell(30, 8, "PIS", 1, 0, "R", True)
-    pdf.cell(30, 8, "COFINS", 1, 0, "R", True)
-    pdf.cell(30, 8, "Total", 1, 1, "R", True)
-
-    pdf.set_font("Arial", "", 8)
-    total_base = Decimal("0.00")
-    total_pis = Decimal("0.00")
-    total_cofins = Decimal("0.00")
-
-    for _, row in itens_df.iterrows():
-        total_linha = decimal_2(Decimal(str(row["pis"])) + Decimal(str(row["cofins"])))
-        total_base += Decimal(str(row["valor"]))
-        total_pis += Decimal(str(row["pis"]))
-        total_cofins += Decimal(str(row["cofins"]))
-
-        pdf.cell(70, 8, str(row["operacao"])[:38], 1, 0, "L")
-        pdf.cell(30, 8, formata_real(row["valor"]), 1, 0, "R")
-        pdf.cell(30, 8, formata_real(row["pis"]), 1, 0, "R")
-        pdf.cell(30, 8, formata_real(row["cofins"]), 1, 0, "R")
-        pdf.cell(30, 8, formata_real(total_linha), 1, 1, "R")
-
-    pdf.set_font("Arial", "B", 9)
-    pdf.cell(70, 8, "Totais", 1, 0, "L", True)
-    pdf.cell(30, 8, formata_real(total_base), 1, 0, "R", True)
-    pdf.cell(30, 8, formata_real(total_pis), 1, 0, "R", True)
-    pdf.cell(30, 8, formata_real(total_cofins), 1, 0, "R", True)
-    pdf.cell(30, 8, formata_real(total_pis + total_cofins), 1, 1, "R", True)
-
-    return pdf.output(dest="S").encode("latin-1")
-
-def montar_df_erp(itens, competencia):
-    linhas = []
-    data_str = competencia.strftime("%d/%m/%Y")
-
-    for item in itens:
-        linhas.append({
-            "Debito": item["debito"],
-            "Credito": item["credito"],
-            "Data": data_str,
-            "Valor": float(item["valor"]),
-            "Historico": item["historico"]
-        })
-
-    return pd.DataFrame(linhas, columns=["Debito", "Credito", "Data", "Valor", "Historico"])
-
-def gerar_excel_em_memoria(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="ERP")
-    output.seek(0)
-    return output
-
-with st.sidebar:
-    st.title("🛡️ Crescere")
-    st.caption("Apuração PIS/COFINS")
-    menu = st.radio("Módulos", ["Início", "Gestão de Empresas", "Apuração Mensal", "Relatórios & Exportação"])
-
-if menu == "Início":
-    st.markdown('<div class="section-title">Visão Geral</div>', unsafe_allow_html=True)
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown('<div class="top-card"><b>Empresas</b><br><span class="small-muted">Cadastro e edição de unidades</span></div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown('<div class="top-card"><b>Apuração Mensal</b><br><span class="small-muted">Lançamento e cálculo de PIS/COFINS</span></div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown('<div class="top-card"><b>Relatórios & ERP</b><br><span class="small-muted">PDF, CSV e Excel para integração</span></div>', unsafe_allow_html=True)
-
-elif menu == "Gestão de Empresas":
-    st.markdown('<div class="section-title">Gestão de Empresas</div>', unsafe_allow_html=True)
-
-    tab_form, tab_lista = st.tabs(["Cadastro / Edição", "Empresas Cadastradas"])
-
-    with tab_form:
-        st.markdown("### Consulta de CNPJ")
-
-        c1, c2 = st.columns([4, 1])
-        cnpj_consulta = c1.text_input("Consultar CNPJ para preenchimento automático", placeholder="00.000.000/0000-00")
-        if c2.button("Consultar"):
-            cnpj_limpo = limpar_cnpj(cnpj_consulta)
-            if len(cnpj_limpo) != 14:
-                st.warning("Informe um CNPJ válido com 14 dígitos.")
-            else:
-                dados = consultar_cnpj(cnpj_limpo)
-                if dados and dados.get("status") != "ERROR":
-                    st.session_state.dados_form.update({
-                        "nome": dados.get("nome", ""),
-                        "fantasia": dados.get("fantasia", ""),
-                        "cnpj": limpar_cnpj(dados.get("cnpj", "")),
-                        "cnae": dados["atividade_principal"][0].get("code", "") if dados.get("atividade_principal") else "",
-                        "endereco": montar_endereco_receita(dados)
-                    })
-                    st.rerun()
-                else:
-                    st.warning("Não foi possível consultar esse CNPJ no momento.")
-
-        st.markdown("### Dados da Empresa")
-        f = st.session_state.dados_form
-
-        with st.form("form_empresa", clear_on_submit=False):
-            col1, col2 = st.columns(2)
-            nome = col1.text_input("Razão Social", value=f["nome"])
-            fantasia = col2.text_input("Nome Fantasia", value=f["fantasia"])
-
-            col3, col4, col5 = st.columns([2, 2, 1])
-            cnpj = col3.text_input("CNPJ", value=formatar_cnpj(f["cnpj"]) if f["cnpj"] else "")
-            regime = col4.selectbox("Regime Tributário", ["Lucro Real", "Lucro Presumido"], index=0 if f["regime"] == "Lucro Real" else 1)
-            tipo = col5.selectbox("Tipo", ["Matriz", "Filial"], index=0 if f["tipo"] == "Matriz" else 1)
-
-            cnae = st.text_input("CNAE", value=f["cnae"])
-            endereco = st.text_area("Endereço", value=f["endereco"], height=90)
-
-            b1, b2 = st.columns([2, 1])
-            salvar = b1.form_submit_button("Salvar")
-            cancelar = b2.form_submit_button("Cancelar edição")
-
-            if cancelar:
-                reset_form_empresa()
-                st.rerun()
-
-            if salvar:
-                cnpj_limpo = limpar_cnpj(cnpj)
-
-                if not nome.strip():
-                    st.warning("Informe a razão social.")
-                elif len(cnpj_limpo) != 14:
-                    st.warning("Informe um CNPJ válido.")
-                elif cnpj_ja_existe(cnpj_limpo, f["id"]):
-                    st.warning("Já existe uma empresa cadastrada com esse CNPJ.")
-                else:
-                    dados_salvar = {
-                        "id": f["id"],
-                        "nome": nome.strip(),
-                        "fantasia": fantasia.strip(),
-                        "cnpj": cnpj_limpo,
-                        "regime": regime,
-                        "tipo": tipo,
-                        "cnae": cnae.strip(),
-                        "endereco": endereco.strip()
-                    }
-                    salvar_empresa(dados_salvar)
-                    reset_form_empresa()
-                    st.success("Cadastro atualizado com sucesso.")
-                    st.rerun()
-
-    with tab_lista:
-        filtro = st.text_input("Buscar por nome ou CNPJ", value=st.session_state.filtro_empresa)
-        st.session_state.filtro_empresa = filtro
-
-        df_empresas = listar_empresas(filtro=filtro)
-
-        if df_empresas.empty:
-            st.info("Nenhuma empresa encontrada.")
+    def _criar_tabela_usuarios(self):
+        if not self.db.table_exists("usuarios"):
+            self.db.execute("""
+                CREATE TABLE usuarios (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    nome TEXT,
+                    password_hash TEXT NOT NULL,
+                    salt TEXT NOT NULL,
+                    perfil TEXT NOT NULL DEFAULT 'operador',
+                    ativo INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            self.db.commit()
         else:
-            for _, row in df_empresas.iterrows():
-                with st.container():
-                    c1, c2 = st.columns([6, 1])
-                    c1.markdown(
-                        f"**{row['nome']}**  \n"
-                        f"CNPJ: {formatar_cnpj(row['cnpj'])} | Tipo: {row['tipo']} | Regime: {row['regime']}"
-                    )
-                    if c2.button("Editar", key=f"editar_empresa_{row['id']}"):
-                        st.session_state.dados_form = {
-                            "id": row["id"],
-                            "nome": row["nome"] or "",
-                            "fantasia": row["fantasia"] or "",
-                            "cnpj": row["cnpj"] or "",
-                            "regime": row["regime"] or "Lucro Real",
-                            "tipo": row["tipo"] or "Matriz",
-                            "cnae": row["cnae"] or "",
-                            "endereco": row["endereco"] or ""
-                        }
-                        st.rerun()
-                    st.divider()
+            self.db.add_column_if_not_exists("usuarios", "nome TEXT")
+            self.db.add_column_if_not_exists("usuarios", "perfil TEXT DEFAULT 'operador'")
+            self.db.add_column_if_not_exists("usuarios", "ativo INTEGER NOT NULL DEFAULT 1")
+            self.db.add_column_if_not_exists("usuarios", "created_at TEXT")
+            self.db.add_column_if_not_exists("usuarios", "updated_at TEXT")
 
-elif menu == "Apuração Mensal":
-    st.markdown('<div class="section-title">Apuração Mensal</div>', unsafe_allow_html=True)
+    def _criar_tabela_empresas(self):
+        if not self.db.table_exists("empresas"):
+            self.db.execute("""
+                CREATE TABLE empresas (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nome TEXT NOT NULL,
+                    cnpj TEXT,
+                    regime_tributario TEXT DEFAULT 'Lucro Real',
+                    tipo_empresa TEXT, -- comercio, servico, industria
+                    tipo_estabelecimento TEXT, -- matriz, filial
+                    grupo_empresarial TEXT,
+                    empresa_matriz_id INTEGER,
+                    cnae TEXT,
+                    descricao_cnae TEXT,
+                    ativo INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    FOREIGN KEY (empresa_matriz_id) REFERENCES empresas(id)
+                )
+            """)
+            self.db.commit()
+        else:
+            colunas = [
+                "cnpj TEXT",
+                "regime_tributario TEXT DEFAULT 'Lucro Real'",
+                "tipo_empresa TEXT",
+                "tipo_estabelecimento TEXT",
+                "grupo_empresarial TEXT",
+                "empresa_matriz_id INTEGER",
+                "cnae TEXT",
+                "descricao_cnae TEXT",
+                "ativo INTEGER NOT NULL DEFAULT 1",
+                "created_at TEXT",
+                "updated_at TEXT",
+            ]
+            for c in colunas:
+                self.db.add_column_if_not_exists("empresas", c)
 
-    df_empresas = listar_empresas()
+    def _criar_tabela_operacoes(self):
+        if not self.db.table_exists("operacoes"):
+            self.db.execute("""
+                CREATE TABLE operacoes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nome TEXT NOT NULL,
+                    natureza TEXT NOT NULL, -- debito, credito
+                    categoria_fiscal TEXT,
+                    receita_financeira INTEGER NOT NULL DEFAULT 0,
+                    ativo INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            self.db.commit()
+        else:
+            colunas = [
+                "nome TEXT",
+                "natureza TEXT",
+                "categoria_fiscal TEXT",
+                "receita_financeira INTEGER NOT NULL DEFAULT 0",
+                "ativo INTEGER NOT NULL DEFAULT 1",
+                "created_at TEXT",
+                "updated_at TEXT",
+            ]
+            for c in colunas:
+                self.db.add_column_if_not_exists("operacoes", c)
 
-    if df_empresas.empty:
-        st.warning("Cadastre ao menos uma empresa antes de iniciar a apuração.")
-    else:
-        opcoes_empresas = {
-            f"{row['nome']} - {formatar_cnpj(row['cnpj'])}": row["id"]
-            for _, row in df_empresas.iterrows()
+    def _criar_tabela_mapeamentos_erp(self):
+        if not self.db.table_exists("mapeamentos_erp"):
+            self.db.execute("""
+                CREATE TABLE mapeamentos_erp (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tipo_lancamento TEXT NOT NULL,
+                    conta_debito TEXT,
+                    conta_credito TEXT,
+                    historico_base TEXT,
+                    observacoes TEXT,
+                    ativo INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            self.db.commit()
+        else:
+            colunas = [
+                "tipo_lancamento TEXT",
+                "conta_debito TEXT",
+                "conta_credito TEXT",
+                "historico_base TEXT",
+                "observacoes TEXT",
+                "ativo INTEGER NOT NULL DEFAULT 1",
+                "created_at TEXT",
+                "updated_at TEXT",
+            ]
+            for c in colunas:
+                self.db.add_column_if_not_exists("mapeamentos_erp", c)
+
+    def _criar_tabela_lancamentos(self):
+        if not self.db.table_exists("lancamentos"):
+            self.db.execute("""
+                CREATE TABLE lancamentos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    empresa_id INTEGER NOT NULL,
+                    operacao_id INTEGER NOT NULL,
+                    competencia TEXT NOT NULL, -- YYYY-MM
+                    valor_base REAL NOT NULL,
+                    natureza TEXT NOT NULL, -- debito, credito
+                    pis_individual REAL NOT NULL DEFAULT 0,
+                    cofins_individual REAL NOT NULL DEFAULT 0,
+                    observacao TEXT,
+
+                    origem_retroativa INTEGER NOT NULL DEFAULT 0,
+                    competencia_origem TEXT,
+                    data_apresentacao TEXT,
+                    competencia_aproveitamento TEXT,
+                    aproveitado_em_competencia TEXT,
+                    status TEXT DEFAULT 'disponivel',
+
+                    created_by INTEGER,
+                    created_at TEXT,
+                    updated_by INTEGER,
+                    updated_at TEXT,
+
+                    FOREIGN KEY (empresa_id) REFERENCES empresas(id),
+                    FOREIGN KEY (operacao_id) REFERENCES operacoes(id),
+                    FOREIGN KEY (created_by) REFERENCES usuarios(id),
+                    FOREIGN KEY (updated_by) REFERENCES usuarios(id)
+                )
+            """)
+            self.db.commit()
+        else:
+            colunas = [
+                "empresa_id INTEGER",
+                "operacao_id INTEGER",
+                "competencia TEXT",
+                "valor_base REAL NOT NULL DEFAULT 0",
+                "natureza TEXT",
+                "pis_individual REAL NOT NULL DEFAULT 0",
+                "cofins_individual REAL NOT NULL DEFAULT 0",
+                "observacao TEXT",
+                "origem_retroativa INTEGER NOT NULL DEFAULT 0",
+                "competencia_origem TEXT",
+                "data_apresentacao TEXT",
+                "competencia_aproveitamento TEXT",
+                "aproveitado_em_competencia TEXT",
+                "status TEXT DEFAULT 'disponivel'",
+                "created_by INTEGER",
+                "created_at TEXT",
+                "updated_by INTEGER",
+                "updated_at TEXT",
+            ]
+            for c in colunas:
+                self.db.add_column_if_not_exists("lancamentos", c)
+
+    def _criar_tabela_fechamentos(self):
+        if not self.db.table_exists("fechamentos"):
+            self.db.execute("""
+                CREATE TABLE fechamentos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    empresa_id INTEGER NOT NULL,
+                    competencia TEXT NOT NULL,
+                    total_debito_pis REAL NOT NULL DEFAULT 0,
+                    total_credito_pis REAL NOT NULL DEFAULT 0,
+                    saldo_anterior_pis REAL NOT NULL DEFAULT 0,
+                    credito_retroativo_pis REAL NOT NULL DEFAULT 0,
+                    resultado_pis REAL NOT NULL DEFAULT 0,
+                    saldo_transportar_pis REAL NOT NULL DEFAULT 0,
+
+                    total_debito_cofins REAL NOT NULL DEFAULT 0,
+                    total_credito_cofins REAL NOT NULL DEFAULT 0,
+                    saldo_anterior_cofins REAL NOT NULL DEFAULT 0,
+                    credito_retroativo_cofins REAL NOT NULL DEFAULT 0,
+                    resultado_cofins REAL NOT NULL DEFAULT 0,
+                    saldo_transportar_cofins REAL NOT NULL DEFAULT 0,
+
+                    status TEXT NOT NULL DEFAULT 'aberto', -- aberto, fechado, reaberto
+                    observacao TEXT,
+
+                    fechado_por INTEGER,
+                    fechado_em TEXT,
+                    reaberto_por INTEGER,
+                    reaberto_em TEXT,
+
+                    created_at TEXT,
+                    updated_at TEXT,
+
+                    FOREIGN KEY (empresa_id) REFERENCES empresas(id),
+                    FOREIGN KEY (fechado_por) REFERENCES usuarios(id),
+                    FOREIGN KEY (reaberto_por) REFERENCES usuarios(id),
+                    UNIQUE (empresa_id, competencia)
+                )
+            """)
+            self.db.commit()
+        else:
+            colunas = [
+                "total_debito_pis REAL NOT NULL DEFAULT 0",
+                "total_credito_pis REAL NOT NULL DEFAULT 0",
+                "saldo_anterior_pis REAL NOT NULL DEFAULT 0",
+                "credito_retroativo_pis REAL NOT NULL DEFAULT 0",
+                "resultado_pis REAL NOT NULL DEFAULT 0",
+                "saldo_transportar_pis REAL NOT NULL DEFAULT 0",
+                "total_debito_cofins REAL NOT NULL DEFAULT 0",
+                "total_credito_cofins REAL NOT NULL DEFAULT 0",
+                "saldo_anterior_cofins REAL NOT NULL DEFAULT 0",
+                "credito_retroativo_cofins REAL NOT NULL DEFAULT 0",
+                "resultado_cofins REAL NOT NULL DEFAULT 0",
+                "saldo_transportar_cofins REAL NOT NULL DEFAULT 0",
+                "status TEXT NOT NULL DEFAULT 'aberto'",
+                "observacao TEXT",
+                "fechado_por INTEGER",
+                "fechado_em TEXT",
+                "reaberto_por INTEGER",
+                "reaberto_em TEXT",
+                "created_at TEXT",
+                "updated_at TEXT",
+            ]
+            for c in colunas:
+                self.db.add_column_if_not_exists("fechamentos", c)
+
+    def _criar_tabela_auditoria(self):
+        if not self.db.table_exists("auditoria"):
+            self.db.execute("""
+                CREATE TABLE auditoria (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    usuario_id INTEGER,
+                    acao TEXT NOT NULL,
+                    entidade TEXT NOT NULL,
+                    registro_id INTEGER,
+                    competencia TEXT,
+                    motivo TEXT,
+                    antes_json TEXT,
+                    depois_json TEXT,
+                    timestamp TEXT NOT NULL,
+                    FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+                )
+            """)
+            self.db.commit()
+
+    def _criar_tabela_custos(self):
+        if not self.db.table_exists("custos"):
+            self.db.execute("""
+                CREATE TABLE custos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    empresa_id INTEGER NOT NULL,
+                    competencia TEXT NOT NULL,
+                    tipo_custo TEXT NOT NULL, -- CPV, CMV, CSV
+                    valor_bruto REAL NOT NULL,
+                    pis_custo REAL NOT NULL DEFAULT 0,
+                    cofins_custo REAL NOT NULL DEFAULT 0,
+                    valor_liquido REAL NOT NULL DEFAULT 0,
+                    observacao TEXT,
+                    created_by INTEGER,
+                    created_at TEXT,
+                    updated_by INTEGER,
+                    updated_at TEXT,
+                    FOREIGN KEY (empresa_id) REFERENCES empresas(id),
+                    FOREIGN KEY (created_by) REFERENCES usuarios(id),
+                    FOREIGN KEY (updated_by) REFERENCES usuarios(id)
+                )
+            """)
+            self.db.commit()
+
+    def _criar_indices(self):
+        self.db.create_index_if_not_exists("idx_lanc_empresa_comp", "lancamentos", "empresa_id, competencia")
+        self.db.create_index_if_not_exists("idx_lanc_comp_aprov", "lancamentos", "competencia_aproveitamento")
+        self.db.create_index_if_not_exists("idx_fech_empresa_comp", "fechamentos", "empresa_id, competencia")
+        self.db.create_index_if_not_exists("idx_auditoria_comp", "auditoria", "competencia")
+
+
+# 
+# AUDITORIA
+# 
+
+class AuditoriaService:
+    def __init__(self, db: Database):
+        self.db = db
+
+    def registrar(
+        self,
+        usuario_id: Optional[int],
+        acao: str,
+        entidade: str,
+        registro_id: Optional[int],
+        competencia: Optional[str],
+        motivo: Optional[str],
+        antes: Optional[Dict],
+        depois: Optional[Dict],
+    ):
+        self.db.execute("""
+            INSERT INTO auditoria (
+                usuario_id, acao, entidade, registro_id, competencia,
+                motivo, antes_json, depois_json, timestamp
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            usuario_id, acao, entidade, registro_id, competencia,
+            motivo, json_dumps(antes) if antes else None,
+            json_dumps(depois) if depois else None,
+            agora_str()
+        ))
+        self.db.commit()
+
+
+# 
+# AUTENTICAÇÃO
+# 
+
+class AuthService:
+    def __init__(self, db: Database):
+        self.db = db
+
+    def criar_usuario(self, username: str, senha: str, perfil: str = "operador", nome: str = "") -> int:
+        salt = gerar_salt()
+        senha_hash = hash_senha(senha, salt)
+
+        cur = self.db.execute("""
+            INSERT INTO usuarios (username, nome, password_hash, salt, perfil, ativo, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+        """, (username, nome, senha_hash, salt, perfil, agora_str(), agora_str()))
+        self.db.commit()
+        return cur.lastrowid
+
+    def buscar_usuario_por_username(self, username: str) -> Optional[sqlite3.Row]:
+        cur = self.db.execute("SELECT * FROM usuarios WHERE username = ?", (username,))
+        return cur.fetchone()
+
+    def autenticar(self, username: str, senha: str) -> Optional[sqlite3.Row]:
+        user = self.buscar_usuario_por_username(username)
+        if not user:
+            return None
+        if user["ativo"] != 1:
+            return None
+        senha_hash = hash_senha(senha, user["salt"])
+        if senha_hash == user["password_hash"]:
+            return user
+        return None
+
+    def garantir_admin_padrao(self):
+        user = self.buscar_usuario_por_username("admin")
+        if user:
+            return
+        self.criar_usuario("admin", "admin123", perfil="admin", nome="Administrador")
+        print("Usuário admin criado com senha padrão: admin123")
+
+
+# 
+# EMPRESAS
+# 
+
+class EmpresaService:
+    def __init__(self, db: Database):
+        self.db = db
+
+    def criar_empresa(
+        self,
+        nome: str,
+        cnpj: str,
+        regime_tributario: str,
+        tipo_empresa: str,
+        tipo_estabelecimento: str,
+        grupo_empresarial: str = "",
+        empresa_matriz_id: Optional[int] = None,
+        cnae: str = "",
+        descricao_cnae: str = "",
+        ativo: int = 1
+    ) -> int:
+        cur = self.db.execute("""
+            INSERT INTO empresas (
+                nome, cnpj, regime_tributario, tipo_empresa, tipo_estabelecimento,
+                grupo_empresarial, empresa_matriz_id, cnae, descricao_cnae, ativo,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            nome, cnpj, regime_tributario, tipo_empresa, tipo_estabelecimento,
+            grupo_empresarial, empresa_matriz_id, cnae, descricao_cnae, ativo,
+            agora_str(), agora_str()
+        ))
+        self.db.commit()
+        return cur.lastrowid
+
+    def buscar_empresa(self, empresa_id: int) -> Optional[sqlite3.Row]:
+        cur = self.db.execute("SELECT * FROM empresas WHERE id = ?", (empresa_id,))
+        return cur.fetchone()
+
+
+# 
+# OPERAÇÕES
+# 
+
+class OperacaoService:
+    def __init__(self, db: Database):
+        self.db = db
+
+    def criar_operacao(
+        self,
+        nome: str,
+        natureza: str,
+        categoria_fiscal: str = "",
+        receita_financeira: int = 0,
+        ativo: int = 1
+    ) -> int:
+        cur = self.db.execute("""
+            INSERT INTO operacoes (
+                nome, natureza, categoria_fiscal, receita_financeira,
+                ativo, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            nome, natureza, categoria_fiscal, receita_financeira,
+            ativo, agora_str(), agora_str()
+        ))
+        self.db.commit()
+        return cur.lastrowid
+
+    def buscar_operacao(self, operacao_id: int) -> Optional[sqlite3.Row]:
+        cur = self.db.execute("SELECT * FROM operacoes WHERE id = ?", (operacao_id,))
+        return cur.fetchone()
+
+
+# 
+# ERP - BASE DE MAPEAMENTO
+# 
+
+class ERPService:
+    def __init__(self, db: Database):
+        self.db = db
+
+    def criar_mapeamento(
+        self,
+        tipo_lancamento: str,
+        conta_debito: str,
+        conta_credito: str,
+        historico_base: str,
+        observacoes: str = ""
+    ) -> int:
+        cur = self.db.execute("""
+            INSERT INTO mapeamentos_erp (
+                tipo_lancamento, conta_debito, conta_credito, historico_base,
+                observacoes, ativo, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+        """, (
+            tipo_lancamento, conta_debito, conta_credito, historico_base,
+            observacoes, agora_str(), agora_str()
+        ))
+        self.db.commit()
+        return cur.lastrowid
+
+
+# 
+# REGRAS FISCAIS
+# 
+
+class RegraFiscalService:
+    ALIQ_PIS = 0.0165
+    ALIQ_COFINS = 0.076
+
+    ALIQ_PIS_FIN = 0.0065
+    ALIQ_COFINS_FIN = 0.04
+
+    @classmethod
+    def calcular_pis_cofins(cls, valor_base: float, receita_financeira: bool) -> Tuple[float, float]:
+        if receita_financeira:
+            return round(valor_base * cls.ALIQ_PIS_FIN, 2), round(valor_base * cls.ALIQ_COFINS_FIN, 2)
+        return round(valor_base * cls.ALIQ_PIS, 2), round(valor_base * cls.ALIQ_COFINS, 2)
+
+    @classmethod
+    def determinar_competencia_aproveitamento(cls, data_apresentacao: str, dia_corte: int = DIA_CORTE_RETROATIVO) -> str:
+        """
+        Regra:
+        - Se apresentada antes do dia de corte, aproveita na competência anterior ao mês da apresentação.
+        - Se apresentada no dia de corte ou depois, aproveita na competência do próprio mês da apresentação.
+        """
+        d = parse_data(data_apresentacao)
+        comp_apresentacao = f"{d.year}-{str(d.month).zfill(2)}"
+
+        if d.day &lt; dia_corte:
+            return competencia_anterior(comp_apresentacao)
+        return comp_apresentacao
+
+
+# 
+# FECHAMENTO / STATUS
+# 
+
+class FechamentoService:
+    def __init__(self, db: Database, auditoria: AuditoriaService):
+        self.db = db
+        self.auditoria = auditoria
+
+    def buscar_fechamento(self, empresa_id: int, competencia: str) -> Optional[sqlite3.Row]:
+        competencia = normalizar_competencia(competencia)
+        cur = self.db.execute("""
+            SELECT * FROM fechamentos
+            WHERE empresa_id = ? AND competencia = ?
+        """, (empresa_id, competencia))
+        return cur.fetchone()
+
+    def competencia_fechada(self, empresa_id: int, competencia: str) -> bool:
+        fechamento = self.buscar_fechamento(empresa_id, competencia)
+        if not fechamento:
+            return False
+        return fechamento["status"] == "fechado"
+
+    def saldo_transportado_anterior(self, empresa_id: int, competencia: str) -> Tuple[float, float]:
+        comp_ant = competencia_anterior(competencia)
+        fechamento_ant = self.buscar_fechamento(empresa_id, comp_ant)
+        if not fechamento_ant:
+            return 0.0, 0.0
+        return fechamento_ant["saldo_transportar_pis"], fechamento_ant["saldo_transportar_cofins"]
+
+    def fechar_competencia(self, empresa_id: int, competencia: str, usuario_id: int, observacao: str = "") -> int:
+        competencia = normalizar_competencia(competencia)
+
+        cur = self.db.execute("""
+            SELECT
+                SUM(CASE WHEN natureza = 'debito' THEN pis_individual ELSE 0 END) AS total_debito_pis,
+                SUM(CASE WHEN natureza = 'credito' THEN pis_individual ELSE 0 END) AS total_credito_pis,
+                SUM(CASE WHEN natureza = 'debito' THEN cofins_individual ELSE 0 END) AS total_debito_cofins,
+                SUM(CASE WHEN natureza = 'credito' THEN cofins_individual ELSE 0 END) AS total_credito_cofins
+            FROM lancamentos
+            WHERE empresa_id = ? AND competencia = ?
+        """, (empresa_id, competencia))
+        totais = cur.fetchone()
+
+        cur = self.db.execute("""
+            SELECT
+                SUM(CASE WHEN status = 'disponivel' THEN pis_individual ELSE 0 END) AS cred_retro_pis,
+                SUM(CASE WHEN status = 'disponivel' THEN cofins_individual ELSE 0 END) AS cred_retro_cofins
+            FROM lancamentos
+            WHERE empresa_id = ?
+              AND origem_retroativa = 1
+              AND competencia_aproveitamento = ?
+              AND (aproveitado_em_competencia IS NULL OR aproveitado_em_competencia = '')
+        """, (empresa_id, competencia))
+        retro = cur.fetchone()
+
+        saldo_ant_pis, saldo_ant_cofins = self.saldo_transportado_anterior(empresa_id, competencia)
+
+        total_debito_pis = round((totais["total_debito_pis"] or 0), 2)
+        total_credito_pis = round((totais["total_credito_pis"] or 0), 2)
+        total_debito_cofins = round((totais["total_debito_cofins"] or 0), 2)
+        total_credito_cofins = round((totais["total_credito_cofins"] or 0), 2)
+
+        credito_retro_pis = round((retro["cred_retro_pis"] or 0), 2)
+        credito_retro_cofins = round((retro["cred_retro_cofins"] or 0), 2)
+
+        resultado_pis = round(total_debito_pis - total_credito_pis - saldo_ant_pis - credito_retro_pis, 2)
+        resultado_cofins = round(total_debito_cofins - total_credito_cofins - saldo_ant_cofins - credito_retro_cofins, 2)
+
+        saldo_transportar_pis = abs(resultado_pis) if resultado_pis &lt; 0 else 0.0
+        saldo_transportar_cofins = abs(resultado_cofins) if resultado_cofins &lt; 0 else 0.0
+
+        antes = None
+        existente = self.buscar_fechamento(empresa_id, competencia)
+        if existente:
+            antes = dict(existente)
+            self.db.execute("""
+                UPDATE fechamentos
+                SET total_debito_pis = ?, total_credito_pis = ?, saldo_anterior_pis = ?, credito_retroativo_pis = ?,
+                    resultado_pis = ?, saldo_transportar_pis = ?,
+                    total_debito_cofins = ?, total_credito_cofins = ?, saldo_anterior_cofins = ?, credito_retroativo_cofins = ?,
+                    resultado_cofins = ?, saldo_transportar_cofins = ?,
+                    status = 'fechado', observacao = ?, fechado_por = ?, fechado_em = ?, updated_at = ?
+                WHERE empresa_id = ? AND competencia = ?
+            """, (
+                total_debito_pis, total_credito_pis, saldo_ant_pis, credito_retro_pis,
+                resultado_pis, saldo_transportar_pis,
+                total_debito_cofins, total_credito_cofins, saldo_ant_cofins, credito_retro_cofins,
+                resultado_cofins, saldo_transportar_cofins,
+                observacao, usuario_id, agora_str(), agora_str(),
+                empresa_id, competencia
+            ))
+            fechamento_id = existente["id"]
+        else:
+            cur2 = self.db.execute("""
+                INSERT INTO fechamentos (
+                    empresa_id, competencia,
+                    total_debito_pis, total_credito_pis, saldo_anterior_pis, credito_retroativo_pis, resultado_pis, saldo_transportar_pis,
+                    total_debito_cofins, total_credito_cofins, saldo_anterior_cofins, credito_retroativo_cofins, resultado_cofins, saldo_transportar_cofins,
+                    status, observacao, fechado_por, fechado_em, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'fechado', ?, ?, ?, ?, ?)
+            """, (
+                empresa_id, competencia,
+                total_debito_pis, total_credito_pis, saldo_ant_pis, credito_retro_pis, resultado_pis, saldo_transportar_pis,
+                total_debito_cofins, total_credito_cofins, saldo_ant_cofins, credito_retro_cofins, resultado_cofins, saldo_transportar_cofins,
+                observacao, usuario_id, agora_str(), agora_str(), agora_str()
+            ))
+            fechamento_id = cur2.lastrowid
+
+        self.db.execute("""
+            UPDATE lancamentos
+            SET status = 'aproveitado', aproveitado_em_competencia = ?, updated_at = ?, updated_by = ?
+            WHERE empresa_id = ?
+              AND origem_retroativa = 1
+              AND competencia_aproveitamento = ?
+              AND (aproveitado_em_competencia IS NULL OR aproveitado_em_competencia = '')
+        """, (competencia, agora_str(), usuario_id, empresa_id, competencia))
+
+        self.db.commit()
+
+        depois = dict(self.buscar_fechamento(empresa_id, competencia))
+        self.auditoria.registrar(
+            usuario_id=usuario_id,
+            acao="FECHAR_COMPETENCIA",
+            entidade="fechamentos",
+            registro_id=fechamento_id,
+            competencia=competencia,
+            motivo=observacao,
+            antes=antes,
+            depois=depois
+        )
+
+        return fechamento_id
+
+    def reabrir_competencia(self, empresa_id: int, competencia: str, usuario_id: int, motivo: str):
+        if not motivo.strip():
+            raise ValueError("Motivo é obrigatório para reabrir competência.")
+
+        fechamento = self.buscar_fechamento(empresa_id, competencia)
+        if not fechamento:
+            raise ValueError("Competência ainda não possui fechamento.")
+
+        antes = dict(fechamento)
+
+        self.db.execute("""
+            UPDATE fechamentos
+            SET status = 'reaberto',
+                reaberto_por = ?,
+                reaberto_em = ?,
+                updated_at = ?
+            WHERE empresa_id = ? AND competencia = ?
+        """, (usuario_id, agora_str(), agora_str(), empresa_id, normalizar_competencia(competencia)))
+
+        self.db.commit()
+
+        depois = dict(self.buscar_fechamento(empresa_id, competencia))
+        self.auditoria.registrar(
+            usuario_id=usuario_id,
+            acao="REABRIR_COMPETENCIA",
+            entidade="fechamentos",
+            registro_id=fechamento["id"],
+            competencia=competencia,
+            motivo=motivo,
+            antes=antes,
+            depois=depois
+        )
+
+
+# 
+# LANÇAMENTOS
+# 
+
+class LancamentoService:
+    def __init__(self, db: Database, auditoria: AuditoriaService, fechamento_service: FechamentoService):
+        self.db = db
+        self.auditoria = auditoria
+        self.fechamento_service = fechamento_service
+
+    def criar_lancamento(
+        self,
+        empresa_id: int,
+        operacao_id: int,
+        competencia: str,
+        valor_base: float,
+        observacao: str,
+        usuario_id: int,
+        origem_retroativa: int = 0,
+        competencia_origem: Optional[str] = None,
+        data_apresentacao: Optional[str] = None,
+        competencia_aproveitamento: Optional[str] = None,
+        motivo_edicao_mes_fechado: str = ""
+    ) -> int:
+        competencia = normalizar_competencia(competencia)
+
+        if self.fechamento_service.competencia_fechada(empresa_id, competencia):
+            if not motivo_edicao_mes_fechado.strip():
+                raise ValueError("Alteração em mês já fechado exige motivo obrigatório.")
+
+        operacao = self.db.execute("SELECT * FROM operacoes WHERE id = ?", (operacao_id,)).fetchone()
+        if not operacao:
+            raise ValueError("Operação não encontrada.")
+
+        natureza = operacao["natureza"]
+        receita_financeira = bool(operacao["receita_financeira"])
+
+        pis, cofins = RegraFiscalService.calcular_pis_cofins(valor_base, receita_financeira)
+
+        status = "disponivel"
+        comp_aprov = competencia_aproveitamento
+
+        if origem_retroativa:
+            if not competencia_origem:
+                raise ValueError("Crédito retroativo exige competencia_origem.")
+            if not data_apresentacao:
+                raise ValueError("Crédito retroativo exige data_apresentacao.")
+            competencia_origem = normalizar_competencia(competencia_origem)
+
+            if not comp_aprov:
+                comp_aprov = RegraFiscalService.determinar_competencia_aproveitamento(data_apresentacao)
+
+            status = "disponivel"
+
+        cur = self.db.execute("""
+            INSERT INTO lancamentos (
+                empresa_id, operacao_id, competencia, valor_base, natureza,
+                pis_individual, cofins_individual, observacao,
+                origem_retroativa, competencia_origem, data_apresentacao,
+                competencia_aproveitamento, aproveitado_em_competencia, status,
+                created_by, created_at, updated_by, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            empresa_id, operacao_id, competencia, round(valor_base, 2), natureza,
+            pis, cofins, observacao,
+            origem_retroativa, competencia_origem, data_apresentacao,
+            comp_aprov, None, status,
+            usuario_id, agora_str(), usuario_id, agora_str()
+        ))
+        self.db.commit()
+
+        lancamento_id = cur.lastrowid
+        depois = self.buscar_lancamento(lancamento_id)
+
+        self.auditoria.registrar(
+            usuario_id=usuario_id,
+            acao="CRIAR_LANCAMENTO",
+            entidade="lancamentos",
+            registro_id=lancamento_id,
+            competencia=competencia,
+            motivo=motivo_edicao_mes_fechado if motivo_edicao_mes_fechado else observacao,
+            antes=None,
+            depois=dict(depois) if depois else None
+        )
+
+        return lancamento_id
+
+    def buscar_lancamento(self, lancamento_id: int) -> Optional[sqlite3.Row]:
+        cur = self.db.execute("SELECT * FROM lancamentos WHERE id = ?", (lancamento_id,))
+        return cur.fetchone()
+
+    def listar_lancamentos_por_competencia(self, empresa_id: int, competencia: str) -> List[sqlite3.Row]:
+        cur = self.db.execute("""
+            SELECT l.*, o.nome AS operacao_nome
+            FROM lancamentos l
+            JOIN operacoes o ON o.id = l.operacao_id
+            WHERE l.empresa_id = ? AND l.competencia = ?
+            ORDER BY l.id
+        """, (empresa_id, normalizar_competencia(competencia)))
+        return cur.fetchall()
+
+
+# 
+# CUSTOS
+# 
+
+class CustoService:
+    def __init__(self, db: Database, auditoria: AuditoriaService):
+        self.db = db
+        self.auditoria = auditoria
+
+    def _tipo_custo_por_empresa(self, tipo_empresa: str) -> str:
+        mapa = {
+            "industria": "CPV",
+            "comercio": "CMV",
+            "servico": "CSV",
+        }
+        if tipo_empresa not in mapa:
+            raise ValueError("tipo_empresa inválido para cálculo de custo.")
+        return mapa[tipo_empresa]
+
+    def calcular_e_registrar_custo(
+        self,
+        empresa_id: int,
+        competencia: str,
+        valor_bruto: float,
+        observacao: str,
+        usuario_id: int
+    ) -> int:
+        empresa = self.db.execute("SELECT * FROM empresas WHERE id = ?", (empresa_id,)).fetchone()
+        if not empresa:
+            raise ValueError("Empresa não encontrada.")
+
+        tipo_custo = self._tipo_custo_por_empresa(empresa["tipo_empresa"])
+
+        pis_custo, cofins_custo = RegraFiscalService.calcular_pis_cofins(valor_bruto, receita_financeira=False)
+        valor_liquido = round(valor_bruto - pis_custo - cofins_custo, 2)
+
+        cur = self.db.execute("""
+            INSERT INTO custos (
+                empresa_id, competencia, tipo_custo, valor_bruto,
+                pis_custo, cofins_custo, valor_liquido,
+                observacao, created_by, created_at, updated_by, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            empresa_id, normalizar_competencia(competencia), tipo_custo, round(valor_bruto, 2),
+            pis_custo, cofins_custo, valor_liquido,
+            observacao, usuario_id, agora_str(), usuario_id, agora_str()
+        ))
+        self.db.commit()
+
+        custo_id = cur.lastrowid
+        custo = self.db.execute("SELECT * FROM custos WHERE id = ?", (custo_id,)).fetchone()
+
+        self.auditoria.registrar(
+            usuario_id=usuario_id,
+            acao="CRIAR_CUSTO",
+            entidade="custos",
+            registro_id=custo_id,
+            competencia=competencia,
+            motivo=observacao,
+            antes=None,
+            depois=dict(custo) if custo else None
+        )
+
+        return custo_id
+
+
+# 
+# RELATÓRIOS SIMPLES DE CONSOLE
+# 
+
+class RelatorioService:
+    def __init__(self, db: Database):
+        self.db = db
+
+    def resumo_competencia(self, empresa_id: int, competencia: str) -> Dict[str, Any]:
+        competencia = normalizar_competencia(competencia)
+
+        cur = self.db.execute("""
+            SELECT
+                SUM(CASE WHEN natureza='debito' THEN valor_base ELSE 0 END) AS base_debito,
+                SUM(CASE WHEN natureza='credito' THEN valor_base ELSE 0 END) AS base_credito,
+                SUM(CASE WHEN natureza='debito' THEN pis_individual ELSE 0 END) AS pis_debito,
+                SUM(CASE WHEN natureza='credito' THEN pis_individual ELSE 0 END) AS pis_credito,
+                SUM(CASE WHEN natureza='debito' THEN cofins_individual ELSE 0 END) AS cofins_debito,
+                SUM(CASE WHEN natureza='credito' THEN cofins_individual ELSE 0 END) AS cofins_credito
+            FROM lancamentos
+            WHERE empresa_id = ? AND competencia = ?
+        """, (empresa_id, competencia))
+        row = cur.fetchone()
+
+        fechamento = self.db.execute("""
+            SELECT * FROM fechamentos
+            WHERE empresa_id = ? AND competencia = ?
+        """, (empresa_id, competencia)).fetchone()
+
+        return {
+            "competencia": competencia,
+            "base_debito": round((row["base_debito"] or 0), 2),
+            "base_credito": round((row["base_credito"] or 0), 2),
+            "pis_debito": round((row["pis_debito"] or 0), 2),
+            "pis_credito": round((row["pis_credito"] or 0), 2),
+            "cofins_debito": round((row["cofins_debito"] or 0), 2),
+            "cofins_credito": round((row["cofins_credito"] or 0), 2),
+            "fechamento": dict(fechamento) if fechamento else None
         }
 
-        col_a, col_b, col_c = st.columns([3, 1, 1])
 
-        empresa_label = col_a.selectbox("Empresa", list(opcoes_empresas.keys()))
-        empresa_id = opcoes_empresas[empresa_label]
-        empresa = buscar_empresa_por_id(empresa_id)
+# 
+# EXEMPLO DE USO / TESTES INICIAIS
+# 
 
-        hoje = date.today()
-        mes_padrao = hoje.month - 1 if hoje.month > 1 else 12
-        ano_padrao = hoje.year if hoje.month > 1 else hoje.year - 1
+def inicializar_banco():
+    db = Database()
+    Migrator(db).migrate()
+    AuthService(db).garantir_admin_padrao()
+    db.close()
+    print("Banco inicializado com sucesso.")
 
-        mes_nome = col_b.selectbox("Mês", MESES, index=mes_padrao - 1)
-        ano = col_c.number_input("Ano", min_value=2020, max_value=2100, value=ano_padrao, step=1)
 
-        mes_num = MESES.index(mes_nome) + 1
-        competencia = ultimo_dia_mes(int(ano), mes_num)
+def cadastrar_dados_exemplo():
+    db = Database()
+    auditoria = AuditoriaService(db)
 
-        st.markdown("### Incluir operação")
+    empresa_service = EmpresaService(db)
+    operacao_service = OperacaoService(db)
+    erp_service = ERPService(db)
 
-        with st.form("form_incluir_operacao", clear_on_submit=True):
-            c1, c2 = st.columns([3, 2])
-            operacao = c1.selectbox("Operação", OPERACOES)
-            valor = c2.number_input("Valor", min_value=0.0, format="%.2f", step=100.00)
-
-            add = st.form_submit_button("Incluir item")
-
-            if add:
-                if valor <= 0:
-                    st.warning("Informe um valor maior que zero.")
-                else:
-                    valor_calc, pis, cofins = calcular_impostos(operacao, valor)
-                    mapa = MAPEAMENTO_ERP.get(operacao, {"debito": "", "credito": "", "historico": operacao.upper()})
-
-                    st.session_state.itens_apuracao.append({
-                        "operacao": operacao,
-                        "valor": float(valor_calc),
-                        "pis": float(pis),
-                        "cofins": float(cofins),
-                        "debito": mapa["debito"],
-                        "credito": mapa["credito"],
-                        "historico": mapa["historico"],
-                        "data": competencia.strftime("%d/%m/%Y")
-                    })
-                    st.rerun()
-
-        st.markdown("### Itens lançados")
-
-        if not st.session_state.itens_apuracao:
-            st.info("Nenhum item incluído nesta apuração.")
-        else:
-            df_itens = pd.DataFrame(st.session_state.itens_apuracao)
-            df_visual = df_itens[["operacao", "valor", "pis", "cofins", "debito", "credito", "historico", "data"]].copy()
-
-            df_visual["valor"] = df_visual["valor"].apply(formata_real)
-            df_visual["pis"] = df_visual["pis"].apply(formata_real)
-            df_visual["cofins"] = df_visual["cofins"].apply(formata_real)
-
-            st.dataframe(df_visual, use_container_width=True, hide_index=True)
-
-            total_base = sum(Decimal(str(x)) for x in df_itens["valor"])
-            total_pis = sum(Decimal(str(x)) for x in df_itens["pis"])
-            total_cofins = sum(Decimal(str(x)) for x in df_itens["cofins"])
-
-            r1, r2, r3 = st.columns(3)
-            r1.metric("Base Total", formata_real(total_base))
-            r2.metric("PIS Total", formata_real(total_pis))
-            r3.metric("COFINS Total", formata_real(total_cofins))
-
-            c1, c2, c3 = st.columns(3)
-
-            if c1.button("Limpar itens"):
-                st.session_state.itens_apuracao = []
-                st.rerun()
-
-            if c2.button("Salvar apuração no banco"):
-                try:
-                    salvar_apuracao_no_banco(empresa_id, competencia, st.session_state.itens_apuracao)
-                    st.success("Apuração gravada com sucesso.")
-                except Exception:
-                    st.warning("A gravação da apuração precisa ser ajustada aos nomes reais das colunas da tabela historico_apuracoes.")
-
-            if c3.button("Preparar relatório e exportação"):
-                st.success("Itens prontos para relatório e exportação.")
-
-elif menu == "Relatórios & Exportação":
-    st.markdown('<div class="section-title">Relatórios & Exportação</div>', unsafe_allow_html=True)
-
-    df_empresas = listar_empresas()
-
-    if df_empresas.empty:
-        st.warning("Cadastre uma empresa para gerar relatórios.")
-    elif not st.session_state.itens_apuracao:
-        st.warning("Inclua itens na apuração mensal antes de exportar.")
+    cur = db.execute("SELECT COUNT(*) AS total FROM empresas")
+    if cur.fetchone()["total"] == 0:
+        empresa_id = empresa_service.criar_empresa(
+            nome="Minha Empresa Contábil LTDA",
+            cnpj="00.000.000/0001-00",
+            regime_tributario="Lucro Real",
+            tipo_empresa="servico",
+            tipo_estabelecimento="matriz",
+            grupo_empresarial="Grupo Exemplo",
+            cnae="23.30-3-05",
+            descricao_cnae="Preparação de massa de concreto e argamassa para construção"
+        )
+        print(f"Empresa exemplo criada. ID={empresa_id}")
     else:
-        opcoes_empresas = {
-            f"{row['nome']} - {formatar_cnpj(row['cnpj'])}": row["id"]
-            for _, row in df_empresas.iterrows()
-        }
+        empresa_id = db.execute("SELECT id FROM empresas LIMIT 1").fetchone()["id"]
 
-        c1, c2, c3 = st.columns([3, 1, 1])
+    cur = db.execute("SELECT COUNT(*) AS total FROM operacoes")
+    if cur.fetchone()["total"] == 0:
+        op1 = operacao_service.criar_operacao("Venda de Serviços", "debito", "receita_operacional", 0)
+        op2 = operacao_service.criar_operacao("Receita Financeira", "debito", "receita_financeira", 1)
+        op3 = operacao_service.criar_operacao("Compra Mercador/Insumos", "credito", "credito_insumos", 0)
+        print(f"Operações exemplo criadas: {op1}, {op2}, {op3}")
 
-        empresa_label = c1.selectbox("Empresa para emissão", list(opcoes_empresas.keys()))
-        empresa_id = opcoes_empresas[empresa_label]
-        empresa = buscar_empresa_por_id(empresa_id)
+    cur = db.execute("SELECT COUNT(*) AS total FROM mapeamentos_erp")
+    if cur.fetchone()["total"] == 0:
+        erp_service.criar_mapeamento("PIS A RECUPERAR", "1.1.01", "2.1.01", "Vr. ref. Pis a recuperar {competencia}")
+        erp_service.criar_mapeamento("COFINS A RECUPERAR", "1.1.02", "2.1.02", "Vr. ref. Cofins a recuperar {competencia}")
+        erp_service.criar_mapeamento("PIS DEBITO", "3.1.01", "2.1.03", "Vr. ref. Pis {competencia}")
+        erp_service.criar_mapeamento("COFINS DEBITO", "3.1.02", "2.1.04", "Vr. ref. Cofins {competencia}")
+        print("Mapeamentos ERP exemplo criados.")
 
-        hoje = date.today()
-        mes_padrao = hoje.month - 1 if hoje.month > 1 else 12
-        ano_padrao = hoje.year if hoje.month > 1 else hoje.year - 1
+    db.close()
 
-        mes_nome = c2.selectbox("Mês de referência", MESES, index=mes_padrao - 1)
-        ano = c3.number_input("Ano de referência", min_value=2020, max_value=2100, value=ano_padrao, step=1)
 
-        competencia = ultimo_dia_mes(int(ano), MESES.index(mes_nome) + 1)
-        df_itens = pd.DataFrame(st.session_state.itens_apuracao)
+def testar_fluxo_basico():
+    db = Database()
+    auditoria = AuditoriaService(db)
+    fechamento_service = FechamentoService(db, auditoria)
+    lanc_service = LancamentoService(db, auditoria, fechamento_service)
+    custo_service = CustoService(db, auditoria)
+    relatorio_service = RelatorioService(db)
+    auth_service = AuthService(db)
 
-        st.markdown("### Resumo pronto para emissão")
-        st.dataframe(df_itens, use_container_width=True, hide_index=True)
+    user = auth_service.autenticar("admin", "admin123")
+    if not user:
+        db.close()
+        raise RuntimeError("Não foi possível autenticar admin/admin123")
 
-        col_pdf, col_csv, col_xlsx = st.columns(3)
+    usuario_id = user["id"]
+    empresa_id = db.execute("SELECT id FROM empresas LIMIT 1").fetchone()["id"]
 
-        pdf_bytes = gerar_pdf_apuracao(empresa, competencia, df_itens)
+    operacoes = db.execute("SELECT id, nome FROM operacoes ORDER BY id").fetchall()
+    mapa_ops = {o["nome"]: o["id"] for o in operacoes}
 
-        with col_pdf:
-            st.download_button(
-                "Baixar PDF",
-                data=pdf_bytes,
-                file_name=f"apuracao_{limpar_cnpj(empresa['cnpj'])}_{competencia.strftime('%m_%Y')}.pdf",
-                mime="application/pdf"
-            )
+    print("\n--- Lançando débito normal ---")
+    lanc1 = lanc_service.criar_lancamento(
+        empresa_id=empresa_id,
+        operacao_id=mapa_ops["Venda de Serviços"],
+        competencia="03/2026",
+        valor_base=150000.00,
+        observacao="Venda de serviços março",
+        usuario_id=usuario_id
+    )
+    print(f"Lançamento criado: {lanc1}")
 
-        df_erp = montar_df_erp(st.session_state.itens_apuracao, competencia)
+    print("\n--- Lançando receita financeira ---")
+    lanc2 = lanc_service.criar_lancamento(
+        empresa_id=empresa_id,
+        operacao_id=mapa_ops["Receita Financeira"],
+        competencia="03/2026",
+        valor_base=10000.00,
+        observacao="Receita financeira março",
+        usuario_id=usuario_id
+    )
+    print(f"Lançamento criado: {lanc2}")
 
-        with col_csv:
-            csv_data = df_erp.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-            st.download_button(
-                "Baixar CSV ERP",
-                data=csv_data,
-                file_name=f"erp_{limpar_cnpj(empresa['cnpj'])}_{competencia.strftime('%m_%Y')}.csv",
-                mime="text/csv"
-            )
+    print("\n--- Lançando crédito normal ---")
+    lanc3 = lanc_service.criar_lancamento(
+        empresa_id=empresa_id,
+        operacao_id=mapa_ops["Compra Mercador/Insumos"],
+        competencia="03/2026",
+        valor_base=40000.00,
+        observacao="Compra de insumos março",
+        usuario_id=usuario_id
+    )
+    print(f"Lançamento criado: {lanc3}")
 
-        with col_xlsx:
-            excel_buffer = gerar_excel_em_memoria(df_erp)
-            st.download_button(
-                "Baixar Excel ERP",
-                data=excel_buffer.getvalue(),
-                file_name=f"erp_{limpar_cnpj(empresa['cnpj'])}_{competencia.strftime('%m_%Y')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+    print("\n--- Lançando crédito retroativo de janeiro apresentado em março ---")
+    lanc4 = lanc_service.criar_lancamento(
+        empresa_id=empresa_id,
+        operacao_id=mapa_ops["Compra Mercador/Insumos"],
+        competencia="01/2026",
+        valor_base=12000.00,
+        observacao="NF janeiro apresentada em março",
+        usuario_id=usuario_id,
+        origem_retroativa=1,
+        competencia_origem="01/2026",
+        data_apresentacao="2026-03-20"
+    )
+    print(f"Lançamento retroativo criado: {lanc4}")
+
+    print("\n--- Calculando custo ---")
+    custo_id = custo_service.calcular_e_registrar_custo(
+        empresa_id=empresa_id,
+        competencia="03/2026",
+        valor_bruto=50000.00,
+        observacao="Cálculo de custo do mês",
+        usuario_id=usuario_id
+    )
+    print(f"Custo registrado: {custo_id}")
+
+    print("\n--- Fechando competência 03/2026 ---")
+    fechamento_id = fechamento_service.fechar_competencia(
+        empresa_id=empresa_id,
+        competencia="03/2026",
+        usuario_id=usuario_id,
+        observacao="Fechamento inicial março/2026"
+    )
+    print(f"Fechamento realizado: {fechamento_id}")
+
+    print("\n--- Resumo da competência ---")
+    resumo = relatorio_service.resumo_competencia(empresa_id, "03/2026")
+    print(json.dumps(resumo, indent=2, ensure_ascii=False, default=str))
+
+    db.close()
+
+
+if __name__ == "__main__":
+    inicializar_banco()
+    cadastrar_dados_exemplo()
+    testar_fluxo_basico()
