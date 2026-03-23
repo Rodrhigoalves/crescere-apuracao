@@ -8,9 +8,6 @@ from calendar import monthrange
 from decimal import Decimal, ROUND_HALF_UP
 from fpdf import FPDF
 
-# 
-# CONFIGURAÇÃO DA PÁGINA
-# 
 st.set_page_config(
     page_title="Crescere - PIS/COFINS",
     layout="wide",
@@ -22,12 +19,10 @@ st.markdown("""
     .main {
         background-color: #f5f7f9;
     }
-
     .block-container {
         padding-top: 1.5rem;
         padding-bottom: 1rem;
     }
-
     .stButton > button {
         width: 100%;
         border-radius: 6px;
@@ -37,26 +32,22 @@ st.markdown("""
         border: 0;
         font-weight: 600;
     }
-
     .stButton > button:hover {
         background-color: #003964;
         color: white;
     }
-
     .stDownloadButton > button {
         width: 100%;
         border-radius: 6px;
         height: 2.9em;
         font-weight: 600;
     }
-
     .stTextInput > div > div > input,
     .stTextArea textarea,
     .stSelectbox div[data-baseweb="select"] > div,
     .stNumberInput input {
         border-radius: 6px !important;
     }
-
     .top-card {
         background: white;
         padding: 14px 18px;
@@ -64,12 +55,10 @@ st.markdown("""
         border: 1px solid #e8ecef;
         margin-bottom: 12px;
     }
-
     .small-muted {
         color: #6c757d;
         font-size: 0.92rem;
     }
-
     .section-title {
         font-size: 1.15rem;
         font-weight: 700;
@@ -79,9 +68,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 
-# CONSTANTES E MAPEAMENTOS
-# 
 MESES = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
     "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
@@ -101,7 +87,6 @@ OPERACOES = [
     "Receita Financeira"
 ]
 
-# Você pode ajustar estes códigos conforme a regra do seu ERP
 MAPEAMENTO_ERP = {
     "Compra Mercador/Insumos": {"debito": "3101", "credito": "2101", "historico": "COMPRA MERCADORIA/INSUMOS"},
     "Combustível (Diesel)": {"debito": "3102", "credito": "2101", "historico": "COMBUSTIVEL DIESEL"},
@@ -116,9 +101,6 @@ MAPEAMENTO_ERP = {
     "Receita Financeira": {"debito": "1101", "credito": "4201", "historico": "RECEITA FINANCEIRA"}
 }
 
-# 
-# ESTADO INICIAL
-# 
 def estado_form_empresa():
     return {
         "id": None,
@@ -140,12 +122,6 @@ if "itens_apuracao" not in st.session_state:
 if "filtro_empresa" not in st.session_state:
     st.session_state.filtro_empresa = ""
 
-if "empresa_selecionada_id" not in st.session_state:
-    st.session_state.empresa_selecionada_id = None
-
-# 
-# FUNÇÕES UTILITÁRIAS
-# 
 def get_db_connection():
     return mysql.connector.connect(**st.secrets["mysql"])
 
@@ -207,32 +183,24 @@ def calcular_impostos(operacao, valor):
     cofins = decimal_2(valor_dec * aliq_cofins)
     return valor_dec, pis, cofins
 
-# 
-# FUNÇÕES DE BANCO - EMPRESAS
-# 
-def listar_empresas(apenas_ativas=True, filtro=""):
+def listar_empresas(filtro=""):
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    sql_base = """
+    sql = """
         SELECT id, nome, fantasia, cnpj, regime, tipo, cnae, endereco
         FROM empresas
         WHERE 1=1
     """
     params = []
 
-    # Como você não informou coluna de status/inativo existente,
-    # não estou filtrando por inativo no banco para evitar erro.
-    # Se existir uma coluna como ativo/inativo/status, podemos ligar depois.
-
     if filtro:
-        sql_base += " AND (nome LIKE %s OR cnpj LIKE %s)"
+        sql += " AND (nome LIKE %s OR cnpj LIKE %s)"
         termo = f"%{filtro}%"
         params.extend([termo, termo])
 
-    sql_base += " ORDER BY nome"
-
-    cursor.execute(sql_base, params)
+    sql += " ORDER BY nome"
+    cursor.execute(sql, params)
     rows = cursor.fetchall()
     conn.close()
     return pd.DataFrame(rows)
@@ -253,7 +221,7 @@ def cnpj_ja_existe(cnpj_limpo, id_atual=None):
     conn = get_db_connection()
     cursor = conn.cursor()
     if id_atual:
-        cursor.execute("SELECT COUNT(*) FROM empresas WHERE cnpj = %s AND id &lt;> %s", (cnpj_limpo, id_atual))
+        cursor.execute("SELECT COUNT(*) FROM empresas WHERE cnpj = %s AND id <> %s", (cnpj_limpo, id_atual))
     else:
         cursor.execute("SELECT COUNT(*) FROM empresas WHERE cnpj = %s", (cnpj_limpo,))
     total = cursor.fetchone()[0]
@@ -305,14 +273,7 @@ def salvar_empresa(dados):
     conn.commit()
     conn.close()
 
-# 
-# FUNÇÕES DE BANCO - APURAÇÃO
-# 
 def salvar_apuracao_no_banco(empresa_id, competencia, itens):
-    """
-    Ajuste esta função se os nomes reais da tabela historico_apuracoes
-    forem diferentes no seu banco.
-    """
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -338,13 +299,10 @@ def salvar_apuracao_no_banco(empresa_id, competencia, itens):
     conn.commit()
     conn.close()
 
-# 
-# PDF
-# 
 class PDFRelatorio(FPDF):
     def header(self):
         self.set_fill_color(0, 75, 135)
-        self.rect(0, 0, 210, 22, 'F')
+        self.rect(0, 0, 210, 22, "F")
         self.set_text_color(255, 255, 255)
         self.set_font("Arial", "B", 14)
         self.cell(0, 12, "CRESCERE - RELATÓRIO DE APURAÇÃO PIS/COFINS", 0, 1, "C")
@@ -402,12 +360,8 @@ def gerar_pdf_apuracao(empresa, competencia, itens_df):
     pdf.cell(30, 8, formata_real(total_cofins), 1, 0, "R", True)
     pdf.cell(30, 8, formata_real(total_pis + total_cofins), 1, 1, "R", True)
 
-    pdf_output = pdf.output(dest="S").encode("latin-1")
-    return pdf_output
+    return pdf.output(dest="S").encode("latin-1")
 
-# 
-# EXPORTAÇÃO ERP
-# 
 def montar_df_erp(itens, competencia):
     linhas = []
     data_str = competencia.strftime("%d/%m/%Y")
@@ -430,20 +384,11 @@ def gerar_excel_em_memoria(df):
     output.seek(0)
     return output
 
-# 
-# SIDEBAR
-# 
 with st.sidebar:
     st.title("🛡️ Crescere")
     st.caption("Apuração PIS/COFINS")
-    menu = st.radio(
-        "Módulos",
-        ["Início", "Gestão de Empresas", "Apuração Mensal", "Relatórios & Exportação"]
-    )
+    menu = st.radio("Módulos", ["Início", "Gestão de Empresas", "Apuração Mensal", "Relatórios & Exportação"])
 
-# 
-# TELA INICIAL
-# 
 if menu == "Início":
     st.markdown('<div class="section-title">Visão Geral</div>', unsafe_allow_html=True)
 
@@ -455,19 +400,6 @@ if menu == "Início":
     with c3:
         st.markdown('<div class="top-card"><b>Relatórios & ERP</b><br><span class="small-muted">PDF, CSV e Excel para integração</span></div>', unsafe_allow_html=True)
 
-    st.markdown("""
-    Sistema preparado para:
-
-    - **gestão de empresas**
-    - **apuração por operação**
-    - **cálculo automático de tributos**
-    - **relatório profissional em PDF**
-    - **exportação para ERP**
-    """)
-
-# 
-# GESTÃO DE EMPRESAS
-# 
 elif menu == "Gestão de Empresas":
     st.markdown('<div class="section-title">Gestão de Empresas</div>', unsafe_allow_html=True)
 
@@ -506,16 +438,8 @@ elif menu == "Gestão de Empresas":
 
             col3, col4, col5 = st.columns([2, 2, 1])
             cnpj = col3.text_input("CNPJ", value=formatar_cnpj(f["cnpj"]) if f["cnpj"] else "")
-            regime = col4.selectbox(
-                "Regime Tributário",
-                ["Lucro Real", "Lucro Presumido"],
-                index=0 if f["regime"] == "Lucro Real" else 1
-            )
-            tipo = col5.selectbox(
-                "Tipo",
-                ["Matriz", "Filial"],
-                index=0 if f["tipo"] == "Matriz" else 1
-            )
+            regime = col4.selectbox("Regime Tributário", ["Lucro Real", "Lucro Presumido"], index=0 if f["regime"] == "Lucro Real" else 1)
+            tipo = col5.selectbox("Tipo", ["Matriz", "Filial"], index=0 if f["tipo"] == "Matriz" else 1)
 
             cnae = st.text_input("CNAE", value=f["cnae"])
             endereco = st.text_area("Endereço", value=f["endereco"], height=90)
@@ -567,9 +491,7 @@ elif menu == "Gestão de Empresas":
                     c1, c2 = st.columns([6, 1])
                     c1.markdown(
                         f"**{row['nome']}**  \n"
-                        f"CNPJ: {formatar_cnpj(row['cnpj'])} | "
-                        f"Tipo: {row['tipo']} | "
-                        f"Regime: {row['regime']}"
+                        f"CNPJ: {formatar_cnpj(row['cnpj'])} | Tipo: {row['tipo']} | Regime: {row['regime']}"
                     )
                     if c2.button("Editar", key=f"editar_empresa_{row['id']}"):
                         st.session_state.dados_form = {
@@ -585,9 +507,6 @@ elif menu == "Gestão de Empresas":
                         st.rerun()
                     st.divider()
 
-# 
-# APURAÇÃO MENSAL
-# 
 elif menu == "Apuração Mensal":
     st.markdown('<div class="section-title">Apuração Mensal</div>', unsafe_allow_html=True)
 
@@ -627,7 +546,7 @@ elif menu == "Apuração Mensal":
             add = st.form_submit_button("Incluir item")
 
             if add:
-                if valor &lt;= 0:
+                if valor <= 0:
                     st.warning("Informe um valor maior que zero.")
                 else:
                     valor_calc, pis, cofins = calcular_impostos(operacao, valor)
@@ -679,14 +598,11 @@ elif menu == "Apuração Mensal":
                     salvar_apuracao_no_banco(empresa_id, competencia, st.session_state.itens_apuracao)
                     st.success("Apuração gravada com sucesso.")
                 except Exception:
-                    st.warning("A interface está pronta, mas a gravação da apuração precisa ser ajustada ao schema real da sua tabela historico_apuracoes.")
+                    st.warning("A gravação da apuração precisa ser ajustada aos nomes reais das colunas da tabela historico_apuracoes.")
 
             if c3.button("Preparar relatório e exportação"):
                 st.success("Itens prontos para relatório e exportação.")
 
-# 
-# RELATÓRIOS & EXPORTAÇÃO
-# 
 elif menu == "Relatórios & Exportação":
     st.markdown('<div class="section-title">Relatórios & Exportação</div>', unsafe_allow_html=True)
 
