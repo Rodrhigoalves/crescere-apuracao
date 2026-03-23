@@ -1196,7 +1196,6 @@ def cadastrar_dados_exemplo():
 
 
 def testar_fluxo_basico():
-    def testar_fluxo_basico():
     db = Database()
     auditoria = AuditoriaService(db)
     fechamento_service = FechamentoService(db, auditoria)
