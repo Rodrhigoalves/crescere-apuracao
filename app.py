@@ -1,2 +1,2 @@
-del apuracao_piscofins.db
-python app.py
+import sqlite3
+import hashlib
