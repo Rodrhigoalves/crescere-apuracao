@@ -9,9 +9,9 @@ DB_PATH = "apuracao_piscofins.db"
 DIA_CORTE_RETROATIVO = 25
 
 
-# 
+# =========================================================
 # UTILITÁRIOS
-# 
+# =========================================================
 
 def agora_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -38,6 +38,7 @@ def normalizar_competencia(comp: str) -> str:
     Aceita:
     - YYYY-MM
     - MM/YYYY
+
     Retorna sempre YYYY-MM
     """
     comp = comp.strip()
@@ -86,9 +87,9 @@ def to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
     return dict(row)
 
 
-# 
+# =========================================================
 # BANCO DE DADOS
-# 
+# =========================================================
 
 class Database:
     def __init__(self, db_path: str = DB_PATH):
@@ -143,9 +144,9 @@ class Database:
         self.commit()
 
 
-# 
+# =========================================================
 # MIGRAÇÃO INCREMENTAL SEGURA
-# 
+# =========================================================
 
 class Migrator:
     def __init__(self, db: Database):
@@ -448,12 +449,12 @@ class Migrator:
         self.db.create_index_if_not_exists("idx_lanc_empresa_comp", "lancamentos", "empresa_id, competencia")
         self.db.create_index_if_not_exists("idx_lanc_comp_aprov", "lancamentos", "competencia_aproveitamento")
         self.db.create_index_if_not_exists("idx_fech_empresa_comp", "fechamentos", "empresa_id, competencia")
-        self.db.create_index_if_not_exists("idx_aud_comp", "auditoria", "competencia")
+        self.db.create_index_if_not_exists("idx_auditoria_comp", "auditoria", "competencia")
 
 
-# 
+# =========================================================
 # AUDITORIA
-# 
+# =========================================================
 
 class AuditoriaService:
     def __init__(self, db: Database):
@@ -490,9 +491,9 @@ class AuditoriaService:
         self.db.commit()
 
 
-# 
+# =========================================================
 # AUTENTICAÇÃO
-# 
+# =========================================================
 
 class AuthService:
     def __init__(self, db: Database):
@@ -536,9 +537,9 @@ class AuthService:
             print("Usuário admin criado com senha padrão: admin123")
 
 
-# 
+# =========================================================
 # EMPRESAS
-# 
+# =========================================================
 
 class EmpresaService:
     def __init__(self, db: Database):
@@ -581,14 +582,10 @@ class EmpresaService:
         cur = self.db.execute("SELECT * FROM empresas WHERE id = ?", (empresa_id,))
         return cur.fetchone()
 
-    def listar_empresas(self) -> List[sqlite3.Row]:
-        cur = self.db.execute("SELECT * FROM empresas ORDER BY id")
-        return cur.fetchall()
 
-
-# 
+# =========================================================
 # OPERAÇÕES
-# 
+# =========================================================
 
 class OperacaoService:
     def __init__(self, db: Database):
@@ -621,14 +618,10 @@ class OperacaoService:
         cur = self.db.execute("SELECT * FROM operacoes WHERE id = ?", (operacao_id,))
         return cur.fetchone()
 
-    def listar_operacoes(self) -> List[sqlite3.Row]:
-        cur = self.db.execute("SELECT * FROM operacoes ORDER BY id")
-        return cur.fetchall()
 
-
-# 
+# =========================================================
 # MAPEAMENTO ERP
-# 
+# =========================================================
 
 class ERPService:
     def __init__(self, db: Database):
@@ -656,9 +649,9 @@ class ERPService:
         return cur.lastrowid
 
 
-# 
+# =========================================================
 # REGRAS FISCAIS
-# 
+# =========================================================
 
 class RegraFiscalService:
     ALIQ_PIS = 0.0165
@@ -674,22 +667,17 @@ class RegraFiscalService:
 
     @classmethod
     def determinar_competencia_aproveitamento(cls, data_apresentacao: str, dia_corte: int = DIA_CORTE_RETROATIVO) -> str:
-        """
-        Regra:
-        - Se apresentada antes do dia de corte, aproveita na competência anterior ao mês da apresentação.
-        - Se apresentada no dia de corte ou depois, aproveita na própria competência do mês da apresentação.
-        """
         d = parse_data(data_apresentacao)
         comp_apresentacao = f"{d.year}-{str(d.month).zfill(2)}"
 
-        if d.day &lt; dia_corte:
+        if d.day < dia_corte:
             return competencia_anterior(comp_apresentacao)
         return comp_apresentacao
 
 
-# 
+# =========================================================
 # FECHAMENTOS
-# 
+# =========================================================
 
 class FechamentoService:
     def __init__(self, db: Database, auditoria: AuditoriaService):
@@ -715,6 +703,7 @@ class FechamentoService:
         fechamento_ant = self.buscar_fechamento(empresa_id, comp_ant)
         if not fechamento_ant:
             return 0.0, 0.0
+
         return (
             round(fechamento_ant["saldo_transportar_pis"] or 0, 2),
             round(fechamento_ant["saldo_transportar_cofins"] or 0, 2),
@@ -759,8 +748,8 @@ class FechamentoService:
         resultado_pis = round(total_debito_pis - total_credito_pis - saldo_ant_pis - credito_retro_pis, 2)
         resultado_cofins = round(total_debito_cofins - total_credito_cofins - saldo_ant_cofins - credito_retro_cofins, 2)
 
-        saldo_transportar_pis = abs(resultado_pis) if resultado_pis &lt; 0 else 0.0
-        saldo_transportar_cofins = abs(resultado_cofins) if resultado_cofins &lt; 0 else 0.0
+        saldo_transportar_pis = abs(resultado_pis) if resultado_pis < 0 else 0.0
+        saldo_transportar_cofins = abs(resultado_cofins) if resultado_cofins < 0 else 0.0
 
         existente = self.buscar_fechamento(empresa_id, competencia)
         antes = to_dict(existente)
@@ -914,9 +903,9 @@ class FechamentoService:
         )
 
 
-# 
+# =========================================================
 # LANÇAMENTOS
-# 
+# =========================================================
 
 class LancamentoService:
     def __init__(self, db: Database, auditoria: AuditoriaService, fechamento_service: FechamentoService):
@@ -944,7 +933,7 @@ class LancamentoService:
     ) -> int:
         competencia = normalizar_competencia(competencia)
 
-        if valor_base &lt;= 0:
+        if valor_base <= 0:
             raise ValueError("valor_base deve ser maior que zero.")
 
         if self.fechamento_service.competencia_fechada(empresa_id, competencia):
@@ -1036,9 +1025,9 @@ class LancamentoService:
         return cur.fetchall()
 
 
-# 
+# =========================================================
 # CUSTOS
-# 
+# =========================================================
 
 class CustoService:
     def __init__(self, db: Database, auditoria: AuditoriaService):
@@ -1063,7 +1052,7 @@ class CustoService:
         observacao: str,
         usuario_id: int
     ) -> int:
-        if valor_bruto &lt;= 0:
+        if valor_bruto <= 0:
             raise ValueError("valor_bruto deve ser maior que zero.")
 
         empresa = self.db.execute("SELECT * FROM empresas WHERE id = ?", (empresa_id,)).fetchone()
@@ -1114,9 +1103,9 @@ class CustoService:
         return custo_id
 
 
-# 
-# RELATÓRIOS SIMPLES
-# 
+# =========================================================
+# RELATÓRIO SIMPLES DE CONSOLE
+# =========================================================
 
 class RelatorioService:
     def __init__(self, db: Database):
@@ -1155,9 +1144,9 @@ class RelatorioService:
         }
 
 
-# 
-# FUNÇÕES DE TESTE
-# 
+# =========================================================
+# FUNÇÕES DE EXEMPLO
+# =========================================================
 
 def inicializar_banco():
     db = Database()
