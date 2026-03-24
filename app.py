@@ -11,6 +11,7 @@ import os
 # --- 1. CONFIGURAÇÕES VISUAIS E ESTADOS ---
 st.set_page_config(page_title="Crescere - Apuração Fiscal", layout="wide")
 
+# CSS Customizado (Destaque para acessibilidade no input de texto e cores da Crescere)
 st.markdown("""
 <style>
     .stApp { background-color: #f4f6f9; }
@@ -18,8 +19,16 @@ st.markdown("""
     .stButton>button:hover { background-color: #003366; color: white; }
     div[data-testid="stForm"], .css-1d391kg { background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border: 1px solid #e2e8f0;}
     h1, h2, h3, h4 { color: #0f172a; font-weight: 600; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    
+    /* Acessibilidade: Destaque visual nos campos de input quando o usuário clica e fundo leve no padrão */
+    .stTextInput input { background-color: #f8fafc; border: 1px solid #cbd5e1; }
+    .stTextInput input:focus { border: 2px solid #004b87 !important; background-color: #e6f0fa !important; }
 </style>
 """, unsafe_allow_html=True)
+
+# Simulação de Login (Usuário Fixo Injetado no Sistema)
+if 'usuario_logado' not in st.session_state:
+    st.session_state.usuario_logado = "Rodrigo"
 
 # Lógica de Competência Padrão (Mês Anterior)
 hoje = date.today()
@@ -33,9 +42,12 @@ if 'dados_form' not in st.session_state:
 if 'rascunho_lancamentos' not in st.session_state:
     st.session_state.rascunho_lancamentos = []
 
-# --- 2. FUNÇÕES BASE ---
+# --- 2. FUNÇÕES BASE E FORMATAÇÃO ---
 def get_db_connection():
     return mysql.connector.connect(**st.secrets["mysql"])
+
+def formatar_moeda(valor):
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def consultar_cnpj(cnpj_limpo):
     url = f"https://receitaws.com.br/v1/cnpj/{cnpj_limpo}"
@@ -52,7 +64,10 @@ def modulo_empresas():
     
     with tab_cad:
         c_busca, c_btn = st.columns([3,1])
-        cnpj_input = c_busca.text_input("Consultar CNPJ na Receita Federal", placeholder="Apenas números")
+        # Campo de CNPJ (Foco principal)
+        st.markdown("<small style='color:#004b87; font-weight:bold;'>↓ Digite o CNPJ para busca automática</small>", unsafe_allow_html=True)
+        cnpj_input = c_busca.text_input("CNPJ de Busca", placeholder="Apenas números", label_visibility="collapsed")
+        
         if c_btn.button("Consultar CNPJ", use_container_width=True):
             res = consultar_cnpj(cnpj_input.replace(".","").replace("/","").replace("-",""))
             if res and res.get('status') != 'ERROR':
@@ -71,7 +86,7 @@ def modulo_empresas():
         fanta = c2.text_input("Nome Fantasia", value=f['fantasia'])
         
         c3, c4, c5 = st.columns([2, 1.5, 1.5])
-        cnpj = c3.text_input("CNPJ", value=f['cnpj'])
+        cnpj = c3.text_input("CNPJ do Cadastro", value=f['cnpj'])
         regime = c4.selectbox("Regime Tributário", ["Lucro Real", "Lucro Presumido"], index=0 if f['regime'] == "Lucro Real" else 1)
         tipo = c5.selectbox("Tipo de Unidade", ["Matriz", "Filial"], index=0 if f['tipo'] == "Matriz" else 1)
         
@@ -115,7 +130,163 @@ def modulo_empresas():
             pass
         conn.close()
 
-# --- 4. MÓDULO DE APURAÇÃO E RASCUNHO ---
+# --- 4. MÓDULO DE APURAÇÃO (COM RASCUNHO E AUDITORIA) ---
+def calcular_impostos(valor_base, operacao_nome, regime_empresa):
+    if regime_empresa == "Lucro Real":
+        if operacao_nome == "Receita Financeira":
+            return valor_base * 0.0065, valor_base * 0.0400
+        else:
+            return valor_base * 0.0165, valor_base * 0.0760
+    else:
+        return valor_base * 0.0065, valor_base * 0.0300
+
+def modulo_apuracao():
+    st.markdown("## Apuração Mensal")
+    conn = get_db_connection()
+    try:
+        df_empresas = pd.read_sql("SELECT id, nome, cnpj, regime FROM empresas", conn)
+        df_operacoes = pd.read_sql("SELECT * FROM operacoes ORDER BY tipo DESC, nome ASC", conn) # DESC traz RECEITA primeiro
+    except:
+        st.warning("Banco de dados não encontrado. Acesse 'Parâmetros Contábeis' e faça o Reset do Sistema.")
+        conn.close(); return
+
+    if df_empresas.empty:
+        st.info("Cadastre uma empresa primeiro."); conn.close(); return
+
+    c_empresa, c_comp, c_user = st.columns([2, 1, 1])
+    opcoes_empresas = df_empresas.apply(lambda row: f"{row['nome']} - {row['cnpj']}", axis=1)
+    empresa_selecionada = c_empresa.selectbox("Empresa Ativa", opcoes_empresas)
+    empresa_id = int(df_empresas.loc[opcoes_empresas == empresa_selecionada].iloc[0]['id'])
+    regime_empresa = df_empresas.loc[opcoes_empresas == empresa_selecionada].iloc[0]['regime']
+    
+    competencia = c_comp.text_input("Competência (MM/AAAA)", value=competencia_padrao)
+    
+    # Usuário Bloqueado na Interface (Vem da Sessão)
+    c_user.text_input("Usuário Logado", value=st.session_state.usuario_logado, disabled=True)
+
+    st.write("---")
+    
+    col_entrada, col_rascunho = st.columns([1, 1.2], gap="large")
+
+    with col_entrada:
+        st.markdown("#### Inserção de Dados")
+        operacao_nome = st.selectbox("Operação", df_operacoes['nome'].tolist())
+        valor_base = st.number_input("Valor da Base (R$)", min_value=0.00, step=100.00, format="%.2f")
+        historico = st.text_input("Observação Livre", placeholder="Opcional...")
+        
+        is_retroativo = st.checkbox("Lançamento Retroativo (Mês Anterior)")
+        comp_origem = st.text_input("Mês de Origem", placeholder="MM/AAAA", disabled=not is_retroativo)
+        
+        if st.button("Adicionar à Lista de Rascunho", use_container_width=True):
+            if valor_base > 0:
+                vp, vc = calcular_impostos(valor_base, operacao_nome, regime_empresa)
+                op_id = int(df_operacoes[df_operacoes['nome'] == operacao_nome].iloc[0]['id'])
+                
+                st.session_state.rascunho_lancamentos.append({
+                    "empresa_id": empresa_id,
+                    "operacao_nome": operacao_nome,
+                    "operacao_id": op_id,
+                    "valor_base": valor_base,
+                    "valor_pis": vp,
+                    "valor_cofins": vc,
+                    "historico": historico,
+                    "is_retroativo": is_retroativo,
+                    "comp_origem": comp_origem if is_retroativo else None
+                })
+                st.rerun()
+            else:
+                st.error("O valor base deve ser maior que zero.")
+
+    with col_rascunho:
+        st.markdown("#### Lista de Rascunho (Pré-Banco)")
+        if len(st.session_state.rascunho_lancamentos) > 0:
+            # Lista Interativa com botão de exclusão
+            for i, item in enumerate(st.session_state.rascunho_lancamentos):
+                c_desc, c_val, c_del = st.columns([5, 3, 1])
+                c_desc.markdown(f"**{item['operacao_nome']}**")
+                c_val.markdown(f"Base: {formatar_moeda(item['valor_base'])}")
+                if c_del.button("❌", key=f"del_{i}"):
+                    st.session_state.rascunho_lancamentos.pop(i)
+                    st.rerun()
+                st.divider()
+            
+            if st.button("💾 Gravar Todos no Banco de Dados", type="primary", use_container_width=True):
+                mes_str, ano_str = competencia.split('/')
+                competencia_db = f"{ano_str}-{mes_str.zfill(2)}"
+                ultimo_dia = calendar.monthrange(int(ano_str), int(mes_str))[1]
+                data_lancamento = f"{ano_str}-{mes_str.zfill(2)}-{ultimo_dia:02d}"
+                
+                cursor = conn.cursor()
+                for item in st.session_state.rascunho_lancamentos:
+                    cursor.execute("""
+                        INSERT INTO lancamentos 
+                        (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, historico, origem_retroativa, competencia_origem, usuario_registro, status_auditoria) 
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'ATIVO')""", 
+                        (item['empresa_id'], item['operacao_id'], competencia_db, data_lancamento, item['valor_base'], item['valor_pis'], item['valor_cofins'], item['historico'], item['is_retroativo'], item['comp_origem'], st.session_state.usuario_logado))
+                
+                conn.commit()
+                st.session_state.rascunho_lancamentos = []
+                st.success("Lançamentos gravados e auditados com sucesso!")
+                st.rerun()
+        else:
+            st.info("Sua lista de rascunho está vazia.")
+
+    st.write("---")
+    st.markdown("#### Extrato Consolidado e Retificação (Padrão SAP)")
+    try:
+        m, a = competencia.split('/'); comp_db = f"{a}-{m.zfill(2)}"
+        # Traz apenas os lançamentos ATIVOS (Os retificados ficam ocultos no extrato, mas salvos no banco)
+        df_lanc = pd.read_sql(f"""SELECT l.id, o.nome as operacao, l.valor_base, l.valor_pis, l.valor_cofins, l.historico FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE l.empresa_id = {empresa_id} AND l.competencia = '{comp_db}' AND l.status_auditoria = 'ATIVO' ORDER BY l.id DESC""", conn)
+        
+        if not df_lanc.empty:
+            df_view = df_lanc.copy()
+            # Aplicando formatação de moeda brasileira para a tela
+            df_view['valor_base'] = df_view['valor_base'].apply(formatar_moeda)
+            df_view['valor_pis'] = df_view['valor_pis'].apply(formatar_moeda)
+            df_view['valor_cofins'] = df_view['valor_cofins'].apply(formatar_moeda)
+            df_view.rename(columns={'operacao': 'Operação', 'valor_base': 'Base de Cálculo', 'valor_pis': 'PIS', 'valor_cofins': 'COFINS', 'historico': 'Observação'}, inplace=True)
+            st.dataframe(df_view[['id', 'Operação', 'Base de Cálculo', 'PIS', 'COFINS', 'Observação']], use_container_width=True, hide_index=True)
+            
+            with st.expander("✏️ Retificar um Lançamento Gravado"):
+                c_id, c_novo_val, c_motivo = st.columns([1, 2, 3])
+                id_retificar = c_id.number_input("ID do Lançamento", min_value=0, step=1)
+                novo_valor_base = c_novo_val.number_input("Novo Valor Base (R$)", min_value=0.01, step=100.00)
+                motivo = c_motivo.text_input("Justificativa (Obrigatório)", placeholder="Motivo da alteração...")
+                
+                if st.button("Processar Retificação Segura"):
+                    if not motivo:
+                        st.error("A justificativa é obrigatória para retificar.")
+                    elif id_retificar not in df_lanc['id'].values:
+                        st.error("ID inválido ou lançamento não pertence a esta competência.")
+                    else:
+                        cursor = conn.cursor(dictionary=True)
+                        cursor.execute(f"SELECT * FROM lancamentos WHERE id = {id_retificar}")
+                        reg_antigo = cursor.fetchone()
+                        
+                        # Invalida o antigo
+                        cursor.execute(f"UPDATE lancamentos SET status_auditoria = 'INATIVO', motivo_alteracao = %s, data_alteracao = CURRENT_TIMESTAMP WHERE id = %s", (f"Retificado por ID subsequente. Motivo: {motivo}", id_retificar))
+                        
+                        # Calcula novos impostos
+                        cursor.execute(f"SELECT nome FROM operacoes WHERE id = {reg_antigo['operacao_id']}")
+                        nome_op = cursor.fetchone()['nome']
+                        novo_vp, novo_vc = calcular_impostos(novo_valor_base, nome_op, regime_empresa)
+                        
+                        # Insere o novo
+                        cursor.execute("""
+                            INSERT INTO lancamentos 
+                            (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, historico, origem_retroativa, competencia_origem, usuario_registro, status_auditoria, motivo_alteracao) 
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'ATIVO', %s)""", 
+                            (reg_antigo['empresa_id'], reg_antigo['operacao_id'], reg_antigo['competencia'], reg_antigo['data_lancamento'], novo_valor_base, novo_vp, novo_vc, reg_antigo['historico'], reg_antigo['origem_retroativa'], reg_antigo['competencia_origem'], st.session_state.usuario_logado, f"Nova versão do ID {id_retificar}"))
+                        
+                        conn.commit()
+                        st.success("Retificação concluída com sucesso! Histórico preservado.")
+                        st.rerun()
+    except Exception as e:
+        pass
+        
+    conn.close()
+
+# --- 5. PARÂMETROS CONTÁBEIS E RESET ---
 def resetar_tabelas_apuracao():
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -134,6 +305,7 @@ def resetar_tabelas_apuracao():
         )
     """)
     
+    # Inclusão da coluna status_auditoria
     cursor.execute("""
         CREATE TABLE lancamentos (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -148,149 +320,141 @@ def resetar_tabelas_apuracao():
             origem_retroativa BOOLEAN DEFAULT FALSE,
             competencia_origem VARCHAR(7),
             usuario_registro VARCHAR(100),
+            status_auditoria ENUM('ATIVO', 'INATIVO') DEFAULT 'ATIVO',
             motivo_alteracao VARCHAR(255) DEFAULT NULL,
             data_alteracao TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         )
     """)
     
+    # Carga Inicial Completa baseada nos seus Prints
     operacoes_padrao = [
-        ("Venda de Mercadorias / Produtos", "RECEITA", False, "3.1.1.01", "2.1.2.05", "Venda Ref. NF"),
-        ("Venda de Serviços", "RECEITA", False, "3.1.1.02", "2.1.2.05", "Servico Ref. NF"),
-        ("Receita Financeira", "RECEITA", False, "3.2.1.01", "2.1.2.05", "Rec. Financ. Apurada"),
-        ("Compra Mercador/Insumos", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Compra Insumo Ref. NF"),
-        ("Depreciação", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Quota Depreciacao")
+        # OBRIGAÇÕES (RECEITAS)
+        ("Venda de Mercadorias / Produtos", "RECEITA", False, "3.1.1.01", "2.1.2.05", "Venda de Mercadoria Ref"),
+        ("Venda de Serviços", "RECEITA", False, "3.1.1.02", "2.1.2.05", "Prestacao de Servico Ref"),
+        ("Receita Financeira", "RECEITA", False, "3.2.1.01", "2.1.2.05", "Receita Financeira Ref"),
+        ("Outras Receitas Operacionais", "RECEITA", False, "3.2.1.99", "2.1.2.05", "Outras Receitas Ref"),
+        # DIREITOS (DESPESAS QUE GERAM CRÉDITO)
+        ("Compra de Mercadorias (Revenda)", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Compra Mercadoria Ref"),
+        ("Compra de Insumos", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Compra Insumos Ref"),
+        ("Energia Elétrica Térmica", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Energia Eletrica Ref"),
+        ("Aluguéis Pagos", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Alugueis Pagos Ref"),
+        ("Depreciação Ativo Imobilizado", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Depreciacao Ativo Ref"),
+        ("Frete na Aquisição", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Frete Aquisicao Ref"),
+        ("Frete na Venda", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Frete Venda Ref"),
+        ("Devolução de Vendas", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Devolucao Venda Ref")
     ]
     cursor.executemany("INSERT INTO operacoes (nome, tipo, gera_credito, conta_debito, conta_credito, historico_padrao) VALUES (%s, %s, %s, %s, %s, %s)", operacoes_padrao)
     conn.commit()
     conn.close()
 
-def calcular_impostos(valor_base, operacao_nome, regime_empresa):
-    if regime_empresa == "Lucro Real":
-        if operacao_nome == "Receita Financeira":
-            return valor_base * 0.0065, valor_base * 0.0400
-        else:
-            return valor_base * 0.0165, valor_base * 0.0760
-    else:
-        return valor_base * 0.0065, valor_base * 0.0300
-
-def modulo_apuracao():
-    st.markdown("## Apuração Mensal")
+def modulo_parametros():
+    st.markdown("## ⚙️ Parâmetros Contábeis")
+    st.write("Área exclusiva para Administradores gerenciarem as bases do sistema.")
     
-    with st.expander("Manutenção de Banco de Dados", expanded=False):
-        if st.button("Resetar Banco e Aplicar Estrutura Final", use_container_width=True):
-            resetar_tabelas_apuracao()
-            st.success("Tabelas recriadas. Estrutura de auditoria pronta.")
-            st.rerun()
+    tab_nova_op, tab_reset = st.tabs(["➕ Cadastrar Nova Operação", "🚨 Manutenção do Sistema"])
+    
+    with tab_nova_op:
+        with st.form("form_nova_op", clear_on_submit=True):
+            st.markdown("#### Criar Natureza de Operação")
+            nome_op = st.text_input("Nome da Operação", placeholder="Ex: Compra de Imobilizado...")
+            
+            c1, c2 = st.columns(2)
+            conta_deb = c1.text_input("Conta Débito (ERP ERP)", placeholder="Ex: 1.1.3.01")
+            conta_cred = c2.text_input("Conta Crédito (ERP ERP)", placeholder="Ex: 2.1.1.01")
+            
+            hist_padrao = st.text_input("Histórico Padrão (Sem a data)", placeholder="Ex: Aquisicao de Imobilizado Ref")
+            
+            tipo_natureza = st.radio("Natureza da Operação no PIS/COFINS:", ["Despesa (Gera Crédito/Direito)", "Receita (Gera Débito/Obrigação)"])
+            
+            if st.form_submit_button("Salvar Operação no Banco"):
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                tipo_bd = 'DESPESA' if 'Despesa' in tipo_natureza else 'RECEITA'
+                gera_cred = True if 'Despesa' in tipo_natureza else False
+                
+                cursor.execute("INSERT INTO operacoes (nome, tipo, gera_credito, conta_debito, conta_credito, historico_padrao) VALUES (%s, %s, %s, %s, %s, %s)", 
+                               (nome_op, tipo_bd, gera_cred, conta_deb, conta_cred, hist_padrao))
+                conn.commit()
+                conn.close()
+                st.success("Operação adicionada e já disponível na aba de Apuração!")
 
+    with tab_reset:
+        st.error("Atenção: Esta ação apaga todas as apurações e recria a base de operações com a carga inicial de fábrica.")
+        frase = st.text_input("Digite a frase de segurança: CONFIRMAR EXCLUSAO TOTAL")
+        if st.button("Executar Reset do Banco"):
+            if frase == "CONFIRMAR EXCLUSAO TOTAL":
+                resetar_tabelas_apuracao()
+                st.success("Banco formatado e recarregado com a lista completa e contas contábeis.")
+            else:
+                st.warning("Frase de segurança incorreta.")
+
+# --- 6. EXPORTAÇÃO ERP (RELATÓRIOS) ---
+def modulo_relatorios():
+    st.markdown("## 📄 Relatórios & Integração ERP")
     conn = get_db_connection()
     try:
-        df_empresas = pd.read_sql("SELECT id, nome, cnpj, regime FROM empresas", conn)
-        df_operacoes = pd.read_sql("SELECT * FROM operacoes", conn)
+        df_empresas = pd.read_sql("SELECT id, nome, cnpj FROM empresas", conn)
     except:
-        st.warning("Banco de dados não encontrado. Realize o Reset na opção Manutenção acima.")
         conn.close(); return
-
-    c_empresa, c_comp, c_user = st.columns([2, 1, 1])
-    opcoes_empresas = df_empresas.apply(lambda row: f"{row['nome']} - {row['cnpj']}", axis=1)
-    empresa_selecionada = c_empresa.selectbox("Empresa Ativa", opcoes_empresas)
-    empresa_id = int(df_empresas.loc[opcoes_empresas == empresa_selecionada].iloc[0]['id'])
-    regime_empresa = df_empresas.loc[opcoes_empresas == empresa_selecionada].iloc[0]['regime']
-    
-    competencia = c_comp.text_input("Competência (MM/AAAA)", value=competencia_padrao)
-    usuario_atual = c_user.text_input("Usuário (Auditoria)", value="Rodrigo")
-
-    st.write("---")
-    
-    col_entrada, col_rascunho = st.columns([1, 1.2], gap="large")
-
-    with col_entrada:
-        st.markdown("#### Inserção de Dados")
-        operacao_nome = st.selectbox("Operação", df_operacoes['nome'].tolist())
-        valor_base = st.number_input("Valor (R$)", min_value=0.00, step=100.00, format="%.2f")
-        historico = st.text_input("Observação Livre", placeholder="Opcional...")
         
-        is_retroativo = st.checkbox("Lançamento de competência anterior (Retroativo)")
-        comp_origem = st.text_input("Mês de Origem", placeholder="MM/AAAA", disabled=not is_retroativo)
-        
-        if st.button("Adicionar à Lista", use_container_width=True):
-            if valor_base > 0:
-                vp, vc = calcular_impostos(valor_base, operacao_nome, regime_empresa)
-                op_id = int(df_operacoes[df_operacoes['nome'] == operacao_nome].iloc[0]['id'])
-                
-                novo_item = {
-                    "empresa_id": empresa_id,
-                    "operacao_nome": operacao_nome,
-                    "operacao_id": op_id,
-                    "valor_base": valor_base,
-                    "valor_pis": vp,
-                    "valor_cofins": vc,
-                    "historico": historico,
-                    "is_retroativo": is_retroativo,
-                    "comp_origem": comp_origem if is_retroativo else None
-                }
-                st.session_state.rascunho_lancamentos.append(novo_item)
-                st.rerun()
-            else:
-                st.error("O valor base deve ser maior que zero.")
-
-    with col_rascunho:
-        st.markdown("#### Lançamentos Pendentes (Pré-Banco)")
-        if len(st.session_state.rascunho_lancamentos) > 0:
-            df_rascunho = pd.DataFrame(st.session_state.rascunho_lancamentos)
-            df_view = df_rascunho[['operacao_nome', 'valor_base', 'valor_pis', 'valor_cofins']].copy()
-            df_view.columns = ['Operação', 'Base', 'PIS', 'COFINS']
-            st.dataframe(df_view, use_container_width=True, hide_index=True)
-            
-            col_save, col_clear = st.columns(2)
-            if col_save.button("Gravar no Banco de Dados", type="primary", use_container_width=True):
-                mes_str, ano_str = competencia.split('/')
-                competencia_db = f"{ano_str}-{mes_str.zfill(2)}"
-                ultimo_dia = calendar.monthrange(int(ano_str), int(mes_str))[1]
-                data_lancamento = f"{ano_str}-{mes_str.zfill(2)}-{ultimo_dia:02d}"
-                
-                cursor = conn.cursor()
-                for item in st.session_state.rascunho_lancamentos:
-                    cursor.execute("""
-                        INSERT INTO lancamentos 
-                        (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, historico, origem_retroativa, competencia_origem, usuario_registro) 
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""", 
-                        (item['empresa_id'], item['operacao_id'], competencia_db, data_lancamento, item['valor_base'], item['valor_pis'], item['valor_cofins'], item['historico'], item['is_retroativo'], item['comp_origem'], usuario_atual))
-                
-                conn.commit()
-                st.session_state.rascunho_lancamentos = []
-                st.success("Lançamentos gravados com sucesso!")
-                st.rerun()
-                
-            if col_clear.button("Apagar Lista e Refazer", use_container_width=True):
-                st.session_state.rascunho_lancamentos = []
-                st.rerun()
-        else:
-            st.info("A lista está vazia. Adicione dados ao lado.")
-
-    st.write("---")
-    st.markdown("#### Extrato Consolidado")
+    c1, c2 = st.columns([3, 1])
+    emp_sel = c1.selectbox("Empresa", df_empresas.apply(lambda row: f"{row['nome']} - {row['cnpj']}", axis=1))
+    emp_id = int(df_empresas.loc[df_empresas.apply(lambda row: f"{row['nome']} - {row['cnpj']}", axis=1) == emp_sel].iloc[0]['id'])
+    competencia = c2.text_input("Competência", value=competencia_padrao)
+    
     try:
         m, a = competencia.split('/'); comp_db = f"{a}-{m.zfill(2)}"
-        df_lanc = pd.read_sql(f"""SELECT o.nome, l.valor_base, l.valor_pis, l.valor_cofins, l.historico FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE l.empresa_id = {empresa_id} AND l.competencia = '{comp_db}' ORDER BY l.id DESC""", conn)
-        if not df_lanc.empty:
-            st.dataframe(df_lanc, use_container_width=True, hide_index=True)
+        query = f"""
+            SELECT l.data_lancamento, o.nome as operacao, o.conta_debito, o.conta_credito, o.historico_padrao,
+            l.valor_base, l.valor_pis, l.valor_cofins 
+            FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id
+            WHERE l.empresa_id = {emp_id} AND l.competencia = '{comp_db}' AND l.status_auditoria = 'ATIVO'
+        """
+        df_dados = pd.read_sql(query, conn)
     except:
-        pass
-        
+        df_dados = pd.DataFrame()
     conn.close()
 
-# --- 5. NAVEGAÇÃO LATERAL ---
+    if not df_dados.empty:
+        st.success("Integração Contábil ERP (XLSX)")
+        ultimo_dia = calendar.monthrange(int(a), int(m))[1]
+        data_lancamento_erp = f"{ultimo_dia:02d}/{m.zfill(2)}/{a}"
+
+        linhas_erp = []
+        for _, row in df_dados.iterrows():
+            # MÊS E ANO DINÂMICOS NO FINAL DO HISTÓRICO
+            hist_final = f"{row['historico_padrao']} - {competencia}" 
+            
+            if row['valor_pis'] > 0:
+                linhas_erp.append({'Lancto Aut.': '', 'Debito': row['conta_debito'], 'Credito': row['conta_credito'], 'Data': data_lancamento_erp, 'Valor': row['valor_pis'], 'Cod. Historico': '', 'Historico': f"PIS: {hist_final}", 'Ccusto Debito': '', 'Ccusto Credito': '', 'Nr.Documento': '', 'Complemento': ''})
+            
+            if row['valor_cofins'] > 0:
+                linhas_erp.append({'Lancto Aut.': '', 'Debito': row['conta_debito'], 'Credito': row['conta_credito'], 'Data': data_lancamento_erp, 'Valor': row['valor_cofins'], 'Cod. Historico': '', 'Historico': f"COFINS: {hist_final}", 'Ccusto Debito': '', 'Ccusto Credito': '', 'Nr.Documento': '', 'Complemento': ''})
+        
+        df_export = pd.DataFrame(linhas_erp, columns=['Lancto Aut.', 'Debito', 'Credito', 'Data', 'Valor', 'Cod. Historico', 'Historico', 'Ccusto Debito', 'Ccusto Credito', 'Nr.Documento', 'Complemento'])
+        
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df_export.to_excel(writer, index=False, sheet_name='Planilha1')
+        
+        st.download_button("📥 Baixar Arquivo ERP (Excel XLSX)", data=buffer.getvalue(), file_name=f"Exportacao_ERP_{comp_db}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+
+# --- 7. NAVEGAÇÃO LATERAL ---
 with st.sidebar:
-    # Verificação de segurança: carrega a imagem apenas se ela existir no diretório
     if os.path.exists("image_b8c586.png"):
         st.image("image_b8c586.png", width=160)
     else:
         st.markdown("<h2 style='color: #004b87; text-align: center;'>🛡️ CRESCERE</h2>", unsafe_allow_html=True)
         
+    st.markdown(f"<p style='text-align: center; color: #64748b;'>👤 Operador: <b>{st.session_state.usuario_logado}</b></p>", unsafe_allow_html=True)
     st.write("---")
-    menu = st.radio("Módulos do Sistema", ["Gestão de Empresas", "Apuração Mensal"])
+    menu = st.radio("Módulos do Sistema", ["Gestão de Empresas", "Apuração Mensal", "Relatórios e Integração", "⚙️ Parâmetros Contábeis"])
 
 if menu == "Gestão de Empresas":
     modulo_empresas()
 elif menu == "Apuração Mensal":
     modulo_apuracao()
+elif menu == "Relatórios e Integração":
+    modulo_relatorios()
+elif menu == "⚙️ Parâmetros Contábeis":
+    modulo_parametros()
