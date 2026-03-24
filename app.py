@@ -439,7 +439,7 @@ with st.sidebar:
     
     # NOVO: Botão externo para o Lançamento Express
     st.markdown('''
-        <a href="https://lancamento-express.streamlit.app/" target="_blank" 
+        <a href="https:https://conciliador-contabil-hsppms6xpbjstvmmfktgkc.streamlit.app/" target="_blank" 
            style="display: block; padding: 12px; background-color: #004b87; color: white; 
                   text-align: center; border-radius: 6px; text-decoration: none; 
                   font-weight: bold; margin-bottom: 15px; border: 2px solid #003366;">
