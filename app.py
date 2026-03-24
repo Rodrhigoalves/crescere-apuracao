@@ -6,8 +6,9 @@ from datetime import date, timedelta
 import calendar
 from fpdf import FPDF
 import io
+import os
 
-# --- 1. CONFIGURAÇÕES VISUAIS E ESTADOS (SEM EMOJIS) ---
+# --- 1. CONFIGURAÇÕES VISUAIS E ESTADOS ---
 st.set_page_config(page_title="Crescere - Apuração Fiscal", layout="wide")
 
 st.markdown("""
@@ -133,7 +134,6 @@ def resetar_tabelas_apuracao():
         )
     """)
     
-    # Adicionado os campos de auditoria (usuario, motivo, data_alteracao)
     cursor.execute("""
         CREATE TABLE lancamentos (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -201,7 +201,6 @@ def modulo_apuracao():
 
     st.write("---")
     
-    # RASCUNHO (STAGING AREA) E ENTRADA
     col_entrada, col_rascunho = st.columns([1, 1.2], gap="large")
 
     with col_entrada:
@@ -210,7 +209,6 @@ def modulo_apuracao():
         valor_base = st.number_input("Valor (R$)", min_value=0.00, step=100.00, format="%.2f")
         historico = st.text_input("Observação Livre", placeholder="Opcional...")
         
-        # Checkbox fora do st.form atualiza instantaneamente
         is_retroativo = st.checkbox("Lançamento de competência anterior (Retroativo)")
         comp_origem = st.text_input("Mês de Origem", placeholder="MM/AAAA", disabled=not is_retroativo)
         
@@ -283,7 +281,12 @@ def modulo_apuracao():
 
 # --- 5. NAVEGAÇÃO LATERAL ---
 with st.sidebar:
-    st.image("image_b8c586.png", width=160)
+    # Verificação de segurança: carrega a imagem apenas se ela existir no diretório
+    if os.path.exists("image_b8c586.png"):
+        st.image("image_b8c586.png", width=160)
+    else:
+        st.markdown("<h2 style='color: #004b87; text-align: center;'>🛡️ CRESCERE</h2>", unsafe_allow_html=True)
+        
     st.write("---")
     menu = st.radio("Módulos do Sistema", ["Gestão de Empresas", "Apuração Mensal"])
 
