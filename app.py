@@ -7,37 +7,78 @@ import calendar
 from fpdf import FPDF
 import io
 import os
+import bcrypt  # Importante: a biblioteca que instalamos
 
-# --- 1. CONFIGURAÇÕES VISUAIS E ESTADOS ---
+# --- 1. CONFIGURAÇÕES VISUAIS ---
 st.set_page_config(page_title="Crescere - Apuração Fiscal", layout="wide")
 
 st.markdown("""
 <style>
     .stApp { background-color: #f4f6f9; }
     .stButton>button { background-color: #004b87; color: white; border-radius: 4px; border: none; font-weight: 500;}
-    .stButton>button:hover { background-color: #003366; color: white; }
-    div[data-testid="stForm"], .css-1d391kg { background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border: 1px solid #e2e8f0;}
-    h1, h2, h3, h4 { color: #0f172a; font-weight: 600; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-    
-    /* Acessibilidade: Destaque visual nos campos */
-    .stTextInput input { background-color: #f8fafc; border: 1px solid #cbd5e1; }
-    .stTextInput input:focus { border: 2px solid #004b87 !important; background-color: #e6f0fa !important; }
+    div[data-testid="stForm"] { background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); border: 1px solid #e2e8f0; max-width: 500px; margin: 0 auto;}
 </style>
 """, unsafe_allow_html=True)
 
-if 'usuario_logado' not in st.session_state:
-    st.session_state.usuario_logado = "Rodrigo"
+# --- 2. FUNÇÕES DE SEGURANÇA E BANCO ---
+def get_db_connection():
+    return mysql.connector.connect(**st.secrets["mysql"])
 
-hoje = date.today()
-primeiro_dia_mes_atual = hoje.replace(day=1)
-ultimo_dia_mes_anterior = primeiro_dia_mes_atual - timedelta(days=1)
-competencia_padrao = ultimo_dia_mes_anterior.strftime("%m/%Y")
+def verificar_senha(senha_plana, hash_banco):
+    return bcrypt.checkpw(senha_plana.encode('utf-8'), hash_banco.encode('utf-8'))
 
-if 'dados_form' not in st.session_state:
-    st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": ""}
+def realizar_login(usuario, senha):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # Busca o usuário e o status da empresa dele (Governança)
+        query = """
+            SELECT u.*, e.status_assinatura 
+            FROM usuarios u
+            LEFT JOIN empresas e ON u.empresa_id = e.id
+            WHERE u.username = %s AND u.status_usuario = 'ATIVO'
+        """
+        cursor.execute(query, (usuario,))
+        user_data = cursor.fetchone()
+        
+        if user_data and verificar_senha(senha, user_data['senha_hash']):
+            # Regra de Negócio: Bloqueio por Inadimplência/Suspensão
+            if user_data['nivel_acesso'] != 'SUPER_ADMIN' and user_data['status_assinatura'] == 'SUSPENSO':
+                return None, "Acesso Suspenso. Entre em contato com o financeiro."
+            
+            return user_data, None
+        return None, "Usuário ou senha incorretos."
+    finally:
+        conn.close()
 
-if 'rascunho_lancamentos' not in st.session_state:
-    st.session_state.rascunho_lancamentos = []
+# --- 3. LOGICA DE ACESSO (TELA DE BLOQUEIO) ---
+if 'autenticado' not in st.session_state:
+    st.session_state.autenticado = False
+
+if not st.session_state.autenticado:
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.markdown("<h1 style='text-align: center; color: #004b87;'>🛡️ CRESCERE</h1>", unsafe_allow_html=True)
+        with st.form("form_login"):
+            user = st.text_input("Usuário")
+            password = st.text_input("Senha", type="password")
+            if st.form_submit_button("Entrar no Sistema", use_container_width=True):
+                dados_user, erro = realizar_login(user, password)
+                if dados_user:
+                    st.session_state.autenticado = True
+                    st.session_state.usuario_logado = dados_user['nome']
+                    st.session_state.username = dados_user['username']
+                    st.session_state.nivel_acesso = dados_user['nivel_acesso']
+                    st.session_state.empresa_id = dados_user['empresa_id']
+                    st.success("Login realizado!")
+                    st.rerun()
+                else:
+                    st.error(erro)
+    st.stop() # Bloqueia o restante do app
+
+# --- 4. SEU CÓDIGO ATUAL CONTINUA ABAIXO ---
+# (Lembre-se de substituir onde estava "Rodrigo" fixo por st.session_state.usuario_logado)
 
 # --- 2. FUNÇÕES BASE E FORMATAÇÃO ---
 def get_db_connection():
