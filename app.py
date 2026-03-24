@@ -61,15 +61,13 @@ def modulo_empresas():
     
     with tab_cad:
         c_busca, c_btn = st.columns([3,1])
-        # Ajuste Visual CNPJ: Usando caption nativo para alinhamento perfeito
-        with c_busca:
-            st.caption("🔍 **Digite o CNPJ abaixo para busca automática na Receita Federal:**")
-            cnpj_input = st.text_input("CNPJ de Busca", placeholder="Apenas números", label_visibility="collapsed")
         
-        # O botão fica alinhado descendo um pouco usando st.write para dar espaço
+        # Correção do alinhamento do CNPJ e remoção da seta problemática
+        with c_busca:
+            cnpj_input = st.text_input("🔍 Digite o CNPJ para busca automática na Receita Federal:", placeholder="Apenas números")
+        
         with c_btn:
-            st.write("")
-            st.write("")
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True) # Espaçamento para alinhar o botão com o input
             if st.button("Consultar CNPJ", use_container_width=True):
                 res = consultar_cnpj(cnpj_input.replace(".","").replace("/","").replace("-",""))
                 if res and res.get('status') != 'ERROR':
@@ -82,6 +80,7 @@ def modulo_empresas():
                     })
                     st.rerun()
 
+        st.divider()
         f = st.session_state.dados_form
         c1, c2 = st.columns(2)
         nome = c1.text_input("Razão Social", value=f['nome'])
@@ -439,7 +438,14 @@ with st.sidebar:
     st.markdown(f"<p style='text-align: center; color: #64748b;'>👤 Operador: <b>{st.session_state.usuario_logado}</b></p>", unsafe_allow_html=True)
     
     # NOVO: Botão externo para o Lançamento Express
-    st.markdown(f'''<a href="https://lancamento-express.streamlit.app/" target="_blank" style="display: block; padding: 0.6rem 1rem; background-color: #004b87; color: white; text-align: center; border-radius: 6px; text-decoration: none; font-weight: 500; margin-bottom: 15px; border: 1px solid #003366;">🚀 Lançamento Express</a>''', unsafe_allow_html=True)
+    st.markdown('''
+        <a href="https://lancamento-express.streamlit.app/" target="_blank" 
+           style="display: block; padding: 12px; background-color: #004b87; color: white; 
+                  text-align: center; border-radius: 6px; text-decoration: none; 
+                  font-weight: bold; margin-bottom: 15px; border: 2px solid #003366;">
+            🚀 Lançamento Express
+        </a>
+    ''', unsafe_allow_html=True)
 
     st.write("---")
     menu = st.radio("Módulos do Sistema", ["Gestão de Empresas", "Apuração Mensal", "Relatórios e Integração", "⚙️ Parâmetros Contábeis"])
