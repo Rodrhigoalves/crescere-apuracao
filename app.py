@@ -11,7 +11,6 @@ import os
 # --- 1. CONFIGURAÇÕES VISUAIS E ESTADOS ---
 st.set_page_config(page_title="Crescere - Apuração Fiscal", layout="wide")
 
-# CSS Customizado (Destaque para acessibilidade no input de texto e cores da Crescere)
 st.markdown("""
 <style>
     .stApp { background-color: #f4f6f9; }
@@ -20,17 +19,15 @@ st.markdown("""
     div[data-testid="stForm"], .css-1d391kg { background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border: 1px solid #e2e8f0;}
     h1, h2, h3, h4 { color: #0f172a; font-weight: 600; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
     
-    /* Acessibilidade: Destaque visual nos campos de input quando o usuário clica e fundo leve no padrão */
+    /* Acessibilidade: Destaque visual nos campos */
     .stTextInput input { background-color: #f8fafc; border: 1px solid #cbd5e1; }
     .stTextInput input:focus { border: 2px solid #004b87 !important; background-color: #e6f0fa !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# Simulação de Login (Usuário Fixo Injetado no Sistema)
 if 'usuario_logado' not in st.session_state:
     st.session_state.usuario_logado = "Rodrigo"
 
-# Lógica de Competência Padrão (Mês Anterior)
 hoje = date.today()
 primeiro_dia_mes_atual = hoje.replace(day=1)
 ultimo_dia_mes_anterior = primeiro_dia_mes_atual - timedelta(days=1)
@@ -64,21 +61,26 @@ def modulo_empresas():
     
     with tab_cad:
         c_busca, c_btn = st.columns([3,1])
-        # Campo de CNPJ (Foco principal)
-        st.markdown("<small style='color:#004b87; font-weight:bold;'>↓ Digite o CNPJ para busca automática</small>", unsafe_allow_html=True)
-        cnpj_input = c_busca.text_input("CNPJ de Busca", placeholder="Apenas números", label_visibility="collapsed")
+        # Ajuste Visual CNPJ: Usando caption nativo para alinhamento perfeito
+        with c_busca:
+            st.caption("🔍 **Digite o CNPJ abaixo para busca automática na Receita Federal:**")
+            cnpj_input = st.text_input("CNPJ de Busca", placeholder="Apenas números", label_visibility="collapsed")
         
-        if c_btn.button("Consultar CNPJ", use_container_width=True):
-            res = consultar_cnpj(cnpj_input.replace(".","").replace("/","").replace("-",""))
-            if res and res.get('status') != 'ERROR':
-                st.session_state.dados_form.update({
-                    "nome": res.get('nome', ''),
-                    "fantasia": res.get('fantasia', ''),
-                    "cnpj": res.get('cnpj', ''),
-                    "cnae": res.get('atividade_principal', [{}])[0].get('code', ''),
-                    "endereco": f"{res.get('logradouro', '')}, {res.get('numero', '')} - {res.get('bairro', '')}, {res.get('municipio', '')}/{res.get('uf', '')}"
-                })
-                st.rerun()
+        # O botão fica alinhado descendo um pouco usando st.write para dar espaço
+        with c_btn:
+            st.write("")
+            st.write("")
+            if st.button("Consultar CNPJ", use_container_width=True):
+                res = consultar_cnpj(cnpj_input.replace(".","").replace("/","").replace("-",""))
+                if res and res.get('status') != 'ERROR':
+                    st.session_state.dados_form.update({
+                        "nome": res.get('nome', ''),
+                        "fantasia": res.get('fantasia', ''),
+                        "cnpj": res.get('cnpj', ''),
+                        "cnae": res.get('atividade_principal', [{}])[0].get('code', ''),
+                        "endereco": f"{res.get('logradouro', '')}, {res.get('numero', '')} - {res.get('bairro', '')}, {res.get('municipio', '')}/{res.get('uf', '')}"
+                    })
+                    st.rerun()
 
         f = st.session_state.dados_form
         c1, c2 = st.columns(2)
@@ -130,7 +132,7 @@ def modulo_empresas():
             pass
         conn.close()
 
-# --- 4. MÓDULO DE APURAÇÃO (COM RASCUNHO E AUDITORIA) ---
+# --- 4. MÓDULO DE APURAÇÃO ---
 def calcular_impostos(valor_base, operacao_nome, regime_empresa):
     if regime_empresa == "Lucro Real":
         if operacao_nome == "Receita Financeira":
@@ -145,9 +147,9 @@ def modulo_apuracao():
     conn = get_db_connection()
     try:
         df_empresas = pd.read_sql("SELECT id, nome, cnpj, regime FROM empresas", conn)
-        df_operacoes = pd.read_sql("SELECT * FROM operacoes ORDER BY tipo DESC, nome ASC", conn) # DESC traz RECEITA primeiro
+        df_operacoes = pd.read_sql("SELECT * FROM operacoes ORDER BY tipo DESC, nome ASC", conn)
     except:
-        st.warning("Banco de dados não encontrado. Acesse 'Parâmetros Contábeis' e faça o Reset do Sistema.")
+        st.warning("Banco de dados não encontrado. Acesse '⚙️ Parâmetros Contábeis' e faça o Reset do Sistema.")
         conn.close(); return
 
     if df_empresas.empty:
@@ -160,8 +162,6 @@ def modulo_apuracao():
     regime_empresa = df_empresas.loc[opcoes_empresas == empresa_selecionada].iloc[0]['regime']
     
     competencia = c_comp.text_input("Competência (MM/AAAA)", value=competencia_padrao)
-    
-    # Usuário Bloqueado na Interface (Vem da Sessão)
     c_user.text_input("Usuário Logado", value=st.session_state.usuario_logado, disabled=True)
 
     st.write("---")
@@ -200,7 +200,6 @@ def modulo_apuracao():
     with col_rascunho:
         st.markdown("#### Lista de Rascunho (Pré-Banco)")
         if len(st.session_state.rascunho_lancamentos) > 0:
-            # Lista Interativa com botão de exclusão
             for i, item in enumerate(st.session_state.rascunho_lancamentos):
                 c_desc, c_val, c_del = st.columns([5, 3, 1])
                 c_desc.markdown(f"**{item['operacao_nome']}**")
@@ -235,12 +234,10 @@ def modulo_apuracao():
     st.markdown("#### Extrato Consolidado e Retificação (Padrão SAP)")
     try:
         m, a = competencia.split('/'); comp_db = f"{a}-{m.zfill(2)}"
-        # Traz apenas os lançamentos ATIVOS (Os retificados ficam ocultos no extrato, mas salvos no banco)
         df_lanc = pd.read_sql(f"""SELECT l.id, o.nome as operacao, l.valor_base, l.valor_pis, l.valor_cofins, l.historico FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE l.empresa_id = {empresa_id} AND l.competencia = '{comp_db}' AND l.status_auditoria = 'ATIVO' ORDER BY l.id DESC""", conn)
         
         if not df_lanc.empty:
             df_view = df_lanc.copy()
-            # Aplicando formatação de moeda brasileira para a tela
             df_view['valor_base'] = df_view['valor_base'].apply(formatar_moeda)
             df_view['valor_pis'] = df_view['valor_pis'].apply(formatar_moeda)
             df_view['valor_cofins'] = df_view['valor_cofins'].apply(formatar_moeda)
@@ -263,15 +260,12 @@ def modulo_apuracao():
                         cursor.execute(f"SELECT * FROM lancamentos WHERE id = {id_retificar}")
                         reg_antigo = cursor.fetchone()
                         
-                        # Invalida o antigo
-                        cursor.execute(f"UPDATE lancamentos SET status_auditoria = 'INATIVO', motivo_alteracao = %s, data_alteracao = CURRENT_TIMESTAMP WHERE id = %s", (f"Retificado por ID subsequente. Motivo: {motivo}", id_retificar))
+                        cursor.execute(f"UPDATE lancamentos SET status_auditoria = 'INATIVO', motivo_alteracao = %s, data_alteracao = CURRENT_TIMESTAMP WHERE id = %s", (f"Retificado. Motivo: {motivo}", id_retificar))
                         
-                        # Calcula novos impostos
                         cursor.execute(f"SELECT nome FROM operacoes WHERE id = {reg_antigo['operacao_id']}")
                         nome_op = cursor.fetchone()['nome']
                         novo_vp, novo_vc = calcular_impostos(novo_valor_base, nome_op, regime_empresa)
                         
-                        # Insere o novo
                         cursor.execute("""
                             INSERT INTO lancamentos 
                             (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, historico, origem_retroativa, competencia_origem, usuario_registro, status_auditoria, motivo_alteracao) 
@@ -281,9 +275,8 @@ def modulo_apuracao():
                         conn.commit()
                         st.success("Retificação concluída com sucesso! Histórico preservado.")
                         st.rerun()
-    except Exception as e:
+    except:
         pass
-        
     conn.close()
 
 # --- 5. PARÂMETROS CONTÁBEIS E RESET ---
@@ -305,7 +298,6 @@ def resetar_tabelas_apuracao():
         )
     """)
     
-    # Inclusão da coluna status_auditoria
     cursor.execute("""
         CREATE TABLE lancamentos (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -326,14 +318,11 @@ def resetar_tabelas_apuracao():
         )
     """)
     
-    # Carga Inicial Completa baseada nos seus Prints
     operacoes_padrao = [
-        # OBRIGAÇÕES (RECEITAS)
         ("Venda de Mercadorias / Produtos", "RECEITA", False, "3.1.1.01", "2.1.2.05", "Venda de Mercadoria Ref"),
         ("Venda de Serviços", "RECEITA", False, "3.1.1.02", "2.1.2.05", "Prestacao de Servico Ref"),
         ("Receita Financeira", "RECEITA", False, "3.2.1.01", "2.1.2.05", "Receita Financeira Ref"),
         ("Outras Receitas Operacionais", "RECEITA", False, "3.2.1.99", "2.1.2.05", "Outras Receitas Ref"),
-        # DIREITOS (DESPESAS QUE GERAM CRÉDITO)
         ("Compra de Mercadorias (Revenda)", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Compra Mercadoria Ref"),
         ("Compra de Insumos", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Compra Insumos Ref"),
         ("Energia Elétrica Térmica", "DESPESA", True, "1.1.3.01", "2.1.1.01", "Energia Eletrica Ref"),
@@ -359,8 +348,8 @@ def modulo_parametros():
             nome_op = st.text_input("Nome da Operação", placeholder="Ex: Compra de Imobilizado...")
             
             c1, c2 = st.columns(2)
-            conta_deb = c1.text_input("Conta Débito (ERP ERP)", placeholder="Ex: 1.1.3.01")
-            conta_cred = c2.text_input("Conta Crédito (ERP ERP)", placeholder="Ex: 2.1.1.01")
+            conta_deb = c1.text_input("Conta Débito (ERP)", placeholder="Ex: 1.1.3.01")
+            conta_cred = c2.text_input("Conta Crédito (ERP)", placeholder="Ex: 2.1.1.01")
             
             hist_padrao = st.text_input("Histórico Padrão (Sem a data)", placeholder="Ex: Aquisicao de Imobilizado Ref")
             
@@ -376,15 +365,15 @@ def modulo_parametros():
                                (nome_op, tipo_bd, gera_cred, conta_deb, conta_cred, hist_padrao))
                 conn.commit()
                 conn.close()
-                st.success("Operação adicionada e já disponível na aba de Apuração!")
+                st.success("Operação adicionada com sucesso!")
 
     with tab_reset:
-        st.error("Atenção: Esta ação apaga todas as apurações e recria a base de operações com a carga inicial de fábrica.")
+        st.error("Atenção: Esta ação apaga todas as apurações e recria a base de operações.")
         frase = st.text_input("Digite a frase de segurança: CONFIRMAR EXCLUSAO TOTAL")
         if st.button("Executar Reset do Banco"):
             if frase == "CONFIRMAR EXCLUSAO TOTAL":
                 resetar_tabelas_apuracao()
-                st.success("Banco formatado e recarregado com a lista completa e contas contábeis.")
+                st.success("Banco formatado e recarregado com sucesso.")
             else:
                 st.warning("Frase de segurança incorreta.")
 
@@ -422,7 +411,6 @@ def modulo_relatorios():
 
         linhas_erp = []
         for _, row in df_dados.iterrows():
-            # MÊS E ANO DINÂMICOS NO FINAL DO HISTÓRICO
             hist_final = f"{row['historico_padrao']} - {competencia}" 
             
             if row['valor_pis'] > 0:
@@ -438,6 +426,8 @@ def modulo_relatorios():
             df_export.to_excel(writer, index=False, sheet_name='Planilha1')
         
         st.download_button("📥 Baixar Arquivo ERP (Excel XLSX)", data=buffer.getvalue(), file_name=f"Exportacao_ERP_{comp_db}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+    else:
+        st.info("Nenhum lançamento ativo encontrado para esta competência.")
 
 # --- 7. NAVEGAÇÃO LATERAL ---
 with st.sidebar:
@@ -447,6 +437,10 @@ with st.sidebar:
         st.markdown("<h2 style='color: #004b87; text-align: center;'>🛡️ CRESCERE</h2>", unsafe_allow_html=True)
         
     st.markdown(f"<p style='text-align: center; color: #64748b;'>👤 Operador: <b>{st.session_state.usuario_logado}</b></p>", unsafe_allow_html=True)
+    
+    # NOVO: Botão externo para o Lançamento Express
+    st.markdown(f'''<a href="https://lancamento-express.streamlit.app/" target="_blank" style="display: block; padding: 0.6rem 1rem; background-color: #004b87; color: white; text-align: center; border-radius: 6px; text-decoration: none; font-weight: 500; margin-bottom: 15px; border: 1px solid #003366;">🚀 Lançamento Express</a>''', unsafe_allow_html=True)
+
     st.write("---")
     menu = st.radio("Módulos do Sistema", ["Gestão de Empresas", "Apuração Mensal", "Relatórios e Integração", "⚙️ Parâmetros Contábeis"])
 
