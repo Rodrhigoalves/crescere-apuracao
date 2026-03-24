@@ -1,4 +1,7 @@
 streamlit
-pandas
-fpdf
 mysql-connector-python
+pandas
+requests
+fpdf
+openpyxl
+bcrypt
