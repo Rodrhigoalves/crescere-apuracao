@@ -141,6 +141,6 @@ def modulo_apuracao():
 
     conn.close()
 
-# Chamada do módulo no fluxo do menu
-# elif menu == "Apuração Mensal":
-#     modulo_apuracao()
+ Chamada do módulo no fluxo do menu
+  elif menu == "Apuração Mensal":
+     modulo_apuracao()
