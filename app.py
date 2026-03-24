@@ -146,7 +146,6 @@ def modulo_apuracao():
         df_empresas = pd.read_sql("SELECT id, nome, cnpj, regime FROM empresas", conn)
         df_operacoes = pd.read_sql("SELECT * FROM operacoes ORDER BY tipo DESC, nome ASC", conn)
         
-        # Criação dos Prefixos Visuais [DÉBITO] e [CRÉDITO] para organizar o dropdown
         df_operacoes['nome_exibicao'] = df_operacoes.apply(
             lambda x: f"[DÉBITO] {x['nome']}" if x['tipo'] == 'RECEITA' else f"[CRÉDITO] {x['nome']}", 
             axis=1
@@ -173,10 +172,7 @@ def modulo_apuracao():
 
     with col_entrada:
         st.markdown("#### Inserção de Dados")
-        # Mostrando a lista organizada
         operacao_selecionada = st.selectbox("Operação", df_operacoes['nome_exibicao'].tolist())
-        
-        # Recuperando o nome real da operação para o banco
         operacao_nome = df_operacoes.loc[df_operacoes['nome_exibicao'] == operacao_selecionada, 'nome'].values[0]
         
         valor_base = st.number_input("Valor da Base (R$)", min_value=0.00, step=100.00, format="%.2f")
@@ -210,21 +206,18 @@ def modulo_apuracao():
         st.markdown("#### Lista de Rascunho (Pré-Banco)")
         if len(st.session_state.rascunho_lancamentos) > 0:
             
-            # Caixa de rolagem travada na altura do formulário ao lado (aprox. 380px)
             with st.container(height=380, border=True):
                 for i, item in enumerate(st.session_state.rascunho_lancamentos):
                     c_desc, c_val, c_del = st.columns([5, 3, 1])
-                    c_desc.markdown(f"**{item['operacao_exibicao']}**") # Mostra se é crédito ou débito na lista
+                    c_desc.markdown(f"**{item['operacao_exibicao']}**")
                     c_val.markdown(f"Base: {formatar_moeda(item['valor_base'])}")
                     
-                    # Botão "X" substituído e tipograficamente mais leve
                     if c_del.button("✖", key=f"del_{i}", help="Remover item"):
                         st.session_state.rascunho_lancamentos.pop(i)
                         st.rerun()
                     st.divider()
             
-            # Botão principal de gravação fixo e visível fora da barra de rolagem
-            st.write("") # Pequeno espaço
+            st.write("") 
             if st.button("💾 Gravar Todos no Banco de Dados", type="primary", use_container_width=True):
                 mes_str, ano_str = competencia.split('/')
                 competencia_db = f"{ano_str}-{mes_str.zfill(2)}"
@@ -455,11 +448,11 @@ with st.sidebar:
     st.markdown(f"<p style='text-align: center; color: #64748b;'>👤 Operador: <b>{st.session_state.usuario_logado}</b></p>", unsafe_allow_html=True)
     
     st.markdown('''
-        <a href="https://lancamento-express.streamlit.app/" target="_blank" 
+        <a href="https://conciliador-contabil-hsppms6xpbjstvmmfktgkc.streamlit.app/" target="_blank" 
            style="display: block; padding: 12px; background-color: #004b87; color: white; 
                   text-align: center; border-radius: 6px; text-decoration: none; 
                   font-weight: bold; margin-bottom: 15px; border: 2px solid #003366;">
-            🚀 Lançamento Express
+            🚀 Conciliador Contábil
         </a>
     ''', unsafe_allow_html=True)
 
