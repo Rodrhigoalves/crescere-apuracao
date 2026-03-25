@@ -62,7 +62,7 @@ if not st.session_state.autenticado:
     st.markdown("<br><br>", unsafe_allow_html=True)
     
     # Este botão deve ficar fora do formulário de login para teste
-    if st.button("🆘 RESETAR MINHA SENHA AGORA"):
+if st.button("🆘 RESETAR MINHA SENHA AGORA"):
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
