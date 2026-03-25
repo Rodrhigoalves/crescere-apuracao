@@ -66,6 +66,7 @@ if not st.session_state.autenticado:
             pw_input = st.text_input("Senha", type="password")
             if st.form_submit_button("Entrar no Sistema", use_container_width=True):
                 dados_user, erro = realizar_login(user_input, pw_input)
+                st.write(f"DEBUG: Tentando usuário {user_input}")
                 if dados_user:
                     st.session_state.autenticado = True
                     st.session_state.usuario_logado = dados_user['nome']
