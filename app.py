@@ -57,20 +57,25 @@ if 'autenticado' not in st.session_state:
     st.session_state.autenticado = False
 
 if not st.session_state.autenticado:
-    # BOTÃO TEMPORÁRIO PARA RESETAR SUA SENHA PELO PYTHON
-if st.button("🆘 RESETAR MINHA SENHA AGORA"):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        # Gera o hash perfeito direto pelo seu servidor
-        novo_hash = bcrypt.hashpw("Crescere@2026".encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        # Atualiza o banco
-        cursor.execute("UPDATE usuarios SET senha_hash = %s WHERE username = 'rodrhigo'", (novo_hash,))
-        conn.commit()
-        conn.close()
-        st.success("Senha resetada com sucesso pelo Python! Tente logar agora.")
-    except Exception as e:
-        st.error(f"Erro ao resetar: {e}")
+  # --- BOTÃO DE EMERGÊNCIA (COLE EXATAMENTE ASSIM) ---
+if not st.session_state.autenticado:
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    
+    # Este botão deve ficar fora do formulário de login para teste
+    if st.button("🆘 RESETAR MINHA SENHA AGORA"):
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            # Gerando o hash via Python para evitar erro de colação do MySQL
+            novo_hash = bcrypt.hashpw("Crescere@2026".encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            cursor.execute("UPDATE usuarios SET senha_hash = %s WHERE username = 'rodrhigo'", (novo_hash,))
+            conn.commit()
+            conn.close()
+            st.success("Senha resetada com sucesso! Tente logar com: rodrhigo / Crescere@2026")
+        except Exception as e:
+            st.error(f"Erro ao resetar: {e}")
+
+    # ... aqui continua o seu código da c1, login_col, c3 ...
     st.markdown("<br><br>", unsafe_allow_html=True)
     c1, login_col, c3 = st.columns([1, 1.5, 1])
     with login_col:
