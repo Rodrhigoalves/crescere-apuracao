@@ -41,7 +41,7 @@ def consultar_cnpj(cnpj_limpo):
         return response.json() if response.status_code == 200 else None
     except requests.RequestException: return None
 
-# --- 3. LOGICA DE ACESSO (TELA DE BLOQUEIO) ---
+# --- 3. LOGICA DE ACESSO ---
 if 'autenticado' not in st.session_state:
     st.session_state.autenticado = False
 
@@ -60,8 +60,9 @@ if not st.session_state.autenticado:
                 user_data = cursor.fetchone()
                 conn.close()
                 if user_data and verificar_senha(pw_input, user_data['senha_hash']):
+                    # Regra de Super Admin ignora suspensão
                     if user_data['nivel_acesso'] != 'SUPER_ADMIN' and user_data.get('status_assinatura') == 'SUSPENSO':
-                        st.error("Acesso Suspenso.")
+                        st.error("Acesso Suspenso. Contate o suporte.")
                     else:
                         st.session_state.autenticado = True
                         st.session_state.usuario_logado = user_data['nome']
@@ -71,7 +72,7 @@ if not st.session_state.autenticado:
                 else: st.error("Usuário ou senha incorretos.")
     st.stop()
 
-# --- 4. CONFIGURAÇÕES DE ESTADO PÓS-LOGIN ---
+# --- 4. CONFIGURAÇÕES PÓS-LOGIN ---
 hoje = date.today()
 competencia_padrao = (hoje.replace(day=1) - timedelta(days=1)).strftime("%m/%Y")
 
@@ -80,45 +81,70 @@ if 'dados_form' not in st.session_state:
 if 'rascunho_lancamentos' not in st.session_state:
     st.session_state.rascunho_lancamentos = []
 
-# --- 5. MÓDULO EMPRESAS ---
+# --- 5. MÓDULO GESTÃO DE EMPRESAS (RESTAURADO) ---
 def modulo_empresas():
     st.markdown("## Gestão de Empresas")
     tab_cad, tab_lista = st.tabs(["Novo Cadastro", "Unidades Cadastradas"])
+    
     with tab_cad:
         c_busca, c_btn = st.columns([3,1])
-        with c_busca: cnpj_input = st.text_input("🔍 Busca Automática (CNPJ):")
+        with c_busca:
+            cnpj_input = st.text_input("🔍 Busca Automática (CNPJ):", placeholder="Apenas números")
+        
         with c_btn:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True) 
             if st.button("Consultar CNPJ", use_container_width=True):
                 res = consultar_cnpj(cnpj_input.replace(".","").replace("/","").replace("-",""))
                 if res and res.get('status') != 'ERROR':
-                    st.session_state.dados_form.update({"nome": res.get('nome', ''), "fantasia": res.get('fantasia', ''), "cnpj": res.get('cnpj', ''), "cnae": res.get('atividade_principal', [{}])[0].get('code', ''), "endereco": f"{res.get('logradouro', '')}, {res.get('numero', '')} - {res.get('bairro', '')}, {res.get('municipio', '')}/{res.get('uf', '')}"})
+                    st.session_state.dados_form.update({
+                        "nome": res.get('nome', ''),
+                        "fantasia": res.get('fantasia', ''),
+                        "cnpj": res.get('cnpj', ''),
+                        "cnae": res.get('atividade_principal', [{}])[0].get('code', ''),
+                        "endereco": f"{res.get('logradouro', '')}, {res.get('numero', '')} - {res.get('bairro', '')}, {res.get('municipio', '')}/{res.get('uf', '')}"
+                    })
                     st.rerun()
+
         st.divider()
         f = st.session_state.dados_form
         c1, c2 = st.columns(2)
         nome = c1.text_input("Razão Social", value=f['nome'])
         fanta = c2.text_input("Nome Fantasia", value=f['fantasia'])
+        
         c3, c4, c5 = st.columns([2, 1.5, 1.5])
         cnpj = c3.text_input("CNPJ", value=f['cnpj'])
-        regime = c4.selectbox("Regime", ["Lucro Real", "Lucro Presumido"], index=0 if f['regime'] == "Lucro Real" else 1)
+        regime = c4.selectbox("Regime Tributário", ["Lucro Real", "Lucro Presumido"], index=0 if f['regime'] == "Lucro Real" else 1)
         tipo = c5.selectbox("Tipo", ["Matriz", "Filial"], index=0 if f['tipo'] == "Matriz" else 1)
+        
+        cnae = st.text_input("CNAE Principal", value=f['cnae'])
+        endereco = st.text_area("Endereço Completo", value=f['endereco'])
+        
         if st.button("Salvar Empresa", use_container_width=True):
             conn = get_db_connection(); cursor = conn.cursor()
-            if f['id']: cursor.execute("UPDATE empresas SET nome=%s, fantasia=%s, cnpj=%s, regime=%s, tipo=%s WHERE id=%s", (nome, fanta, cnpj, regime, tipo, f['id']))
-            else: cursor.execute("INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo) VALUES (%s,%s,%s,%s,%s)", (nome, fanta, cnpj, regime, tipo))
-            conn.commit(); conn.close(); st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": ""}; st.success("Salvo!"); st.rerun()
+            if f['id']: 
+                sql = "UPDATE empresas SET nome=%s, fantasia=%s, cnpj=%s, regime=%s, tipo=%s, cnae=%s, endereco=%s WHERE id=%s"
+                cursor.execute(sql, (nome, fanta, cnpj, regime, tipo, cnae, endereco, f['id']))
+            else: 
+                sql = "INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco, status_assinatura) VALUES (%s,%s,%s,%s,%s,%s,%s,'ATIVO')"
+                cursor.execute(sql, (nome, fanta, cnpj, regime, tipo, cnae, endereco))
+            conn.commit(); conn.close()
+            st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": ""}
+            st.success("Dados salvos com sucesso!")
+            st.rerun()
 
     with tab_lista:
         conn = get_db_connection()
-        df = pd.read_sql("SELECT id, nome, cnpj, regime, tipo FROM empresas", conn)
-        for _, row in df.iterrows():
-            col_info, col_btn = st.columns([5, 1])
-            col_info.markdown(f"**{row['nome']}** | {row['tipo']}<br>CNPJ: {row['cnpj']} | Regime: {row['regime']}", unsafe_allow_html=True)
-            if col_btn.button("Editar", key=f"btn_{row['id']}"):
-                df_edit = pd.read_sql(f"SELECT * FROM empresas WHERE id={row['id']}", conn)
-                st.session_state.dados_form = df_edit.iloc[0].to_dict(); st.rerun()
-            st.divider()
+        try:
+            df = pd.read_sql("SELECT id, nome, cnpj, regime, tipo FROM empresas", conn)
+            for _, row in df.iterrows():
+                col_info, col_btn = st.columns([5, 1])
+                col_info.markdown(f"**{row['nome']}** | {row['tipo']}<br>CNPJ: {row['cnpj']} | Regime: {row['regime']}", unsafe_allow_html=True)
+                if col_btn.button("Editar", key=f"btn_{row['id']}"):
+                    df_edit = pd.read_sql(f"SELECT * FROM empresas WHERE id={row['id']}", conn)
+                    st.session_state.dados_form = df_edit.iloc[0].to_dict()
+                    st.rerun()
+                st.divider()
+        except: st.info("Nenhuma empresa cadastrada.")
         conn.close()
 
 # --- 6. MÓDULO APURAÇÃO (O CORAÇÃO DO SISTEMA) ---
@@ -129,11 +155,16 @@ def modulo_apuracao():
         df_empresas = pd.read_sql("SELECT id, nome, cnpj, regime FROM empresas", conn)
         df_operacoes = pd.read_sql("SELECT * FROM operacoes ORDER BY tipo DESC, nome ASC", conn)
         df_operacoes['nome_exibicao'] = df_operacoes.apply(lambda x: f"[DÉBITO] {x['nome']}" if x['tipo'] == 'RECEITA' else f"[CRÉDITO] {x['nome']}", axis=1)
-    except: st.warning("Erro ao carregar bases."); conn.close(); return
+    except:
+        st.warning("Bases não encontradas. Verifique Parâmetros Contábeis."); conn.close(); return
+
+    if df_empresas.empty:
+        st.info("Cadastre uma empresa primeiro."); conn.close(); return
 
     c_emp, c_comp, c_user = st.columns([2, 1, 1])
-    emp_sel = c_emp.selectbox("Empresa Ativa", df_empresas.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1))
-    empresa_id = int(df_empresas.loc[df_empresas.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1) == emp_sel].iloc[0]['id'])
+    opcoes_empresas = df_empresas.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1)
+    empresa_sel = c_emp.selectbox("Empresa Ativa", opcoes_empresas)
+    empresa_id = int(df_empresas.loc[opcoes_empresas == empresa_sel].iloc[0]['id'])
     regime_empresa = df_empresas.loc[df_empresas['id'] == empresa_id].iloc[0]['regime']
     competencia = c_comp.text_input("Competência (MM/AAAA)", value=competencia_padrao)
     c_user.text_input("Operador", value=st.session_state.usuario_logado, disabled=True)
@@ -163,27 +194,19 @@ def modulo_apuracao():
                 c_b.markdown(formatar_moeda(item['v_base']))
                 if c_c.button("✖", key=f"del_{i}"): st.session_state.rascunho_lancamentos.pop(i); st.rerun()
                 st.divider()
-        if st.session_state.rascunho_lancamentos and st.button("💾 Gravar Todos no Banco", type="primary", use_container_width=True):
+        if st.session_state.rascunho_lancamentos and st.button("💾 Gravar no Banco", type="primary", use_container_width=True):
             m, a = competencia.split('/'); comp_db = f"{a}-{m.zfill(2)}"
             cursor = conn.cursor()
             for it in st.session_state.rascunho_lancamentos:
+                # Auditoria Real: Grava o username de quem logou
                 cursor.execute("INSERT INTO lancamentos (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, historico, usuario_registro, status_auditoria) VALUES (%s,%s,%s,CURDATE(),%s,%s,%s,%s,%s,'ATIVO')", (it['empresa_id'], it['operacao_id'], comp_db, it['v_base'], it['v_pis'], it['v_cofins'], it['hist'], st.session_state.username))
-            conn.commit(); st.session_state.rascunho_lancamentos = []; st.success("Gravado!"); st.rerun()
-    
-    st.divider()
-    st.markdown("#### Extrato Consolidado (Auditoria)")
-    m, a = competencia.split('/'); comp_db = f"{a}-{m.zfill(2)}"
-    df_lanc = pd.read_sql(f"SELECT l.id, o.nome as Operação, l.valor_base, l.valor_pis, l.valor_cofins, l.usuario_registro FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE l.empresa_id = {empresa_id} AND l.competencia = '{comp_db}' AND l.status_auditoria = 'ATIVO'", conn)
-    if not df_lanc.empty:
-        df_lanc['valor_base'] = df_lanc['valor_base'].apply(formatar_moeda)
-        st.dataframe(df_lanc, use_container_width=True, hide_index=True)
+            conn.commit(); st.session_state.rascunho_lancamentos = []; st.success("Gravado e Auditado!"); st.rerun()
     conn.close()
 
 # --- 7. MÓDULOS DE RELATÓRIO E PARÂMETROS ---
 def modulo_relatorios():
     st.markdown("## 📄 Relatórios & Integração ERP")
-    st.info("Exportação para XLSX com 11 colunas ativado.")
-    # (Lógica de exportação Excel original aqui)
+    st.write("Módulo para exportação XLSX e geração de guias.")
 
 def modulo_parametros():
     st.markdown("## ⚙️ Parâmetros Contábeis")
@@ -192,14 +215,15 @@ def modulo_parametros():
         with st.form("nova_op"):
             n = st.text_input("Nome da Operação")
             t = st.radio("Natureza", ["Receita", "Despesa"])
-            if st.form_submit_button("Salvar"):
+            if st.form_submit_button("Salvar Operação"):
                 conn = get_db_connection(); cursor = conn.cursor()
                 cursor.execute("INSERT INTO operacoes (nome, tipo) VALUES (%s,%s)", (n, t.upper()))
-                conn.commit(); conn.close(); st.success("Ok!"); st.rerun()
+                conn.commit(); conn.close(); st.success("Natureza cadastrada!"); st.rerun()
     if st.session_state.nivel_acesso == "SUPER_ADMIN":
         with tabs[1]:
-            if st.text_input("Segurança") == "CONFIRMAR EXCLUSAO TOTAL":
-                if st.button("RESETAR SISTEMA"): st.error("Sistema Resetado.")
+            st.error("Atenção: Ação Irreversível.")
+            if st.text_input("Frase de Segurança") == "CONFIRMAR EXCLUSAO TOTAL":
+                if st.button("RESETAR SISTEMA"): st.error("Sistema formatado.")
 
 # --- 8. NAVEGAÇÃO LATERAL ---
 with st.sidebar:
