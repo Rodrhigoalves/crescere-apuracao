@@ -42,7 +42,8 @@ def carregar_operacoes():
 @st.cache_data(ttl=300)
 def carregar_empresas_ativas():
     conn = get_db_connection()
-    df = pd.read_sql("SELECT id, nome, cnpj, regime, tipo, apelido_unidade FROM empresas WHERE status_assinatura = 'ATIVO'", conn)
+    # Adicionado cnae e endereco para o cabeçalho rico do PDF
+    df = pd.read_sql("SELECT id, nome, cnpj, regime, tipo, apelido_unidade, cnae, endereco FROM empresas WHERE status_assinatura = 'ATIVO'", conn)
     conn.close()
     return df
 
@@ -74,7 +75,6 @@ if 'autenticado' not in st.session_state: st.session_state.autenticado = False
 if 'dados_form' not in st.session_state: st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": "", "apelido_unidade": ""}
 if 'rascunho_lancamentos' not in st.session_state: st.session_state.rascunho_lancamentos = []
 
-# Estados para limpeza automática do formulário
 if 'f_base' not in st.session_state: st.session_state.f_base = 0.0
 if 'f_hist' not in st.session_state: st.session_state.f_hist = ""
 if 'f_retro' not in st.session_state: st.session_state.f_retro = False
@@ -176,7 +176,7 @@ def modulo_empresas():
                 st.rerun()
             st.divider()
 
-# --- 6. MÓDULO APURAÇÃO (SIMETRIA, LIMPEZA E EXTRATO) ---
+# --- 6. MÓDULO APURAÇÃO ---
 def modulo_apuracao():
     st.markdown("### Apuração de Impostos (PIS/COFINS)")
     df_emp = carregar_empresas_ativas()
@@ -223,7 +223,6 @@ def modulo_apuracao():
                     "retro": st.session_state.f_retro, "origem": st.session_state.f_origem if st.session_state.f_retro else None,
                     "nota": st.session_state.f_nota, "fornecedor": st.session_state.f_forn
                 })
-                # Limpeza automática dos campos
                 st.session_state.f_base = 0.0; st.session_state.f_hist = ""; st.session_state.f_retro = False
                 st.session_state.f_origem = ""; st.session_state.f_nota = ""; st.session_state.f_forn = ""
                 st.rerun()
@@ -261,7 +260,6 @@ def modulo_apuracao():
             except Exception as e: conn.rollback(); st.error(f"Erro ao gravar: {e}")
             finally: conn.close()
 
-    # Extrato e Auditoria Restaurados
     st.divider()
     st.markdown("#### Extrato Consolidado e Retificação de Auditoria")
     conn = get_db_connection()
@@ -297,7 +295,6 @@ def modulo_apuracao():
                                 cursor.execute("SELECT * FROM lancamentos WHERE id = %s", (id_ret,))
                                 old = cursor.fetchone()
                                 cursor.execute("UPDATE lancamentos SET status_auditoria='INATIVO', motivo_alteracao=%s WHERE id=%s", (f"RETIFICADO. Motivo: {motivo}", id_ret))
-                                
                                 cursor.execute("SELECT nome FROM operacoes WHERE id = %s", (old['operacao_id'],))
                                 novo_pis, novo_cofins = calcular_impostos(regime, cursor.fetchone()['nome'], n_val)
                                 
@@ -309,7 +306,7 @@ def modulo_apuracao():
     except Exception as e: pass
     finally: conn.close()
 
-# --- 7. MÓDULO RELATÓRIOS E INTEGRAÇÃO (LIMPEZA E PDF RICO) ---
+# --- 7. MÓDULO RELATÓRIOS E INTEGRAÇÃO ---
 def modulo_relatorios():
     st.markdown("### Integração ERP e PDF Analítico")
     df_emp = carregar_empresas_ativas()
@@ -320,14 +317,12 @@ def modulo_relatorios():
         emp_id = int(df_emp.loc[df_emp.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1) == emp_sel].iloc[0]['id'])
         emp_row = df_emp[df_emp['id'] == emp_id].iloc[0]
         competencia = c2.text_input("Competência (MM/AAAA)", value=competencia_padrao)
-        
         submit_export = st.form_submit_button("Gerar Ficheiros de Exportação")
         
     if submit_export:
         conn = get_db_connection()
         try:
             m, a = competencia.split('/'); comp_db = f"{a}-{m.zfill(2)}"
-            
             query = f"""
                 SELECT l.*, o.nome as op_nome, o.tipo as op_tipo, o.conta_debito, o.conta_credito, o.codigo_historico, o.texto_padrao_historico 
                 FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id 
@@ -337,13 +332,11 @@ def modulo_relatorios():
             
             if df_export.empty: st.warning("Nenhum dado encontrado para exportação nesta competência.")
             else:
-                # 1. Geração XLSX (Sem pontos nas contas)
+                # 1. Geração XLSX
                 linhas_excel = []
                 for _, row in df_export.iterrows():
                     data_str = row['data_lancamento'].strftime('%d/%m/%Y') if pd.notnull(row['data_lancamento']) else ''
                     texto_hist = row['texto_padrao_historico'].replace("{operacao}", row['op_nome']).replace("{competencia}", competencia) if row['texto_padrao_historico'] else f"VLR REF {row['op_nome']} COMP {competencia}"
-                    
-                    # Limpeza das contas
                     c_deb = str(row['conta_debito']).replace('.', '').replace('-', '') if pd.notnull(row['conta_debito']) else ""
                     c_cred = str(row['conta_credito']).replace('.', '').replace('-', '') if pd.notnull(row['conta_credito']) else ""
                     
@@ -355,15 +348,48 @@ def modulo_relatorios():
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_xlsx.to_excel(writer, index=False, sheet_name='Lançamentos')
                 buffer.seek(0)
                 
-                # 2. Geração PDF Analítico (Cabeçalho Rico e Sem Instruções)
+                # 2. Geração PDF Analítico - Cabeçalho Estruturado Rigoroso
                 pdf = FPDF()
                 pdf.add_page()
                 pdf.set_font("Arial", 'B', 12)
-                pdf.cell(190, 10, "DEMONSTRATIVO DE APURACAO - PIS E COFINS", ln=True, align='C')
-                pdf.set_font("Arial", '', 10)
-                pdf.cell(190, 6, f"Empresa: {emp_row['nome']} | CNPJ: {emp_row['cnpj']} | Competencia: {competencia}", ln=True, align='C')
+                pdf.cell(190, 8, "DEMONSTRATIVO DE APURACAO - PIS E COFINS", ln=True, align='C')
+                pdf.ln(3)
+                
+                # Linha 1: Competência
+                pdf.set_font("Arial", 'B', 9)
+                pdf.cell(25, 6, "Competencia:", 0, 0)
+                pdf.set_font("Arial", '', 9)
+                pdf.cell(165, 6, f"{competencia}", 0, 1)
+                
+                # Linha 2: Razão Social e CNPJ
+                pdf.set_font("Arial", 'B', 9)
+                pdf.cell(25, 6, "Razao Social:", 0, 0)
+                pdf.set_font("Arial", '', 9)
+                pdf.cell(105, 6, f"{emp_row['nome']}", 0, 0)
+                pdf.set_font("Arial", 'B', 9)
+                pdf.cell(15, 6, "CNPJ:", 0, 0)
+                pdf.set_font("Arial", '', 9)
+                pdf.cell(45, 6, f"{emp_row['cnpj']}", 0, 1)
+                
+                # Linha 3: Regime e CNAE
+                pdf.set_font("Arial", 'B', 9)
+                pdf.cell(25, 6, "Regime:", 0, 0)
+                pdf.set_font("Arial", '', 9)
+                pdf.cell(105, 6, f"{emp_row['regime']}", 0, 0)
+                pdf.set_font("Arial", 'B', 9)
+                pdf.cell(15, 6, "CNAE:", 0, 0)
+                pdf.set_font("Arial", '', 9)
+                pdf.cell(45, 6, f"{emp_row['cnae']}", 0, 1)
+                
+                # Linha 4: Endereço
+                pdf.set_font("Arial", 'B', 9)
+                pdf.cell(25, 6, "Endereco:", 0, 0)
+                pdf.set_font("Arial", '', 9)
+                pdf.cell(165, 6, f"{emp_row['endereco']}", 0, 1)
+                
                 pdf.ln(5)
                 
+                # Corpo do Relatório
                 pdf.set_font("Arial", 'B', 10)
                 pdf.cell(190, 8, "1. BASE DE CALCULO DAS RECEITAS (DEBITOS)", ln=True)
                 pdf.set_font("Arial", 'B', 9)
@@ -408,7 +434,6 @@ def modulo_relatorios():
                 res_pis = deb_pis - cred_pis
                 res_cof = deb_cof - cred_cof
                 
-                # Textos limpos executivos
                 pdf.cell(120, 6, "Total Imposto a Recolher:", 0)
                 pdf.cell(35, 6, formatar_moeda(max(0, res_pis)), 0)
                 pdf.cell(35, 6, formatar_moeda(max(0, res_cof)), 0, ln=True)
@@ -437,7 +462,7 @@ def modulo_relatorios():
         except Exception as e: st.error(f"Erro na geração: {e}")
         finally: conn.close()
 
-# --- 8. MÓDULO PARÂMETROS CONTÁBEIS (CRUD) ---
+# --- 8. MÓDULO PARÂMETROS CONTÁBEIS (CRUD COMPLETO) ---
 def modulo_parametros():
     if st.session_state.nivel_acesso == "CLIENT_OPERATOR":
         st.error("Acesso restrito aos Administradores.")
@@ -447,7 +472,9 @@ def modulo_parametros():
     df_op = carregar_operacoes()
     op_nomes = df_op['nome'].tolist()
     
-    with st.expander("✏️ Editar Parâmetros de uma Operação", expanded=True):
+    tab_edit, tab_novo = st.tabs(["✏️ Editar Existente", "➕ Nova Operação"])
+    
+    with tab_edit:
         with st.form("form_edit_param"):
             sel_op = st.selectbox("Selecione a Operação para configurar:", op_nomes)
             row_op = df_op[df_op['nome'] == sel_op].iloc[0]
@@ -470,6 +497,35 @@ def modulo_parametros():
                         conn.commit()
                         carregar_operacoes.clear()
                         st.success("Parâmetros atualizados com sucesso!"); st.rerun()
+                    except Exception as e: conn.rollback(); st.error(f"Erro: {e}")
+                    finally: conn.close()
+                    
+    with tab_novo:
+        with st.form("form_nova_op"):
+            c_nome, c_tipo = st.columns([3, 1])
+            novo_nome = c_nome.text_input("Nome da Nova Operação (Ex: Venda de Software)")
+            novo_tipo = c_tipo.selectbox("Tipo de Natureza", ["RECEITA", "DESPESA"])
+            
+            c1, c2 = st.columns(2)
+            nn_deb = c1.text_input("Conta Débito (Sem pontos) ")
+            nn_cred = c2.text_input("Conta Crédito (Sem pontos) ")
+            
+            c3, c4 = st.columns([1, 3])
+            nn_cod = c3.text_input("Código Histórico ERP ")
+            nn_txt = c4.text_input("Texto Padrão (Ex: VLR REF {operacao} COMP {competencia}) ")
+            
+            if st.form_submit_button("Registar Nova Operação"):
+                if not novo_nome:
+                    st.error("O nome da operação é obrigatório.")
+                elif not nn_cod and not nn_txt:
+                    st.error("Erro: O sistema ERP exige o Código do Histórico ou o Texto Padrão. Preencha pelo menos um.")
+                else:
+                    conn = get_db_connection(); cursor = conn.cursor()
+                    try:
+                        cursor.execute("INSERT INTO operacoes (nome, tipo, conta_debito, conta_credito, codigo_historico, texto_padrao_historico) VALUES (%s, %s, %s, %s, %s, %s)", (novo_nome, novo_tipo, nn_deb, nn_cred, nn_cod, nn_txt))
+                        conn.commit()
+                        carregar_operacoes.clear()
+                        st.success("Nova operação registada com sucesso!"); st.rerun()
                     except Exception as e: conn.rollback(); st.error(f"Erro: {e}")
                     finally: conn.close()
                     
