@@ -267,8 +267,8 @@ def modulo_apuracao():
                     c_txt, c_val, c_del = st.columns([5, 3, 1])
                     retro_badge = f" <span style='color:red;font-size:10px;'>(EXTEMP: {it['origem']})</span>" if it['retro'] else ""
                     ret_badge = f" <span style='color:orange;font-size:10px;'>(RETENÇÃO)</span>" if it.get('v_pis_ret', 0) > 0 or it.get('v_cof_ret', 0) > 0 else ""
-                    c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}<br>PIS: {formatar_moeda(it['v_pis'])} | COF: {formatar_moeda(it['v_cofins'])}</small>", unsafe_allow_html=True)
-                    c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base'])}</span>", unsafe_allow_html=True)
+                    c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}<br>PIS: {formatar_moeda(it['v_pis']).replace('$', '&#36;')} | COF: {formatar_moeda(it['v_cofins']).replace('$', '&#36;')}</small>", unsafe_allow_html=True)
+                    c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
                     if c_del.button("×", key=f"del_{i}"): 
                         st.session_state.rascunho_lancamentos.pop(i)
                         st.rerun()
