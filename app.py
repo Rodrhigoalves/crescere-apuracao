@@ -208,7 +208,6 @@ def modulo_apuracao():
         v_pis_ret = v_cof_ret = 0.0
         teve_retencao = False
 
-        # RETENÇÃO NA FONTE AGORA É UM CHECKBOX DENTRO DE RECEITA
         if op_row['tipo'] == 'RECEITA':
             teve_retencao = st.checkbox("☑️ Houve Retenção na Fonte nesta nota?", key=f"check_ret_{fk}")
             if teve_retencao:
@@ -254,7 +253,13 @@ def modulo_apuracao():
 
     with col_ras:
         st.markdown("#### Rascunho")
-        with st.container(height=390, border=True): 
+        
+        # CÁLCULO DINÂMICO DA ALTURA DO RASCUNHO PARA ALINHAMENTO
+        altura_dinamica = 390
+        if teve_retencao: altura_dinamica += 135  # Espaço para o info e os 2 inputs numéricos
+        if exige_doc: altura_dinamica += 85       # Espaço para Nota e Fornecedor
+        
+        with st.container(height=altura_dinamica, border=True): 
             if not st.session_state.rascunho_lancamentos: 
                 st.markdown("<p style='text-align:center;color:#94a3b8;margin-top:50px;'>Vazio.</p>", unsafe_allow_html=True)
             else:
@@ -277,7 +282,6 @@ def modulo_apuracao():
                 comp_db = f"{a}-{m.zfill(2)}"
                 cursor.execute("START TRANSACTION")
                 for it in st.session_state.rascunho_lancamentos:
-                    # Inserção incluindo as novas colunas valor_pis_retido e valor_cofins_retido
                     query = """INSERT INTO lancamentos (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, valor_pis_retido, valor_cofins_retido, historico, usuario_registro, status_auditoria, origem_retroativa, competencia_origem, num_nota, fornecedor) VALUES (%s,%s,%s,CURDATE(),%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s,%s,%s,%s)"""
                     cursor.execute(query, (it['emp_id'], it['op_id'], comp_db, it['v_base'], it['v_pis'], it['v_cofins'], it.get('v_pis_ret', 0), it.get('v_cof_ret', 0), it['hist'], st.session_state.username, it['retro'], it['origem'], it['nota'], it['fornecedor']))
                 conn.commit()
@@ -311,7 +315,6 @@ def modulo_relatorios():
                 m, a = competencia.split('/')
                 comp_db = f"{a}-{m.zfill(2)}"
                 
-                # QUERY ATUALIZADA: Puxando as retenções
                 query = f"""SELECT l.*, o.nome as op_nome, o.tipo as op_tipo, 
                             o.conta_deb_pis, o.conta_cred_pis, o.pis_h_codigo, o.pis_h_texto,
                             o.conta_deb_cof, o.conta_cred_cof, o.cofins_h_codigo, o.cofins_h_texto,
@@ -440,7 +443,7 @@ def modulo_relatorios():
                         cred_pis += r['valor_pis']
                         cred_cof += r['valor_cofins']
 
-                    # 3. RETENÇÕES (Atualizado para ler do evento de Receita)
+                    # 3. RETENÇÕES
                     pdf.ln(5)
                     pdf.set_font("Arial", 'B', 10)
                     pdf.cell(190, 8, "3. RETENCOES NA FONTE (ORIGEM EM RECEITAS)", ln=True)
@@ -526,7 +529,6 @@ def modulo_parametros():
             cu_cod = c11.text_input("Cód ERP Custo", value=row_op.get('custo_h_codigo', ''))
             cu_txt = c12.text_input("Texto Padrão Custo", value=row_op.get('custo_h_texto', ''))
 
-            # EXPANDER PARA RETENÇÃO NA FONTE
             if row_op['tipo'] == 'RECEITA':
                 with st.expander("Configuração de Retenção na Fonte (PIS/COFINS Retido)", expanded=False):
                     st.info("Estas contas serão usadas APENAS quando o operador marcar que houve retenção na fonte.")
@@ -571,7 +573,6 @@ def modulo_parametros():
         with st.form("form_nova_op"):
             c_nome, c_tipo = st.columns([3, 1])
             novo_nome = c_nome.text_input("Nome da Nova Operação")
-            # REMOVIDA A OPÇÃO RETENÇÃO DAQUI
             novo_tipo = c_tipo.selectbox("Natureza", ["RECEITA", "DESPESA"])
             
             st.markdown("##### Configuração PIS")
