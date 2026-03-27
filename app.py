@@ -254,10 +254,9 @@ def modulo_apuracao():
     with col_ras:
         st.markdown("#### Rascunho")
         
-        # CÁLCULO DINÂMICO DA ALTURA DO RASCUNHO PARA ALINHAMENTO
         altura_dinamica = 390
-        if teve_retencao: altura_dinamica += 135  # Espaço para o info e os 2 inputs numéricos
-        if exige_doc: altura_dinamica += 85       # Espaço para Nota e Fornecedor
+        if teve_retencao: altura_dinamica += 135  
+        if exige_doc: altura_dinamica += 85       
         
         with st.container(height=altura_dinamica, border=True): 
             if not st.session_state.rascunho_lancamentos: 
@@ -504,45 +503,46 @@ def modulo_parametros():
     tab_edit, tab_novo, tab_fecho = st.tabs(["✏️ Editar Existente", "➕ Nova Operação", "🏢 Fecho por Empresa"])
     
     with tab_edit:
+        sel_op = st.selectbox("Selecione a Operação:", op_nomes)
+        row_op = df_op[df_op['nome'] == sel_op].iloc[0]
+        oid = row_op['id']
+        
         with st.form("form_edit_param"):
-            sel_op = st.selectbox("Selecione a Operação:", op_nomes)
-            row_op = df_op[df_op['nome'] == sel_op].iloc[0]
-            
             st.markdown("##### Configuração PIS")
             c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-            p_deb = c1.text_input("Débito PIS", value=row_op['conta_deb_pis'] if pd.notnull(row_op['conta_deb_pis']) else "")
-            p_cred = c2.text_input("Crédito PIS", value=row_op['conta_cred_pis'] if pd.notnull(row_op['conta_cred_pis']) else "")
-            p_cod = c3.text_input("Cód ERP PIS", value=row_op.get('pis_h_codigo', ''))
-            p_txt = c4.text_input("Texto Padrão PIS", value=row_op.get('pis_h_texto', ''))
+            p_deb = c1.text_input("Débito PIS", value=row_op['conta_deb_pis'] if pd.notnull(row_op['conta_deb_pis']) else "", key=f"pd_{oid}")
+            p_cred = c2.text_input("Crédito PIS", value=row_op['conta_cred_pis'] if pd.notnull(row_op['conta_cred_pis']) else "", key=f"pc_{oid}")
+            p_cod = c3.text_input("Cód ERP PIS", value=row_op.get('pis_h_codigo', ''), key=f"pcd_{oid}")
+            p_txt = c4.text_input("Texto Padrão PIS", value=row_op.get('pis_h_texto', ''), key=f"ptx_{oid}")
             
             st.markdown("##### Configuração COFINS")
             c5, c6, c7, c8 = st.columns([1, 1, 1, 2])
-            c_deb = c5.text_input("Débito COFINS", value=row_op['conta_deb_cof'] if pd.notnull(row_op['conta_deb_cof']) else "")
-            c_cred = c6.text_input("Crédito COFINS", value=row_op['conta_cred_cof'] if pd.notnull(row_op['conta_cred_cof']) else "")
-            c_cod = c7.text_input("Cód ERP COFINS", value=row_op.get('cofins_h_codigo', ''))
-            c_txt = c8.text_input("Texto Padrão COF", value=row_op.get('cofins_h_texto', ''))
+            c_deb = c5.text_input("Débito COFINS", value=row_op['conta_deb_cof'] if pd.notnull(row_op['conta_deb_cof']) else "", key=f"cd_{oid}")
+            c_cred = c6.text_input("Crédito COFINS", value=row_op['conta_cred_cof'] if pd.notnull(row_op['conta_cred_cof']) else "", key=f"cc_{oid}")
+            c_cod = c7.text_input("Cód ERP COFINS", value=row_op.get('cofins_h_codigo', ''), key=f"ccd_{oid}")
+            c_txt = c8.text_input("Texto Padrão COF", value=row_op.get('cofins_h_texto', ''), key=f"ctx_{oid}")
             
             st.markdown("##### Configuração CUSTO/VALOR LÍQUIDO (Opcional)")
             c9, c10, c11, c12 = st.columns([1, 1, 1, 2])
-            cu_deb = c9.text_input("Débito Custo", value=row_op['conta_deb_custo'] if pd.notnull(row_op['conta_deb_custo']) else "")
-            cu_cred = c10.text_input("Crédito Custo", value=row_op['conta_cred_custo'] if pd.notnull(row_op['conta_cred_custo']) else "")
-            cu_cod = c11.text_input("Cód ERP Custo", value=row_op.get('custo_h_codigo', ''))
-            cu_txt = c12.text_input("Texto Padrão Custo", value=row_op.get('custo_h_texto', ''))
+            cu_deb = c9.text_input("Débito Custo", value=row_op['conta_deb_custo'] if pd.notnull(row_op['conta_deb_custo']) else "", key=f"cud_{oid}")
+            cu_cred = c10.text_input("Crédito Custo", value=row_op['conta_cred_custo'] if pd.notnull(row_op['conta_cred_custo']) else "", key=f"cuc_{oid}")
+            cu_cod = c11.text_input("Cód ERP Custo", value=row_op.get('custo_h_codigo', ''), key=f"cucd_{oid}")
+            cu_txt = c12.text_input("Texto Padrão Custo", value=row_op.get('custo_h_texto', ''), key=f"cutx_{oid}")
 
             if row_op['tipo'] == 'RECEITA':
                 with st.expander("Configuração de Retenção na Fonte (PIS/COFINS Retido)", expanded=False):
                     st.info("Estas contas serão usadas APENAS quando o operador marcar que houve retenção na fonte.")
                     cr1, cr2, cr3, cr4 = st.columns([1, 1, 1, 2])
-                    r_p_deb = cr1.text_input("Débito PIS Ret", value=row_op.get('ret_pis_conta_deb', ''))
-                    r_p_cred = cr2.text_input("Crédito PIS Ret", value=row_op.get('ret_pis_conta_cred', ''))
-                    r_p_cod = cr3.text_input("Cód ERP PIS Ret", value=row_op.get('ret_pis_h_codigo', ''))
-                    r_p_txt = cr4.text_input("Histórico PIS Ret", value=row_op.get('ret_pis_h_texto', ''))
+                    r_p_deb = cr1.text_input("Débito PIS Ret", value=row_op.get('ret_pis_conta_deb', ''), key=f"rpd_{oid}")
+                    r_p_cred = cr2.text_input("Crédito PIS Ret", value=row_op.get('ret_pis_conta_cred', ''), key=f"rpc_{oid}")
+                    r_p_cod = cr3.text_input("Cód ERP PIS Ret", value=row_op.get('ret_pis_h_codigo', ''), key=f"rpcd_{oid}")
+                    r_p_txt = cr4.text_input("Histórico PIS Ret", value=row_op.get('ret_pis_h_texto', ''), key=f"rptx_{oid}")
 
                     cr5, cr6, cr7, cr8 = st.columns([1, 1, 1, 2])
-                    r_c_deb = cr5.text_input("Débito COF Ret", value=row_op.get('ret_cofins_conta_deb', ''))
-                    r_c_cred = cr6.text_input("Crédito COF Ret", value=row_op.get('ret_cofins_conta_cred', ''))
-                    r_c_cod = cr7.text_input("Cód ERP COF Ret", value=row_op.get('ret_cofins_h_codigo', ''))
-                    r_c_txt = cr8.text_input("Histórico COF Ret", value=row_op.get('ret_cofins_h_texto', ''))
+                    r_c_deb = cr5.text_input("Débito COF Ret", value=row_op.get('ret_cofins_conta_deb', ''), key=f"rcd_{oid}")
+                    r_c_cred = cr6.text_input("Crédito COF Ret", value=row_op.get('ret_cofins_conta_cred', ''), key=f"rcc_{oid}")
+                    r_c_cod = cr7.text_input("Cód ERP COF Ret", value=row_op.get('ret_cofins_h_codigo', ''), key=f"rccd_{oid}")
+                    r_c_txt = cr8.text_input("Histórico COF Ret", value=row_op.get('ret_cofins_h_texto', ''), key=f"rctx_{oid}")
             else:
                 r_p_deb = r_p_cred = r_p_cod = r_p_txt = r_c_deb = r_c_cred = r_c_cod = r_c_txt = None
             
