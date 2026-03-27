@@ -139,8 +139,6 @@ def modulo_empresas():
             cnae = c6.text_input("CNAE", value=f['cnae'])
             endereco = c7.text_input("Endereço", value=f['endereco'])
             
-            # NOTA: Os campos de Conta Transferência foram movidos para o Módulo Parâmetros.
-
             if st.form_submit_button("Gravar Unidade", use_container_width=True):
                 if not nome or not cnpj: 
                     st.error("Razão Social e CNPJ são obrigatórios.")
@@ -206,46 +204,49 @@ def modulo_apuracao():
         op_sel = st.selectbox("Operação", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
         op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
         
-        if op_row['tipo'] == 'RETENÇÃO':
-            v_base = 0.0
-            st.info("Para Retenções na Fonte, informe os valores exatos retidos na nota.")
-            c_p, c_c = st.columns(2)
-            v_pis_ret = c_p.number_input("Valor PIS Retido (R$)", min_value=0.00, step=10.0, key=f"p_ret_{fk}")
-            v_cof_ret = c_c.number_input("Valor COFINS Retido (R$)", min_value=0.00, step=10.0, key=f"c_ret_{fk}")
-        else:
-            v_base = st.number_input("Valor Total da Nota / Base (R$)", min_value=0.00, step=100.0, key=f"base_{fk}")
-            v_pis_ret = v_cof_ret = 0.0
+        v_base = st.number_input("Valor Total da Nota / Base (R$)", min_value=0.00, step=100.0, key=f"base_{fk}")
+        v_pis_ret = v_cof_ret = 0.0
+        teve_retencao = False
+
+        # RETENÇÃO NA FONTE AGORA É UM CHECKBOX DENTRO DE RECEITA
+        if op_row['tipo'] == 'RECEITA':
+            teve_retencao = st.checkbox("☑️ Houve Retenção na Fonte nesta nota?", key=f"check_ret_{fk}")
+            if teve_retencao:
+                st.info("Informe os valores exatos retidos no documento.")
+                c_p, c_c = st.columns(2)
+                v_pis_ret = c_p.number_input("Valor PIS Retido (R$)", min_value=0.00, step=10.0, key=f"p_ret_{fk}")
+                v_cof_ret = c_c.number_input("Valor COFINS Retido (R$)", min_value=0.00, step=10.0, key=f"c_ret_{fk}")
 
         hist = st.text_input("Histórico / Observação", key=f"hist_{fk}")
         c_retro, c_origem = st.columns([1, 1])
         retro = c_retro.checkbox("Lançamento Extemporâneo", key=f"retro_{fk}")
         comp_origem = c_origem.text_input("Mês de Origem (MM/AAAA)", disabled=not retro, key=f"origem_{fk}")
         
-        if retro:
+        exige_doc = retro or teve_retencao
+        
+        if exige_doc:
             c_nota, c_forn = st.columns([1, 2])
             num_nota = c_nota.text_input("Nº da Nota Fiscal", key=f"nota_{fk}")
-            fornecedor = c_forn.text_input("Fornecedor", key=f"forn_{fk}")
+            fornecedor = c_forn.text_input("Tomador / Fornecedor", key=f"forn_{fk}")
         else: 
             num_nota = fornecedor = None
         
         st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
         if st.button("Adicionar ao Rascunho", use_container_width=True):
-            if op_row['tipo'] != 'RETENÇÃO' and v_base <= 0: 
+            if v_base <= 0: 
                 st.warning("A base de cálculo deve ser maior que zero.")
-            elif op_row['tipo'] == 'RETENÇÃO' and v_pis_ret == 0 and v_cof_ret == 0: 
+            elif teve_retencao and v_pis_ret == 0 and v_cof_ret == 0: 
                 st.warning("Informe os valores retidos.")
-            elif retro and (not comp_origem or not num_nota or not fornecedor): 
-                st.error("Preencha todos os dados retroativos.")
+            elif exige_doc and (not num_nota or not fornecedor or (retro and not comp_origem)): 
+                st.error("Preencha todos os dados do documento (Nota, Tomador e Competência de Origem se aplicável).")
             else:
-                if op_row['tipo'] == 'RETENÇÃO': 
-                    vp, vc = v_pis_ret, v_cof_ret
-                else: 
-                    vp, vc = calcular_impostos(regime, op_row['nome'], v_base)
+                vp, vc = calcular_impostos(regime, op_row['nome'], v_base)
                 
                 st.session_state.rascunho_lancamentos.append({
                     "emp_id": emp_id, "op_id": int(op_row['id']), "op_nome": op_sel, 
-                    "v_base": v_base, "v_pis": vp, "v_cofins": vc, "hist": hist, 
-                    "retro": retro, "origem": comp_origem if retro else None,
+                    "v_base": v_base, "v_pis": vp, "v_cofins": vc, 
+                    "v_pis_ret": v_pis_ret, "v_cof_ret": v_cof_ret,
+                    "hist": hist, "retro": retro, "origem": comp_origem if retro else None,
                     "nota": num_nota, "fornecedor": fornecedor
                 })
                 st.session_state.form_key += 1
@@ -260,7 +261,8 @@ def modulo_apuracao():
                 for i, it in enumerate(st.session_state.rascunho_lancamentos):
                     c_txt, c_val, c_del = st.columns([5, 3, 1])
                     retro_badge = f" <span style='color:red;font-size:10px;'>(EXTEMP: {it['origem']})</span>" if it['retro'] else ""
-                    c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}<br>PIS: {formatar_moeda(it['v_pis'])} | COF: {formatar_moeda(it['v_cofins'])}</small>", unsafe_allow_html=True)
+                    ret_badge = f" <span style='color:orange;font-size:10px;'>(RETENÇÃO)</span>" if it.get('v_pis_ret', 0) > 0 or it.get('v_cof_ret', 0) > 0 else ""
+                    c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}<br>PIS: {formatar_moeda(it['v_pis'])} | COF: {formatar_moeda(it['v_cofins'])}</small>", unsafe_allow_html=True)
                     c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base'])}</span>", unsafe_allow_html=True)
                     if c_del.button("×", key=f"del_{i}"): 
                         st.session_state.rascunho_lancamentos.pop(i)
@@ -275,8 +277,9 @@ def modulo_apuracao():
                 comp_db = f"{a}-{m.zfill(2)}"
                 cursor.execute("START TRANSACTION")
                 for it in st.session_state.rascunho_lancamentos:
-                    query = """INSERT INTO lancamentos (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, historico, usuario_registro, status_auditoria, origem_retroativa, competencia_origem, num_nota, fornecedor) VALUES (%s,%s,%s,CURDATE(),%s,%s,%s,%s,%s,'ATIVO',%s,%s,%s,%s)"""
-                    cursor.execute(query, (it['emp_id'], it['op_id'], comp_db, it['v_base'], it['v_pis'], it['v_cofins'], it['hist'], st.session_state.username, it['retro'], it['origem'], it['nota'], it['fornecedor']))
+                    # Inserção incluindo as novas colunas valor_pis_retido e valor_cofins_retido
+                    query = """INSERT INTO lancamentos (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, valor_pis_retido, valor_cofins_retido, historico, usuario_registro, status_auditoria, origem_retroativa, competencia_origem, num_nota, fornecedor) VALUES (%s,%s,%s,CURDATE(),%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s,%s,%s,%s)"""
+                    cursor.execute(query, (it['emp_id'], it['op_id'], comp_db, it['v_base'], it['v_pis'], it['v_cofins'], it.get('v_pis_ret', 0), it.get('v_cof_ret', 0), it['hist'], st.session_state.username, it['retro'], it['origem'], it['nota'], it['fornecedor']))
                 conn.commit()
                 st.session_state.rascunho_lancamentos = []
                 st.success("Sucesso!")
@@ -308,11 +311,13 @@ def modulo_relatorios():
                 m, a = competencia.split('/')
                 comp_db = f"{a}-{m.zfill(2)}"
                 
-                # QUERY ATUALIZADA: Puxando os novos campos independentes de histórico
+                # QUERY ATUALIZADA: Puxando as retenções
                 query = f"""SELECT l.*, o.nome as op_nome, o.tipo as op_tipo, 
                             o.conta_deb_pis, o.conta_cred_pis, o.pis_h_codigo, o.pis_h_texto,
                             o.conta_deb_cof, o.conta_cred_cof, o.cofins_h_codigo, o.cofins_h_texto,
-                            o.conta_deb_custo, o.conta_cred_custo, o.custo_h_codigo, o.custo_h_texto
+                            o.conta_deb_custo, o.conta_cred_custo, o.custo_h_codigo, o.custo_h_texto,
+                            o.ret_pis_conta_deb, o.ret_pis_conta_cred, o.ret_pis_h_codigo, o.ret_pis_h_texto,
+                            o.ret_cofins_conta_deb, o.ret_cofins_conta_cred, o.ret_cofins_h_codigo, o.ret_cofins_h_texto
                             FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id 
                             WHERE l.empresa_id = {emp_id} AND l.competencia = '{comp_db}' AND l.status_auditoria = 'ATIVO'"""
                 df_export = pd.read_sql(query, conn)
@@ -331,27 +336,36 @@ def modulo_relatorios():
                     for _, row in df_export.iterrows():
                         data_str = row['data_lancamento'].strftime('%d/%m/%Y') if pd.notnull(row['data_lancamento']) else ''
                         
-                        # Acumular para transferência
                         if row['op_tipo'] == 'DESPESA': 
                             total_pis_rec += row['valor_pis']
                             total_cof_rec += row['valor_cofins']
                         
-                        # Linha PIS (Agora usa o texto e código independente do PIS)
+                        # Linha PIS Padrão
                         if pd.notnull(row['conta_deb_pis']) and pd.notnull(row['conta_cred_pis']):
                             t_hist_pis = processar_texto(row.get('pis_h_texto'), row['op_nome'])
                             linhas_excel.append({"Lancto Aut.": "", "Debito": str(row['conta_deb_pis']).replace('.', ''), "Credito": str(row['conta_cred_pis']).replace('.', ''), "Data": data_str, "Valor": row['valor_pis'], "Cod. Historico": row.get('pis_h_codigo', ''), "Historico": f"PIS - {t_hist_pis}", "Ccusto Debito": "", "Ccusto Credito": "", "Nr.Documento": row['num_nota'] or row['id'], "Complemento": ""})
                         
-                        # Linha COFINS (Usa o texto e código independente da COFINS)
+                        # Linha COFINS Padrão
                         if pd.notnull(row['conta_deb_cof']) and pd.notnull(row['conta_cred_cof']):
                             t_hist_cof = processar_texto(row.get('cofins_h_texto'), row['op_nome'])
                             linhas_excel.append({"Lancto Aut.": "", "Debito": str(row['conta_deb_cof']).replace('.', ''), "Credito": str(row['conta_cred_cof']).replace('.', ''), "Data": data_str, "Valor": row['valor_cofins'], "Cod. Historico": row.get('cofins_h_codigo', ''), "Historico": f"COF - {t_hist_cof}", "Ccusto Debito": "", "Ccusto Credito": "", "Nr.Documento": row['num_nota'] or row['id'], "Complemento": ""})
                         
-                        # Linha Custo Líquido (Usa o texto e código independente do Custo)
-                        if row['op_tipo'] != 'RETENÇÃO' and pd.notnull(row['conta_deb_custo']) and pd.notnull(row['conta_cred_custo']):
+                        # Linha Custo Líquido
+                        if pd.notnull(row['conta_deb_custo']) and pd.notnull(row['conta_cred_custo']):
                             t_hist_custo = processar_texto(row.get('custo_h_texto'), row['op_nome'])
                             v_custo = row['valor_base'] - row['valor_pis'] - row['valor_cofins']
                             linhas_excel.append({"Lancto Aut.": "", "Debito": str(row['conta_deb_custo']).replace('.', ''), "Credito": str(row['conta_cred_custo']).replace('.', ''), "Data": data_str, "Valor": v_custo, "Cod. Historico": row.get('custo_h_codigo', ''), "Historico": f"CUSTO LIQ - {t_hist_custo}", "Ccusto Debito": "", "Ccusto Credito": "", "Nr.Documento": row['num_nota'] or row['id'], "Complemento": ""})
-                    
+                        
+                        # Linha PIS Retido (Se houver)
+                        if row.get('valor_pis_retido', 0) > 0 and pd.notnull(row.get('ret_pis_conta_deb')) and pd.notnull(row.get('ret_pis_conta_cred')):
+                            t_hist_ret_pis = processar_texto(row.get('ret_pis_h_texto'), row['op_nome'])
+                            linhas_excel.append({"Lancto Aut.": "", "Debito": str(row['ret_pis_conta_deb']).replace('.', ''), "Credito": str(row['ret_pis_conta_cred']).replace('.', ''), "Data": data_str, "Valor": row['valor_pis_retido'], "Cod. Historico": row.get('ret_pis_h_codigo', ''), "Historico": f"RET PIS - {t_hist_ret_pis}", "Ccusto Debito": "", "Ccusto Credito": "", "Nr.Documento": row['num_nota'] or row['id'], "Complemento": ""})
+                        
+                        # Linha COFINS Retido (Se houver)
+                        if row.get('valor_cofins_retido', 0) > 0 and pd.notnull(row.get('ret_cofins_conta_deb')) and pd.notnull(row.get('ret_cofins_conta_cred')):
+                            t_hist_ret_cof = processar_texto(row.get('ret_cofins_h_texto'), row['op_nome'])
+                            linhas_excel.append({"Lancto Aut.": "", "Debito": str(row['ret_cofins_conta_deb']).replace('.', ''), "Credito": str(row['ret_cofins_conta_cred']).replace('.', ''), "Data": data_str, "Valor": row['valor_cofins_retido'], "Cod. Historico": row.get('ret_cofins_h_codigo', ''), "Historico": f"RET COF - {t_hist_ret_cof}", "Ccusto Debito": "", "Ccusto Credito": "", "Nr.Documento": row['num_nota'] or row['id'], "Complemento": ""})
+
                     # Linhas de Transferência Automática
                     if total_pis_rec > 0 and emp_row['conta_transf_pis']:
                         linhas_excel.append({"Lancto Aut.": "", "Debito": str(emp_row['conta_transf_pis']).replace('.', ''), "Credito": "", "Data": data_str, "Valor": total_pis_rec, "Cod. Historico": "", "Historico": f"Vr. transferido para apuração do PIS n/ mês {competencia}", "Ccusto Debito": "", "Ccusto Credito": "", "Nr.Documento": "", "Complemento": ""})
@@ -364,7 +378,7 @@ def modulo_relatorios():
                         df_xlsx.to_excel(writer, index=False, sheet_name='Lançamentos')
                     buffer.seek(0)
                     
-                    # PDF REPORT (Lógica original 100% mantida)
+                    # PDF REPORT
                     pdf = FPDF()
                     pdf.add_page()
                     pdf.set_font("Arial", 'B', 12)
@@ -426,22 +440,24 @@ def modulo_relatorios():
                         cred_pis += r['valor_pis']
                         cred_cof += r['valor_cofins']
 
-                    # 3. RETENÇÕES
+                    # 3. RETENÇÕES (Atualizado para ler do evento de Receita)
                     pdf.ln(5)
                     pdf.set_font("Arial", 'B', 10)
-                    pdf.cell(190, 8, "3. RETENCOES NA FONTE", ln=True)
+                    pdf.cell(190, 8, "3. RETENCOES NA FONTE (ORIGEM EM RECEITAS)", ln=True)
                     pdf.set_font("Arial", 'B', 9)
-                    pdf.cell(125, 6, "Operacao Retida", 1)
+                    pdf.cell(125, 6, "Documento / Operacao", 1)
                     pdf.cell(30, 6, "PIS Retido", 1)
                     pdf.cell(35, 6, "COF Retida", 1, ln=True)
                     
                     pdf.set_font("Arial", '', 9)
-                    for _, r in df_export[df_export['op_tipo'] == 'RETENÇÃO'].iterrows():
-                        pdf.cell(125, 6, f"{r['op_nome']}"[:70], 1)
-                        pdf.cell(30, 6, formatar_moeda(r['valor_pis']), 1)
-                        pdf.cell(35, 6, formatar_moeda(r['valor_cofins']), 1, ln=True)
-                        ret_pis += r['valor_pis']
-                        ret_cof += r['valor_cofins']
+                    df_retencoes = df_export[(df_export['op_tipo'] == 'RECEITA') & ((df_export['valor_pis_retido'] > 0) | (df_export['valor_cofins_retido'] > 0))]
+                    for _, r in df_retencoes.iterrows():
+                        nome_doc = f"Nota: {r['num_nota']} - {r['op_nome']}" if r['num_nota'] else r['op_nome']
+                        pdf.cell(125, 6, nome_doc[:70], 1)
+                        pdf.cell(30, 6, formatar_moeda(r['valor_pis_retido']), 1)
+                        pdf.cell(35, 6, formatar_moeda(r['valor_cofins_retido']), 1, ln=True)
+                        ret_pis += r['valor_pis_retido']
+                        ret_cof += r['valor_cofins_retido']
 
                     # 4. APURAÇÃO FINAL
                     pdf.ln(10)
@@ -509,6 +525,24 @@ def modulo_parametros():
             cu_cred = c10.text_input("Crédito Custo", value=row_op['conta_cred_custo'] if pd.notnull(row_op['conta_cred_custo']) else "")
             cu_cod = c11.text_input("Cód ERP Custo", value=row_op.get('custo_h_codigo', ''))
             cu_txt = c12.text_input("Texto Padrão Custo", value=row_op.get('custo_h_texto', ''))
+
+            # EXPANDER PARA RETENÇÃO NA FONTE
+            if row_op['tipo'] == 'RECEITA':
+                with st.expander("Configuração de Retenção na Fonte (PIS/COFINS Retido)", expanded=False):
+                    st.info("Estas contas serão usadas APENAS quando o operador marcar que houve retenção na fonte.")
+                    cr1, cr2, cr3, cr4 = st.columns([1, 1, 1, 2])
+                    r_p_deb = cr1.text_input("Débito PIS Ret", value=row_op.get('ret_pis_conta_deb', ''))
+                    r_p_cred = cr2.text_input("Crédito PIS Ret", value=row_op.get('ret_pis_conta_cred', ''))
+                    r_p_cod = cr3.text_input("Cód ERP PIS Ret", value=row_op.get('ret_pis_h_codigo', ''))
+                    r_p_txt = cr4.text_input("Histórico PIS Ret", value=row_op.get('ret_pis_h_texto', ''))
+
+                    cr5, cr6, cr7, cr8 = st.columns([1, 1, 1, 2])
+                    r_c_deb = cr5.text_input("Débito COF Ret", value=row_op.get('ret_cofins_conta_deb', ''))
+                    r_c_cred = cr6.text_input("Crédito COF Ret", value=row_op.get('ret_cofins_conta_cred', ''))
+                    r_c_cod = cr7.text_input("Cód ERP COF Ret", value=row_op.get('ret_cofins_h_codigo', ''))
+                    r_c_txt = cr8.text_input("Histórico COF Ret", value=row_op.get('ret_cofins_h_texto', ''))
+            else:
+                r_p_deb = r_p_cred = r_p_cod = r_p_txt = r_c_deb = r_c_cred = r_c_cod = r_c_txt = None
             
             if st.form_submit_button("Atualizar Operação"):
                 conn = get_db_connection()
@@ -518,9 +552,11 @@ def modulo_parametros():
                         UPDATE operacoes 
                         SET conta_deb_pis=%s, conta_cred_pis=%s, pis_h_codigo=%s, pis_h_texto=%s, 
                             conta_deb_cof=%s, conta_cred_cof=%s, cofins_h_codigo=%s, cofins_h_texto=%s, 
-                            conta_deb_custo=%s, conta_cred_custo=%s, custo_h_codigo=%s, custo_h_texto=%s 
+                            conta_deb_custo=%s, conta_cred_custo=%s, custo_h_codigo=%s, custo_h_texto=%s,
+                            ret_pis_conta_deb=%s, ret_pis_conta_cred=%s, ret_pis_h_codigo=%s, ret_pis_h_texto=%s,
+                            ret_cofins_conta_deb=%s, ret_cofins_conta_cred=%s, ret_cofins_h_codigo=%s, ret_cofins_h_texto=%s
                         WHERE id=%s
-                    """, (p_deb, p_cred, p_cod, p_txt, c_deb, c_cred, c_cod, c_txt, cu_deb, cu_cred, cu_cod, cu_txt, row_op['id']))
+                    """, (p_deb, p_cred, p_cod, p_txt, c_deb, c_cred, c_cod, c_txt, cu_deb, cu_cred, cu_cod, cu_txt, r_p_deb, r_p_cred, r_p_cod, r_p_txt, r_c_deb, r_c_cred, r_c_cod, r_c_txt, row_op['id']))
                     conn.commit()
                     carregar_operacoes.clear()
                     st.success("Atualizado!")
@@ -535,7 +571,8 @@ def modulo_parametros():
         with st.form("form_nova_op"):
             c_nome, c_tipo = st.columns([3, 1])
             novo_nome = c_nome.text_input("Nome da Nova Operação")
-            novo_tipo = c_tipo.selectbox("Natureza", ["RECEITA", "DESPESA", "RETENÇÃO"])
+            # REMOVIDA A OPÇÃO RETENÇÃO DAQUI
+            novo_tipo = c_tipo.selectbox("Natureza", ["RECEITA", "DESPESA"])
             
             st.markdown("##### Configuração PIS")
             c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
@@ -557,6 +594,19 @@ def modulo_parametros():
             nn_cu_cred = c10.text_input("Crédito Custo ")
             nn_cu_cod = c11.text_input("Cód ERP Custo ")
             nn_cu_txt = c12.text_input("Texto Padrão Custo ")
+
+            with st.expander("Configuração de Retenção na Fonte (Preencha apenas se for Receita)", expanded=False):
+                cr1, cr2, cr3, cr4 = st.columns([1, 1, 1, 2])
+                nn_r_p_deb = cr1.text_input("Débito PIS Ret ")
+                nn_r_p_cred = cr2.text_input("Crédito PIS Ret ")
+                nn_r_p_cod = cr3.text_input("Cód ERP PIS Ret ")
+                nn_r_p_txt = cr4.text_input("Histórico PIS Ret ")
+
+                cr5, cr6, cr7, cr8 = st.columns([1, 1, 1, 2])
+                nn_r_c_deb = cr5.text_input("Débito COF Ret ")
+                nn_r_c_cred = cr6.text_input("Crédito COF Ret ")
+                nn_r_c_cod = cr7.text_input("Cód ERP COF Ret ")
+                nn_r_c_txt = cr8.text_input("Histórico COF Ret ")
             
             if st.form_submit_button("Registar Nova Operação"):
                 if not novo_nome: 
@@ -570,9 +620,11 @@ def modulo_parametros():
                                 nome, tipo, 
                                 conta_deb_pis, conta_cred_pis, pis_h_codigo, pis_h_texto,
                                 conta_deb_cof, conta_cred_cof, cofins_h_codigo, cofins_h_texto,
-                                conta_deb_custo, conta_cred_custo, custo_h_codigo, custo_h_texto
-                            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        """, (novo_nome, novo_tipo, nn_p_deb, nn_p_cred, nn_p_cod, nn_p_txt, nn_c_deb, nn_c_cred, nn_c_cod, nn_c_txt, nn_cu_deb, nn_cu_cred, nn_cu_cod, nn_cu_txt))
+                                conta_deb_custo, conta_cred_custo, custo_h_codigo, custo_h_texto,
+                                ret_pis_conta_deb, ret_pis_conta_cred, ret_pis_h_codigo, ret_pis_h_texto,
+                                ret_cofins_conta_deb, ret_cofins_conta_cred, ret_cofins_h_codigo, ret_cofins_h_texto
+                            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """, (novo_nome, novo_tipo, nn_p_deb, nn_p_cred, nn_p_cod, nn_p_txt, nn_c_deb, nn_c_cred, nn_c_cod, nn_c_txt, nn_cu_deb, nn_cu_cred, nn_cu_cod, nn_cu_txt, nn_r_p_deb, nn_r_p_cred, nn_r_p_cod, nn_r_p_txt, nn_r_c_deb, nn_r_c_cred, nn_r_c_cod, nn_r_c_txt))
                         conn.commit()
                         carregar_operacoes.clear()
                         st.success("Registado!")
