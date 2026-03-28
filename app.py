@@ -7,6 +7,7 @@ import io
 import bcrypt
 from fpdf import FPDF
 from dateutil.relativedelta import relativedelta
+import calendar # Adicionado para descobrir o último dia exato do mês
 
 # --- 1. CONFIGURAÇÕES VISUAIS E INJEÇÃO CSS ---
 st.set_page_config(page_title="Crescere - Apuração Fiscal", layout="wide", initial_sidebar_state="expanded")
@@ -76,7 +77,6 @@ if 'dados_form' not in st.session_state: st.session_state.dados_form = {"id": No
 if 'rascunho_lancamentos' not in st.session_state: st.session_state.rascunho_lancamentos = []
 if 'form_key' not in st.session_state: st.session_state.form_key = 0
 
-# AJUSTE DE FUSO HORÁRIO (Brasília UTC-3)
 fuso_br = timezone(timedelta(hours=-3))
 hoje_br = datetime.now(fuso_br)
 competencia_padrao = (hoje_br.replace(day=1) - timedelta(days=1)).strftime("%m/%Y")
@@ -135,7 +135,6 @@ def modulo_empresas():
             c3, c4, c5, c_apelido = st.columns([2, 1.5, 1.5, 2])
             cnpj = c3.text_input("CNPJ", value=f['cnpj'])
             
-            # TODOS OS REGIMES INCLUÍDOS
             lista_regimes = ["Lucro Real", "Lucro Presumido", "Simples Nacional", "Simples Nacional - Excesso", "MEI", "Arbitrado", "Imune/Isenta", "Inativa"]
             idx_regime = lista_regimes.index(f.get('regime')) if f.get('regime') in lista_regimes else 0
             regime = c4.selectbox("Regime", lista_regimes, index=idx_regime)
@@ -217,7 +216,7 @@ def modulo_apuracao():
         teve_retencao = False
 
         if op_row['tipo'] == 'RECEITA':
-            teve_retencao = st.checkbox("☑️ Houve Retenção na Fonte nesta nota?", key=f"check_ret_{fk}")
+            teve_retencao = st.checkbox("Houve Retenção na Fonte nesta nota?", key=f"check_ret_{fk}")
             if teve_retencao:
                 st.info("Informe os valores exatos retidos no documento.")
                 c_p, c_c = st.columns(2)
@@ -276,7 +275,7 @@ def modulo_apuracao():
                     ret_badge = f" <span style='color:orange;font-size:10px;'>(RETENÇÃO)</span>" if it.get('v_pis_ret', 0) > 0 or it.get('v_cof_ret', 0) > 0 else ""
                     c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}<br>PIS: {formatar_moeda(it['v_pis']).replace('$', '&#36;')} | COF: {formatar_moeda(it['v_cofins']).replace('$', '&#36;')}</small>", unsafe_allow_html=True)
                     c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
-                    if c_del.button("×", key=f"del_{i}"): 
+                    if c_del.button("X", key=f"del_{i}"): 
                         st.session_state.rascunho_lancamentos.pop(i)
                         st.rerun()
                     st.markdown("<hr style='margin: 5px 0;'>", unsafe_allow_html=True)
@@ -350,7 +349,6 @@ def modulo_relatorios():
                             total_pis_rec += row['valor_pis']
                             total_cof_rec += row['valor_cofins']
                         
-                        # Linhas do Excel ERP... (mantido conforme anterior)
                         if pd.notnull(row['conta_deb_pis']) and pd.notnull(row['conta_cred_pis']):
                             t_hist_pis = processar_texto(row.get('pis_h_texto'), row['op_nome'])
                             linhas_excel.append({"Lancto Aut.": "", "Debito": str(row['conta_deb_pis']).replace('.', ''), "Credito": str(row['conta_cred_pis']).replace('.', ''), "Data": data_str, "Valor": row['valor_pis'], "Cod. Historico": row.get('pis_h_codigo', ''), "Historico": f"PIS - {t_hist_pis}", "Ccusto Debito": "", "Ccusto Credito": "", "Nr.Documento": row['num_nota'] or row['id'], "Complemento": ""})
@@ -418,14 +416,13 @@ def modulo_relatorios():
                     pdf.cell(120, 6, "Saldo Credor para o Mes Seguinte:", 0); pdf.cell(35, 6, formatar_moeda(abs(min(0, res_pis))), 0); pdf.cell(35, 6, formatar_moeda(abs(min(0, res_cof))), 0, ln=True)
                     pdf_bytes = pdf.output(dest='S').encode('latin1')
                     st.success("Ficheiros processados com sucesso!")
-                    c_btn1, c_btn2, _ = st.columns([1, 1, 2]); c_btn1.download_button("⬇️ XLSX (ERP)", data=buffer, file_name=f"LCTOS_{comp_db}.xlsx"); c_btn2.download_button("⬇️ PDF (Resumo)", data=pdf_bytes, file_name=f"RESUMO_{comp_db}.pdf")
+                    c_btn1, c_btn2, _ = st.columns([1, 1, 2]); c_btn1.download_button("Baixar XLSX (ERP)", data=buffer, file_name=f"LCTOS_{comp_db}.xlsx"); c_btn2.download_button("Baixar PDF (Resumo)", data=pdf_bytes, file_name=f"RESUMO_{comp_db}.pdf")
             except Exception as e: st.error(f"Erro na geração: {e}")
             finally: conn.close()
 
-
 # --- 7.5 MÓDULO IMOBILIZADO E DEPRECIAÇÃO ---
 def modulo_imobilizado():
-    st.markdown("### 🏢 Gestão de Ativo Imobilizado")
+    st.markdown("### Gestão de Ativo Imobilizado")
     df_emp = carregar_empresas_ativas()
     
     if st.session_state.nivel_acesso != "SUPER_ADMIN" and st.session_state.empresa_id:
@@ -486,42 +483,68 @@ def modulo_imobilizado():
 
     with col_ras:
         st.markdown("#### Processamento em Lote")
-        with st.container(height=180, border=True):
-            st.write("Gere o arquivo do Alterdata contendo a cota mensal de depreciação de todos os bens ativos da empresa.")
-            c_m, c_a = st.columns(2)
-            m_proc = c_m.selectbox("Mês de Processamento", range(1, 13), index=hoje_br.month - 1)
-            a_proc = c_a.number_input("Ano de Processamento", value=hoje_br.year)
+        with st.container(height=260, border=True):
+            st.write("Gere o arquivo do ERP contendo a cota de depreciação de múltiplos meses.")
+            
+            c_a, c_m = st.columns([1, 2])
+            a_proc = c_a.number_input("Ano Base", value=hoje_br.year)
+            
+            meses_opcoes = {1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr", 5: "Mai", 6: "Jun", 7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez"}
+            meses_selecionados = c_m.multiselect("Meses para Processar", options=list(meses_opcoes.keys()), format_func=lambda x: meses_opcoes[x], default=[hoje_br.month])
             
             if st.button("Gerar Exportação de Lançamentos (XLSX)", type="primary", use_container_width=True):
-                conn = get_db_connection()
-                query = f"""SELECT b.*, g.taxa_anual_percentual 
-                            FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id 
-                            WHERE b.tenant_id = {emp_id} AND b.status = 'ativo'"""
-                df_bens = pd.read_sql(query, conn)
-                conn.close()
-                
-                if df_bens.empty:
-                    st.warning("Nenhum bem ativo encontrado para esta unidade.")
+                if not meses_selecionados:
+                    st.warning("Selecione pelo menos um mês para processar.")
                 else:
-                    linhas = []
-                    for _, b in df_bens.iterrows():
-                        cota = (b['valor_compra'] * (b['taxa_anual_percentual']/100)) / 12
-                        c_d_use = b.get('conta_despesa') or b.get('conta_contabil_despesa', '')
-                        c_c_use = b.get('conta_dep_acumulada') or b.get('conta_contabil_dep_acumulada', '')
-                        
-                        linhas.append({
-                            "Lancto Aut.": "", "Debito": str(c_d_use).replace('.', ''), "Credito": str(c_c_use).replace('.', ''),
-                            "Data": f"01/{m_proc:02d}/{a_proc}", "Valor": cota, "Cod. Historico": "", 
-                            "Historico": f"DEPRECIACAO REF {m_proc:02d}/{a_proc} - {b['descricao_item']}",
-                            "Ccusto Debito": "", "Ccusto Credito": "", "Nr.Documento": b['numero_nota_fiscal'] or b['id'], "Complemento": ""
-                        })
+                    conn = get_db_connection()
+                    query = f"""SELECT b.*, g.taxa_anual_percentual 
+                                FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id 
+                                WHERE b.tenant_id = {emp_id}"""
+                    df_bens = pd.read_sql(query, conn)
+                    conn.close()
                     
-                    df_xlsx = pd.DataFrame(linhas)
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        df_xlsx.to_excel(writer, index=False, sheet_name='Depreciacao')
-                    buffer.seek(0)
-                    st.download_button("⬇️ Baixar XLSX (ERP Alterdata)", data=buffer, file_name=f"DEPREC_{m_proc:02d}_{a_proc}.xlsx", use_container_width=True)
+                    if df_bens.empty:
+                        st.warning("Nenhum bem cadastrado encontrado para esta unidade.")
+                    else:
+                        linhas = []
+                        for m_proc in sorted(meses_selecionados):
+                            last_day = calendar.monthrange(a_proc, m_proc)[1]
+                            data_lancamento_str = f"{last_day:02d}/{m_proc:02d}/{a_proc}"
+                            
+                            for _, b in df_bens.iterrows():
+                                dt_compra = b['data_compra']
+                                
+                                # Verifica se a compra foi depois do mês sendo processado (ignora o bem)
+                                se_antes_da_compra = a_proc < dt_compra.year or (a_proc == dt_compra.year and m_proc < dt_compra.month)
+                                if se_antes_da_compra:
+                                    continue
+                                
+                                cota_mensal_cheia = (b['valor_compra'] * (b['taxa_anual_percentual']/100)) / 12
+                                
+                                # Regra Pro Rata Die: Para o mês exato de aquisição (Mês Comercial = 30 dias)
+                                if a_proc == dt_compra.year and m_proc == dt_compra.month:
+                                    dia_compra = min(dt_compra.day, 30)
+                                    dias_uso = 30 - dia_compra + 1
+                                    cota = cota_mensal_cheia * (dias_uso / 30.0)
+                                else:
+                                    cota = cota_mensal_cheia
+                                    
+                                c_d_use = b.get('conta_despesa') or b.get('conta_contabil_despesa', '')
+                                c_c_use = b.get('conta_dep_acumulada') or b.get('conta_contabil_dep_acumulada', '')
+                                
+                                linhas.append({
+                                    "Lancto Aut.": "", "Debito": str(c_d_use).replace('.', ''), "Credito": str(c_c_use).replace('.', ''),
+                                    "Data": data_lancamento_str, "Valor": round(cota, 2), "Cod. Historico": "", 
+                                    "Historico": f"DEPRECIACAO REF {m_proc:02d}/{a_proc} - {b['descricao_item']}",
+                                    "Ccusto Debito": "", "Ccusto Credito": "", "Nr.Documento": b['numero_nota_fiscal'] or b['id'], "Complemento": ""
+                                })
+                        
+                        df_xlsx = pd.DataFrame(linhas)
+                        buffer = io.BytesIO()
+                        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                            df_xlsx.to_excel(writer, index=False, sheet_name='Depreciacao')
+                        buffer.seek(0)
+                        st.download_button("Baixar XLSX (Lote de Meses)", data=buffer, file_name=f"DEPREC_LOTE_{a_proc}.xlsx", use_container_width=True)
 
         st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
         st.markdown("#### Consultar Inventário")
@@ -543,11 +566,11 @@ def modulo_parametros():
         st.error("Acesso restrito.")
         return
         
-    st.markdown("### ⚙️ Parâmetros Contábeis e Integração ERP")
+    st.markdown("### Parâmetros Contábeis e Integração ERP")
     df_op = carregar_operacoes()
     op_nomes = df_op['nome'].tolist()
     
-    tab_edit, tab_novo, tab_fecho, tab_limpeza, tab_imob = st.tabs(["✏️ Editar Existente", "➕ Nova Operação", "🏢 Fecho por Empresa", "🧹 Auditoria/Limpeza", "📦 Grupos Imobilizado"])
+    tab_edit, tab_novo, tab_fecho, tab_limpeza, tab_imob = st.tabs(["Editar Existente", "Nova Operação", "Fecho por Empresa", "Auditoria/Limpeza", "Grupos Imobilizado"])
     
     with tab_edit:
         sel_op = st.selectbox("Selecione a Operação:", op_nomes)
@@ -758,10 +781,10 @@ def modulo_usuarios():
     if st.session_state.nivel_acesso == "CLIENT_OPERATOR": 
         st.error("Acesso restrito.")
         return
-    st.markdown("### 👥 Gestão de Utilizadores e Acessos")
+    st.markdown("### Gestão de Utilizadores e Acessos")
     df_emp = carregar_empresas_ativas()
     if st.session_state.nivel_acesso != "SUPER_ADMIN": df_emp = df_emp[df_emp['id'] == st.session_state.empresa_id]
-    tab_novo, tab_lista = st.tabs(["➕ Novo Utilizador", "Equipa Registada"])
+    tab_novo, tab_lista = st.tabs(["Novo Utilizador", "Equipa Registada"])
     with tab_novo:
         with st.form("form_novo_user"):
             c_emp, c_nivel = st.columns([2, 1])
@@ -794,27 +817,27 @@ with st.sidebar:
         </div>
     """, unsafe_allow_html=True)
     
-    st.markdown("<h2 style='color: #004b87; text-align: center;'>🛡️ CRESCERE</h2>", unsafe_allow_html=True)
-    st.markdown(f"<p style='text-align: center;'>👤 <b>{st.session_state.usuario_logado}</b><br><small>{st.session_state.nivel_acesso}</small></p>", unsafe_allow_html=True)
+    st.markdown("<h2 style='color: #004b87; text-align: center;'>CRESCERE</h2>", unsafe_allow_html=True)
+    st.markdown(f"<p style='text-align: center;'><b>{st.session_state.usuario_logado}</b><br><small>{st.session_state.nivel_acesso}</small></p>", unsafe_allow_html=True)
     st.write("---")
     
     menu = st.radio("Módulos", [
         "Gestão de Empresas", 
         "Apuração Mensal", 
         "Relatórios e Integração", 
-        "📦 Imobilizado & Depreciação",
-        "⚙️ Parâmetros Contábeis", 
-        "👥 Gestão de Utilizadores"
+        "Imobilizado e Depreciação",
+        "Parâmetros Contábeis", 
+        "Gestão de Utilizadores"
     ])
     st.write("---")
-    st.link_button("🔗 Auditoria de Vendas", "https://conciliador-contabil-hsppms6xpbjstvmmfktgkc.streamlit.app/", use_container_width=True)
+    st.link_button("Auditoria de Vendas", "https://conciliador-contabil-hsppms6xpbjstvmmfktgkc.streamlit.app/", use_container_width=True)
     st.write("---")
-    if st.button("🚪 Encerrar Sessão", use_container_width=True): st.session_state.autenticado = False; st.rerun()
+    if st.button("Encerrar Sessão", use_container_width=True): st.session_state.autenticado = False; st.rerun()
 
 # --- 11. RENDERIZAÇÃO DE ROTAS ---
 if menu == "Gestão de Empresas": modulo_empresas()
 elif menu == "Apuração Mensal": modulo_apuracao()
 elif menu == "Relatórios e Integração": modulo_relatorios()
-elif menu == "📦 Imobilizado & Depreciação": modulo_imobilizado()
-elif menu == "⚙️ Parâmetros Contábeis": modulo_parametros()
-elif menu == "👥 Gestão de Utilizadores": modulo_usuarios()
+elif menu == "Imobilizado e Depreciação": modulo_imobilizado()
+elif menu == "Parâmetros Contábeis": modulo_parametros()
+elif menu == "Gestão de Utilizadores": modulo_usuarios()
