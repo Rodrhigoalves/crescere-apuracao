@@ -148,7 +148,7 @@ def modulo_empresas():
                 else:
                     conn = get_db_connection(); cursor = conn.cursor()
                     try:
-                        if f['id']: cursor.execute("UPDATE empresas SET nome=%s, fantasia=%s, cnpj=%s, regime=%s, tipo=%s, cnae=%s, endereco=%s, apelido_unidade=%s WHERE id=%s", (nome, fanta, cnpj, regime, tipo, cnae, endereco, apelido, f['id']))
+                        if f['id']: cursor.execute("UPDATE empresas SET nome=%s, fantasia=%s, cnpj=%s, regime=%s, tipo=%s, cnae=%s, endereco=%s, apelido_unidade=%s WHERE id=%s", (nome, fanta, cnpj, regime, tipo, cnae, endereco, apelido, int(f['id'])))
                         else: cursor.execute("INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco, status_assinatura, apelido_unidade) VALUES (%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s)", (nome, fanta, cnpj, regime, tipo, cnae, endereco, apelido))
                         conn.commit(); carregar_empresas_ativas.clear(); st.success("Gravado com sucesso!"); st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": "", "apelido_unidade": "", "conta_transf_pis": "", "conta_transf_cofins": ""}
                     except Exception as e: conn.rollback(); st.error(f"Erro: {e}")
@@ -160,7 +160,7 @@ def modulo_empresas():
             col_info.markdown(f"**{row['nome']}** ({row['apelido_unidade'] or row['tipo']})<br><small>CNPJ: {row['cnpj']}</small>", unsafe_allow_html=True)
             if col_btn.button("Editar", key=f"btn_emp_{row['id']}"):
                 conn = get_db_connection()
-                df_edit = pd.read_sql(f"SELECT * FROM empresas WHERE id={row['id']}", conn)
+                df_edit = pd.read_sql(f"SELECT * FROM empresas WHERE id={int(row['id'])}", conn)
                 conn.close()
                 st.session_state.dados_form = df_edit.iloc[0].to_dict()
                 st.rerun()
@@ -226,7 +226,7 @@ def modulo_apuracao():
             elif exige_doc and (not num_nota or not fornecedor or (retro and not comp_origem)): st.error("Preencha todos os dados do documento.")
             else:
                 vp, vc = calcular_impostos(regime, op_row['nome'], v_base)
-                st.session_state.rascunho_lancamentos.append({"emp_id": emp_id, "op_id": int(op_row['id']), "op_nome": op_sel, "v_base": v_base, "v_pis": vp, "v_cofins": vc, "v_pis_ret": v_pis_ret, "v_cof_ret": v_cof_ret, "hist": hist, "retro": retro, "origem": comp_origem if retro else None, "nota": num_nota, "fornecedor": fornecedor})
+                st.session_state.rascunho_lancamentos.append({"emp_id": emp_id, "op_id": int(op_row['id']), "op_nome": op_sel, "v_base": float(v_base), "v_pis": float(vp), "v_cofins": float(vc), "v_pis_ret": float(v_pis_ret), "v_cof_ret": float(v_cof_ret), "hist": hist, "retro": retro, "origem": comp_origem if retro else None, "nota": num_nota, "fornecedor": fornecedor})
                 st.session_state.form_key += 1; st.rerun()
 
         # --- INTEGRAÇÃO PIS/COFINS DO IMOBILIZADO ---
@@ -250,18 +250,15 @@ def modulo_apuracao():
                             regra = bem['regra_credito']
                             dt_baixa = bem['data_baixa']
                             
-                            # Pula se foi comprado no futuro ou baixado no passado
                             if a_comp < dt_compra.year or (a_comp == dt_compra.year and m_comp < dt_compra.month): continue
                             if dt_baixa and (a_comp > dt_baixa.year or (a_comp == dt_baixa.year and m_comp > dt_baixa.month)): continue
                             
                             v_base_cred = 0.0
                             if "INTEGRAL" in regra:
-                                # Toma crédito 100% apenas no exato mês da compra
                                 if a_comp == dt_compra.year and m_comp == dt_compra.month:
-                                    v_base_cred = bem['valor_compra']
+                                    v_base_cred = float(bem['valor_compra'])
                             elif "MENSAL" in regra:
-                                cota_cheia = (bem['valor_compra'] * (bem['taxa_anual_percentual']/100)) / 12
-                                # Regra Pro Rata (Se é o mês da compra ou o mês da baixa)
+                                cota_cheia = (float(bem['valor_compra']) * (float(bem['taxa_anual_percentual'])/100)) / 12
                                 if a_comp == dt_compra.year and m_comp == dt_compra.month:
                                     dia = min(dt_compra.day, 30)
                                     v_base_cred = cota_cheia * ((30 - dia + 1) / 30.0)
@@ -274,11 +271,9 @@ def modulo_apuracao():
                             if v_base_cred > 0:
                                 vp = v_base_cred * 0.0165
                                 vc = v_base_cred * 0.076
-                                
-                                # Tenta encontrar a operação genérica de Crédito do Imobilizado
                                 op_imob = df_op[df_op['nome'].str.contains("Imobilizado", case=False, na=False)]
                                 if not op_imob.empty: 
-                                    op_id_usar = op_imob.iloc[0]['id']
+                                    op_id_usar = int(op_imob.iloc[0]['id']) # CORRIGIDO AQUI (Evita numpy.int64)
                                     op_nome_usar = op_imob.iloc[0]['nome_exibicao']
                                 else:
                                     op_id_usar = int(df_op.iloc[0]['id']) # Fallback
@@ -286,7 +281,7 @@ def modulo_apuracao():
                                 
                                 st.session_state.rascunho_lancamentos.append({
                                     "emp_id": emp_id, "op_id": op_id_usar, "op_nome": op_nome_usar, 
-                                    "v_base": v_base_cred, "v_pis": vp, "v_cofins": vc, "v_pis_ret": 0, "v_cof_ret": 0,
+                                    "v_base": float(v_base_cred), "v_pis": float(vp), "v_cofins": float(vc), "v_pis_ret": 0.0, "v_cof_ret": 0.0,
                                     "hist": f"Crédito Automático Imob - {bem['descricao_item']}", "retro": False, "origem": None,
                                     "nota": bem['numero_nota_fiscal'], "fornecedor": bem['nome_fornecedor']
                                 })
@@ -319,7 +314,7 @@ def modulo_apuracao():
                 cursor.execute("START TRANSACTION")
                 for it in st.session_state.rascunho_lancamentos:
                     query = """INSERT INTO lancamentos (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, valor_pis_retido, valor_cofins_retido, historico, usuario_registro, status_auditoria, origem_retroativa, competencia_origem, num_nota, fornecedor) VALUES (%s,%s,%s,CURDATE(),%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s,%s,%s,%s)"""
-                    cursor.execute(query, (it['emp_id'], it['op_id'], comp_db, it['v_base'], it['v_pis'], it['v_cofins'], it.get('v_pis_ret', 0), it.get('v_cof_ret', 0), it['hist'], st.session_state.username, it['retro'], it['origem'], it['nota'], it['fornecedor']))
+                    cursor.execute(query, (int(it['emp_id']), int(it['op_id']), comp_db, float(it['v_base']), float(it['v_pis']), float(it['v_cofins']), float(it.get('v_pis_ret', 0)), float(it.get('v_cof_ret', 0)), it['hist'], st.session_state.username, it['retro'], it['origem'], it['nota'], it['fornecedor']))
                 conn.commit(); st.session_state.rascunho_lancamentos = []; st.success("Sucesso!"); st.rerun()
             except Exception as e: conn.rollback(); st.error(f"Erro: {e}")
             finally: conn.close()
@@ -430,7 +425,8 @@ def modulo_imobilizado():
                     if not desc or v_aq <= 0: st.error("Descrição Básica e Valor de Aquisição são obrigatórios e maiores que zero.")
                     else:
                         conn = get_db_connection(); cursor = conn.cursor()
-                        cursor.execute("""INSERT INTO bens_imobilizado (tenant_id, grupo_id, descricao_item, marca_modelo, num_serie_placa, plaqueta, localizacao, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, conta_despesa, conta_dep_acumulada, regra_credito) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (emp_id, int(g_row['id']), desc, marca, num_serie, plaqueta, localizacao, nf, forn, dt_c, v_aq, c_desp, c_dep, regra_cred))
+                        # CORRIGIDO AQUI: int(g_row['id']) e float(v_aq)
+                        cursor.execute("""INSERT INTO bens_imobilizado (tenant_id, grupo_id, descricao_item, marca_modelo, num_serie_placa, plaqueta, localizacao, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, conta_despesa, conta_dep_acumulada, regra_credito) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (emp_id, int(g_row['id']), desc, marca, num_serie, plaqueta, localizacao, nf, forn, dt_c, float(v_aq), c_desp, c_dep, regra_cred))
                         conn.commit(); conn.close(); st.success("Bem registado com sucesso!"); st.rerun()
 
     with col_ras:
@@ -464,21 +460,18 @@ def modulo_imobilizado():
                                 dt_compra = b['data_compra']
                                 if a_proc < dt_compra.year or (a_proc == dt_compra.year and m_proc < dt_compra.month): continue
                                 
-                                cota_mensal_cheia = (b['valor_compra'] * (b['taxa_anual_percentual']/100)) / 12
+                                cota_mensal_cheia = (float(b['valor_compra']) * (float(b['taxa_anual_percentual'])/100)) / 12
                                 
                                 # PRO RATA DIE (CAMINHO A)
                                 if a_proc == hoje_br.year and m_proc == hoje_br.month:
-                                    # Se for o mês corrente, deprecia só até o dia de hoje
                                     dia_final = min(hoje_br.day, 30)
                                     if a_proc == dt_compra.year and m_proc == dt_compra.month:
-                                        # Comprou no mês atual, faz fração da compra até hoje
                                         dia_inicio = min(dt_compra.day, 30)
                                         dias_uso = max(0, dia_final - dia_inicio + 1)
                                     else:
                                         dias_uso = dia_final
                                     cota = cota_mensal_cheia * (dias_uso / 30.0)
                                 elif a_proc == dt_compra.year and m_proc == dt_compra.month:
-                                    # Mês de compra em meses passados
                                     dia_inicio = min(dt_compra.day, 30)
                                     dias_uso = 30 - dia_inicio + 1
                                     cota = cota_mensal_cheia * (dias_uso / 30.0)
@@ -526,28 +519,38 @@ def modulo_imobilizado():
             
             if not df_res.empty:
                 for _, rb in df_res.iterrows():
-                    # CALCULO DO VALOR RESIDUAL HOJE
                     dt_compra = rb['data_compra']
                     dt_ref = hoje_br.date()
                     if rb['status'] == 'baixado': dt_ref = rb['data_baixa']
                     
-                    cota_dia = (rb['valor_compra'] * (rb['taxa_anual_percentual']/100)) / 360
+                    cota_dia = (float(rb['valor_compra']) * (float(rb['taxa_anual_percentual'])/100)) / 360
                     dias_totais = (dt_ref - dt_compra).days
-                    dep_acumulada = min(rb['valor_compra'], cota_dia * dias_totais)
-                    valor_residual = max(0, rb['valor_compra'] - dep_acumulada)
+                    dep_acumulada = min(float(rb['valor_compra']), cota_dia * dias_totais)
+                    valor_residual = max(0.0, float(rb['valor_compra']) - dep_acumulada)
                     
                     with st.expander(f"{rb['descricao_item']} - {rb['marca_modelo'] or ''} (Status: {rb['status'].upper()})"):
                         st.markdown(f"**Valor de Aquisição:** {formatar_moeda(rb['valor_compra'])}")
                         st.markdown(f"**VALOR RESIDUAL ATUAL:** {formatar_moeda(valor_residual)} (Depreciado até {dt_ref.strftime('%d/%m/%Y')})")
                         
+                        if rb['status'] == 'ativo':
+                            with st.form(f"baixa_{rb['id']}"):
+                                st.warning("Atenção: A baixa cessa a depreciação e apuração.")
+                                dt_baixa_input = st.date_input("Data Oficial da Baixa", value=hoje_br)
+                                if st.form_submit_button("Confirmar Baixa do Bem"):
+                                    conn = get_db_connection(); cursor = conn.cursor()
+                                    # CORRIGIDO AQUI: int(rb['id'])
+                                    cursor.execute("UPDATE bens_imobilizado SET status='baixado', data_baixa=%s WHERE id=%s", (dt_baixa_input, int(rb['id'])))
+                                    conn.commit(); conn.close()
+                                    st.success("Bem baixado com sucesso!"); st.rerun()
+
                         st.markdown("---")
                         st.markdown("##### Simulador e Impressão de Ficha")
                         with st.form(f"sim_{rb['id']}"):
                             dt_simulada = st.date_input("Data Futura para Venda", value=hoje_br)
                             if st.form_submit_button("Gerar Ficha Individual e Projeção (PDF)"):
                                 dias_simulados = max(0, (dt_simulada - dt_compra).days)
-                                dep_simulada = min(rb['valor_compra'], cota_dia * dias_simulados)
-                                valor_res_simulado = max(0, rb['valor_compra'] - dep_simulada)
+                                dep_simulada = min(float(rb['valor_compra']), cota_dia * dias_simulados)
+                                valor_res_simulado = max(0.0, float(rb['valor_compra']) - dep_simulada)
                                 
                                 pdf = RelatorioCrescerePDF()
                                 pdf.add_page()
@@ -580,8 +583,126 @@ def modulo_parametros():
     df_op = carregar_operacoes()
     op_nomes = df_op['nome'].tolist()
     
-    tab_edit, tab_novo, tab_fecho, tab_imob = st.tabs(["✏️ Editar Existente", "➕ Nova Operação", "🏢 Fecho por Empresa", "📦 Grupos Imobilizado"])
+    tab_edit, tab_novo, tab_fecho, tab_limpeza, tab_imob = st.tabs(["✏️ Editar Existente", "➕ Nova Operação", "🏢 Fecho por Empresa", "🧹 Auditoria/Limpeza", "📦 Grupos Imobilizado"])
     
+    with tab_edit:
+        sel_op = st.selectbox("Selecione a Operação:", op_nomes)
+        row_op = df_op[df_op['nome'] == sel_op].iloc[0]
+        oid = row_op['id']
+        
+        with st.form("form_edit_param"):
+            st.markdown("##### Configuração PIS")
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+            p_deb = c1.text_input("Débito PIS", value=row_op['conta_deb_pis'] or "", key=f"pd_{oid}")
+            p_cred = c2.text_input("Crédito PIS", value=row_op['conta_cred_pis'] or "", key=f"pc_{oid}")
+            p_cod = c3.text_input("Cód ERP PIS", value=row_op.get('pis_h_codigo', ''), key=f"pcd_{oid}")
+            p_txt = c4.text_input("Texto Padrão PIS", value=row_op.get('pis_h_texto', ''), key=f"ptx_{oid}")
+            
+            st.markdown("##### Configuração COFINS")
+            c5, c6, c7, c8 = st.columns([1, 1, 1, 2])
+            c_deb = c5.text_input("Débito COFINS", value=row_op['conta_deb_cof'] or "", key=f"cd_{oid}")
+            c_cred = c6.text_input("Crédito COFINS", value=row_op['conta_cred_cof'] or "", key=f"cc_{oid}")
+            c_cod = c7.text_input("Cód ERP COFINS", value=row_op.get('cofins_h_codigo', ''), key=f"ccd_{oid}")
+            c_txt = c8.text_input("Texto Padrão COF", value=row_op.get('cofins_h_texto', ''), key=f"ctx_{oid}")
+            
+            st.markdown("##### Configuração CUSTO/VALOR LÍQUIDO")
+            c9, c10, c11, c12 = st.columns([1, 1, 1, 2])
+            cu_deb = c9.text_input("Débito Custo", value=row_op['conta_deb_custo'] or "", key=f"cud_{oid}")
+            cu_cred = c10.text_input("Crédito Custo", value=row_op['conta_cred_custo'] or "", key=f"cuc_{oid}")
+            cu_cod = c11.text_input("Cód ERP Custo", value=row_op.get('custo_h_codigo', ''), key=f"cucd_{oid}")
+            cu_txt = c12.text_input("Texto Padrão Custo", value=row_op.get('custo_h_texto', ''), key=f"cutx_{oid}")
+
+            if row_op['tipo'] == 'RECEITA':
+                with st.expander("Configuração de Retenção na Fonte", expanded=False):
+                    cr1, cr2, cr3, cr4 = st.columns([1, 1, 1, 2])
+                    r_p_deb = cr1.text_input("Débito PIS Ret", value=row_op.get('ret_pis_conta_deb', ''), key=f"rpd_{oid}")
+                    r_p_cred = cr2.text_input("Crédito PIS Ret", value=row_op.get('ret_pis_conta_cred', ''), key=f"rpc_{oid}")
+                    r_p_cod = cr3.text_input("Cód ERP PIS Ret", value=row_op.get('ret_pis_h_codigo', ''), key=f"rpcd_{oid}")
+                    r_p_txt = cr4.text_input("Histórico PIS Ret", value=row_op.get('ret_pis_h_texto', ''), key=f"rptx_{oid}")
+                    cr5, cr6, cr7, cr8 = st.columns([1, 1, 1, 2])
+                    r_c_deb = cr5.text_input("Débito COF Ret", value=row_op.get('ret_cofins_conta_deb', ''), key=f"rcd_{oid}")
+                    r_c_cred = cr6.text_input("Crédito COF Ret", value=row_op.get('ret_cofins_conta_cred', ''), key=f"rcc_{oid}")
+                    r_c_cod = cr7.text_input("Cód ERP COF Ret", value=row_op.get('ret_cofins_h_codigo', ''), key=f"rccd_{oid}")
+                    r_c_txt = cr8.text_input("Histórico COF Ret", value=row_op.get('ret_cofins_h_texto', ''), key=f"rctx_{oid}")
+            else: r_p_deb=r_p_cred=r_p_cod=r_p_txt=r_c_deb=r_c_cred=r_c_cod=r_c_txt=None
+            
+            if st.form_submit_button("Atualizar Operação"):
+                conn = get_db_connection(); cursor = conn.cursor()
+                try:
+                    # CORRIGIDO AQUI: int(oid)
+                    cursor.execute("""UPDATE operacoes SET conta_deb_pis=%s, conta_cred_pis=%s, pis_h_codigo=%s, pis_h_texto=%s, conta_deb_cof=%s, conta_cred_cof=%s, cofins_h_codigo=%s, cofins_h_texto=%s, conta_deb_custo=%s, conta_cred_custo=%s, custo_h_codigo=%s, custo_h_texto=%s, ret_pis_conta_deb=%s, ret_pis_conta_cred=%s, ret_pis_h_codigo=%s, ret_pis_h_texto=%s, ret_cofins_conta_deb=%s, ret_cofins_conta_cred=%s, ret_cofins_h_codigo=%s, ret_cofins_h_texto=%s WHERE id=%s""", (p_deb, p_cred, p_cod, p_txt, c_deb, c_cred, c_cod, c_txt, cu_deb, cu_cred, cu_cod, cu_txt, r_p_deb, r_p_cred, r_p_cod, r_p_txt, r_c_deb, r_c_cred, r_c_cod, r_c_txt, int(oid)))
+                    conn.commit(); carregar_operacoes.clear(); st.success("Atualizado!"); st.rerun()
+                except Exception as e: conn.rollback(); st.error(f"Erro: {e}")
+                finally: conn.close()
+
+    with tab_novo:
+        with st.form("form_nova_op", clear_on_submit=True): 
+            c_nome, c_tipo = st.columns([3, 1])
+            novo_nome = c_nome.text_input("Nome da Nova Operação")
+            novo_tipo = c_tipo.selectbox("Natureza", ["RECEITA", "DESPESA"])
+            st.markdown("##### Configuração PIS")
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 2]); n_p_deb = c1.text_input("Débito PIS", key="n_pd"); n_p_cred = c2.text_input("Crédito PIS", key="n_pc"); n_p_cod = c3.text_input("Cód ERP PIS", key="n_pcd"); n_p_txt = c4.text_input("Texto Padrão PIS", key="n_ptx")
+            st.markdown("##### Configuração COFINS")
+            c5, c6, c7, c8 = st.columns([1, 1, 1, 2]); n_c_deb = c5.text_input("Débito COFINS", key="n_cd"); n_c_cred = c6.text_input("Crédito COFINS", key="n_cc"); n_c_cod = c7.text_input("Cód ERP COFINS", key="n_ccd"); n_c_txt = c8.text_input("Texto Padrão COF", key="n_ctx")
+            st.markdown("##### Configuração CUSTO/VALOR LÍQUIDO")
+            c9, c10, c11, c12 = st.columns([1, 1, 1, 2]); n_cu_deb = c9.text_input("Débito Custo", key="n_cud"); n_cu_cred = c10.text_input("Crédito Custo", key="n_cuc"); n_cu_cod = c11.text_input("Cód ERP Custo", key="n_cucd"); n_cu_txt = c12.text_input("Texto Padrão Custo", key="n_cutx")
+            st.divider()
+            
+            if st.form_submit_button("Registar Nova Operação"):
+                if not novo_nome: st.error("O nome é obrigatório.")
+                else:
+                    nome_limpo = novo_nome.strip().lower()
+                    if any(o.strip().lower() == nome_limpo for o in op_nomes): st.error(f"Erro: Já existe uma operação chamada '{novo_nome}'. Verifique na aba 'Editar Existente'.")
+                    else:
+                        conn = get_db_connection(); cursor = conn.cursor()
+                        try:
+                            query_insert = """INSERT INTO operacoes (nome, tipo, conta_deb_pis, conta_cred_pis, pis_h_codigo, pis_h_texto, conta_deb_cof, conta_cred_cof, cofins_h_codigo, cofins_h_texto, conta_deb_custo, conta_cred_custo, custo_h_codigo, custo_h_texto, ret_pis_conta_deb, ret_pis_conta_cred, ret_pis_h_codigo, ret_pis_h_texto, ret_cofins_conta_deb, ret_cofins_conta_cred, ret_cofins_h_codigo, ret_cofins_h_texto) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"""
+                            valores = (novo_nome, novo_tipo, n_p_deb, n_p_cred, n_p_cod, n_p_txt, n_c_deb, n_c_cred, n_c_cod, n_c_txt, n_cu_deb, n_cu_cred, n_cu_cod, n_cu_txt)
+                            cursor.execute(query_insert, valores)
+                            conn.commit(); carregar_operacoes.clear(); st.success("Nova operação registada com sucesso!"); st.rerun()
+                        except Exception as e: conn.rollback(); st.error(f"Erro ao salvar no banco: {e}")
+                        finally: conn.close()
+
+    with tab_limpeza:
+        st.markdown("#### Verificação de Integridade de Operações")
+        st.info("Utilize esta ferramenta para identificar operações duplicadas ou sem utilização.")
+        if st.button("Executar Auditoria de Operações"):
+            conn = get_db_connection(); cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT o.id, o.nome, o.tipo, (SELECT COUNT(*) FROM lancamentos l WHERE l.operacao_id = o.id) as total_usado FROM operacoes o ORDER BY o.nome")
+            ops = cursor.fetchall(); conn.close()
+            st.write("---")
+            vistos = {}; duplicados = []
+            for o in ops:
+                n = o['nome'].strip().lower()
+                if n in vistos: duplicados.append((o, vistos[n]))
+                else: vistos[n] = o
+            if not duplicados: st.success("Nenhuma duplicidade de nome encontrada.")
+            else:
+                for d, original in duplicados:
+                    c1, c2 = st.columns([4, 1])
+                    c1.warning(f"DUPLICADO: '{d['nome']}' (ID: {d['id']}) - Usado {d['total_usado']} vezes.")
+                    if d['total_usado'] == 0:
+                        if c2.button("Excluir", key=f"excl_{d['id']}"):
+                            conn = get_db_connection(); cursor = conn.cursor()
+                            cursor.execute(f"DELETE FROM operacoes WHERE id={int(d['id'])}")
+                            conn.commit(); conn.close(); carregar_operacoes.clear(); st.rerun()
+
+    with tab_fecho:
+        st.markdown("##### Contas de Transferência / Fecho (Apuração Mensal)")
+        df_emp_f = carregar_empresas_ativas()
+        if not df_emp_f.empty:
+            with st.form("form_fecho"):
+                emp_sel_f = st.selectbox("Selecione a Empresa", df_emp_f.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1))
+                emp_id_f = int(df_emp_f.loc[df_emp_f.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1) == emp_sel_f].iloc[0]['id'])
+                row_emp_f = df_emp_f[df_emp_f['id'] == emp_id_f].iloc[0]
+                c1, c2 = st.columns(2)
+                t_pis = c1.text_input("Conta Transferência PIS", value=row_emp_f.get('conta_transf_pis') or "")
+                t_cofins = c2.text_input("Conta Transferência COFINS", value=row_emp_f.get('conta_transf_cofins') or "")
+                if st.form_submit_button("Salvar Contas de Fecho"):
+                    conn = get_db_connection(); cursor = conn.cursor()
+                    cursor.execute("UPDATE empresas SET conta_transf_pis=%s, conta_transf_cofins=%s WHERE id=%s", (t_pis, t_cofins, int(emp_id_f)))
+                    conn.commit(); carregar_empresas_ativas.clear(); st.success("Atualizado!"); st.rerun()
+
     with tab_imob:
         df_e = carregar_empresas_ativas()
         e_sel = st.selectbox("Selecione a Empresa para Gerir Grupos", df_e.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1), key="sel_emp_grp")
@@ -592,6 +713,27 @@ def modulo_parametros():
         conn.close()
         
         col_edit, col_new = st.columns(2, gap="large")
+        
+        with col_edit:
+            st.markdown("##### Editar Grupo Existente")
+            if not df_g.empty:
+                g_sel = st.selectbox("Selecione o Grupo", df_g['nome_grupo'].tolist())
+                g_row = df_g[df_g['nome_grupo'] == g_sel].iloc[0]
+                
+                with st.form("ed_grp"):
+                    n_g = st.text_input("Nome", value=g_row['nome_grupo'])
+                    tx = st.number_input("Taxa Anual (%)", value=float(g_row['taxa_anual_percentual']))
+                    cd = st.text_input("Conta Despesa", value=g_row['conta_contabil_despesa'])
+                    cc = st.text_input("Conta Dep. Acumulada", value=g_row['conta_contabil_dep_acumulada'])
+                    
+                    if st.form_submit_button("Atualizar Grupo"):
+                        conn = get_db_connection(); cursor = conn.cursor()
+                        # CORRIGIDO AQUI: int(g_row['id'])
+                        cursor.execute("UPDATE grupos_imobilizado SET nome_grupo=%s, taxa_anual_percentual=%s, conta_contabil_despesa=%s, conta_contabil_dep_acumulada=%s WHERE id=%s", (n_g, float(tx), cd, cc, int(g_row['id'])))
+                        conn.commit(); conn.close(); st.success("Atualizado com sucesso!"); st.rerun()
+            else:
+                st.info("Nenhum grupo cadastrado para esta empresa.")
+                
         with col_new:
             st.markdown("##### Criar Novo Grupo")
             opcoes_rf = {"Livre / Customizado": 0.0, "Computadores e Periféricos (20%)": 20.0, "Veículos de Passageiros (20%)": 20.0, "Máquinas e Equipamentos (10%)": 10.0, "Móveis e Utensílios (10%)": 10.0, "Edificações / Imóveis (4%)": 4.0}
@@ -607,14 +749,13 @@ def modulo_parametros():
                 if st.form_submit_button("Adicionar Grupo"):
                     if n_g_n:
                         conn = get_db_connection(); cursor = conn.cursor()
-                        cursor.execute("INSERT INTO grupos_imobilizado (tenant_id, nome_grupo, taxa_anual_percentual, conta_contabil_despesa, conta_contabil_dep_acumulada) VALUES (%s,%s,%s,%s,%s)", (e_id, n_g_n, tx_n, cd_n, cc_n))
+                        cursor.execute("INSERT INTO grupos_imobilizado (tenant_id, nome_grupo, taxa_anual_percentual, conta_contabil_despesa, conta_contabil_dep_acumulada) VALUES (%s,%s,%s,%s,%s)", (e_id, n_g_n, float(tx_n), cd_n, cc_n))
                         conn.commit(); conn.close(); st.success("Criado com sucesso!"); st.rerun()
 
 # --- 9. GESTÃO DE UTILIZADORES ---
 def modulo_usuarios():
     if st.session_state.nivel_acesso == "CLIENT_OPERATOR": st.error("Acesso restrito."); return
     st.markdown("### 👥 Gestão de Utilizadores")
-    # Logica simplificada para exibição
     st.info("Utilizadores geridos via base de dados.")
 
 # --- 10. MENU LATERAL ---
