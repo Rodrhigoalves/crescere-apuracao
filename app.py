@@ -166,7 +166,7 @@ def modulo_empresas():
                 st.rerun()
             st.divider()
 
-# --- 6. MÓDULO APURAÇÃO ---
+# --- 6. MÓDULO APURAÇÃO (COM VISUALIZAÇÃO E AUDITORIA) ---
 def modulo_apuracao():
     st.markdown("### Apuração de Impostos (PIS/COFINS)")
     df_emp = carregar_empresas_ativas()
@@ -226,7 +226,7 @@ def modulo_apuracao():
             elif exige_doc and (not num_nota or not fornecedor or (retro and not comp_origem)): st.error("Preencha todos os dados do documento.")
             else:
                 vp, vc = calcular_impostos(regime, op_row['nome'], v_base)
-                st.session_state.rascunho_lancamentos.append({"emp_id": emp_id, "op_id": int(op_row['id']), "op_nome": op_sel, "v_base": float(v_base), "v_pis": float(vp), "v_cofins": float(vc), "v_pis_ret": float(v_pis_ret), "v_cof_ret": float(v_cof_ret), "hist": hist, "retro": retro, "origem": comp_origem if retro else None, "nota": num_nota, "fornecedor": fornecedor})
+                st.session_state.rascunho_lancamentos.append({"emp_id": int(emp_id), "op_id": int(op_row['id']), "op_nome": op_sel, "v_base": float(v_base), "v_pis": float(vp), "v_cofins": float(vc), "v_pis_ret": float(v_pis_ret), "v_cof_ret": float(v_cof_ret), "hist": hist, "retro": int(retro), "origem": comp_origem if retro else None, "nota": num_nota, "fornecedor": fornecedor})
                 st.session_state.form_key += 1; st.rerun()
 
         # --- INTEGRAÇÃO PIS/COFINS DO IMOBILIZADO ---
@@ -273,16 +273,16 @@ def modulo_apuracao():
                                 vc = v_base_cred * 0.076
                                 op_imob = df_op[df_op['nome'].str.contains("Imobilizado", case=False, na=False)]
                                 if not op_imob.empty: 
-                                    op_id_usar = int(op_imob.iloc[0]['id']) # CORRIGIDO AQUI (Evita numpy.int64)
+                                    op_id_usar = int(op_imob.iloc[0]['id'])
                                     op_nome_usar = op_imob.iloc[0]['nome_exibicao']
                                 else:
-                                    op_id_usar = int(df_op.iloc[0]['id']) # Fallback
+                                    op_id_usar = int(df_op.iloc[0]['id'])
                                     op_nome_usar = "[DESPESA] Crédito Imobilizado (Auto)"
                                 
                                 st.session_state.rascunho_lancamentos.append({
-                                    "emp_id": emp_id, "op_id": op_id_usar, "op_nome": op_nome_usar, 
+                                    "emp_id": int(emp_id), "op_id": op_id_usar, "op_nome": op_nome_usar, 
                                     "v_base": float(v_base_cred), "v_pis": float(vp), "v_cofins": float(vc), "v_pis_ret": 0.0, "v_cof_ret": 0.0,
-                                    "hist": f"Crédito Automático Imob - {bem['descricao_item']}", "retro": False, "origem": None,
+                                    "hist": f"Crédito Automático Imob - {bem['descricao_item']}", "retro": 0, "origem": None,
                                     "nota": bem['numero_nota_fiscal'], "fornecedor": bem['nome_fornecedor']
                                 })
                         st.success("Créditos importados para o rascunho!")
@@ -300,8 +300,8 @@ def modulo_apuracao():
             else:
                 for i, it in enumerate(st.session_state.rascunho_lancamentos):
                     c_txt, c_val, c_del = st.columns([5, 3, 1])
-                    retro_badge = f" <span style='color:red;font-size:10px;'>(EXTEMP: {it['origem']})</span>" if it['retro'] else ""
-                    ret_badge = f" <span style='color:orange;font-size:10px;'>(RETENÇÃO)</span>" if it.get('v_pis_ret', 0) > 0 or it.get('v_cof_ret', 0) > 0 else ""
+                    retro_badge = f" <span style='color:red;font-size:10px;'>(EXTEMP: {it['origem']})</span>" if it['retro'] == 1 else ""
+                    ret_badge = f" <span style='color:orange;font-size:10px;'>(RETENÇÃO)</span>" if float(it.get('v_pis_ret', 0)) > 0 or float(it.get('v_cof_ret', 0)) > 0 else ""
                     c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}<br>PIS: {formatar_moeda(it['v_pis']).replace('$', '&#36;')} | COF: {formatar_moeda(it['v_cofins']).replace('$', '&#36;')}</small>", unsafe_allow_html=True)
                     c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
                     if c_del.button("×", key=f"del_{i}"): st.session_state.rascunho_lancamentos.pop(i); st.rerun()
@@ -314,10 +314,50 @@ def modulo_apuracao():
                 cursor.execute("START TRANSACTION")
                 for it in st.session_state.rascunho_lancamentos:
                     query = """INSERT INTO lancamentos (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, valor_pis_retido, valor_cofins_retido, historico, usuario_registro, status_auditoria, origem_retroativa, competencia_origem, num_nota, fornecedor) VALUES (%s,%s,%s,CURDATE(),%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s,%s,%s,%s)"""
-                    cursor.execute(query, (int(it['emp_id']), int(it['op_id']), comp_db, float(it['v_base']), float(it['v_pis']), float(it['v_cofins']), float(it.get('v_pis_ret', 0)), float(it.get('v_cof_ret', 0)), it['hist'], st.session_state.username, it['retro'], it['origem'], it['nota'], it['fornecedor']))
-                conn.commit(); st.session_state.rascunho_lancamentos = []; st.success("Sucesso!"); st.rerun()
-            except Exception as e: conn.rollback(); st.error(f"Erro: {e}")
+                    cursor.execute(query, (int(it['emp_id']), int(it['op_id']), comp_db, float(it['v_base']), float(it['v_pis']), float(it['v_cofins']), float(it.get('v_pis_ret', 0)), float(it.get('v_cof_ret', 0)), it['hist'], st.session_state.username, int(it['retro']), it['origem'], it['nota'], it['fornecedor']))
+                conn.commit(); st.session_state.rascunho_lancamentos = []; st.success("Gravado com sucesso no banco de dados!"); st.rerun()
+            except Exception as e: conn.rollback(); st.error(f"Erro no banco: {e}")
             finally: conn.close()
+
+    # --- VISUALIZAÇÃO DOS LANÇAMENTOS GRAVADOS E AUDITORIA ---
+    st.markdown("---")
+    st.markdown("#### 🔍 Lançamentos Gravados nesta Competência (Auditoria)")
+    
+    try:
+        m, a = competencia.split('/')
+        comp_db = f"{a}-{m.zfill(2)}"
+        conn = get_db_connection()
+        query_gravados = f"SELECT l.id, o.nome as operacao, l.valor_base, l.valor_pis, l.valor_cofins, l.historico, l.usuario_registro FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE l.empresa_id = {emp_id} AND l.competencia = '{comp_db}' AND l.status_auditoria = 'ATIVO'"
+        df_gravados = pd.read_sql(query_gravados, conn)
+        conn.close()
+        
+        if df_gravados.empty:
+            st.info("Nenhum lançamento ativo salvo na base de dados para esta competência.")
+        else:
+            st.dataframe(df_gravados, use_container_width=True, hide_index=True)
+            
+            with st.expander("✏️ Estornar / Inativar Lançamento com Histórico"):
+                st.warning("Boas práticas contábeis proíbem a exclusão silenciosa. Informe o ID para inativar o lançamento e manter a trilha de auditoria.")
+                with st.form("form_edicao_lancamento"):
+                    c_id, c_motivo = st.columns([1, 3])
+                    id_alvo = c_id.selectbox("ID do Lançamento", df_gravados['id'].tolist())
+                    motivo = c_motivo.text_input("Motivo do Estorno/Cancelamento (Obrigatório)")
+                    
+                    if st.form_submit_button("Confirmar Estorno"):
+                        if not motivo or len(motivo.strip()) < 5:
+                            st.error("É obrigatório informar um motivo válido para a auditoria.")
+                        else:
+                            conn = get_db_connection()
+                            cursor = conn.cursor()
+                            # Anexa o motivo ao histórico existente e muda o status
+                            historico_add = f" | [ESTORNADO por {st.session_state.username}]: {motivo}"
+                            cursor.execute("UPDATE lancamentos SET status_auditoria = 'INATIVO', historico = CONCAT(IFNULL(historico,''), %s) WHERE id = %s", (historico_add, int(id_alvo)))
+                            conn.commit()
+                            conn.close()
+                            st.success("Lançamento inativado e auditado com sucesso! Ele não fará mais parte da apuração.")
+                            st.rerun()
+    except Exception as e:
+        st.error("Verifique o formato da competência.")
 
 # --- 7. MÓDULO RELATÓRIOS E INTEGRAÇÃO ---
 def modulo_relatorios():
@@ -341,7 +381,7 @@ def modulo_relatorios():
                 comp_db = f"{a}-{m.zfill(2)}"
                 query = f"""SELECT l.*, o.nome as op_nome, o.tipo as op_tipo, o.conta_deb_pis, o.conta_cred_pis, o.pis_h_codigo, o.pis_h_texto, o.conta_deb_cof, o.conta_cred_cof, o.cofins_h_codigo, o.cofins_h_texto, o.conta_deb_custo, o.conta_cred_custo, o.custo_h_codigo, o.custo_h_texto, o.ret_pis_conta_deb, o.ret_pis_conta_cred, o.ret_pis_h_codigo, o.ret_pis_h_texto, o.ret_cofins_conta_deb, o.ret_cofins_conta_cred, o.ret_cofins_h_codigo, o.ret_cofins_h_texto FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE l.empresa_id = {emp_id} AND l.competencia = '{comp_db}' AND l.status_auditoria = 'ATIVO'"""
                 df_export = pd.read_sql(query, conn)
-                if df_export.empty: st.warning("Sem dados para exportar.")
+                if df_export.empty: st.warning("Sem dados ativos para exportar.")
                 else:
                     linhas_excel = []
                     total_pis_rec = 0; total_cof_rec = 0
@@ -425,8 +465,7 @@ def modulo_imobilizado():
                     if not desc or v_aq <= 0: st.error("Descrição Básica e Valor de Aquisição são obrigatórios e maiores que zero.")
                     else:
                         conn = get_db_connection(); cursor = conn.cursor()
-                        # CORRIGIDO AQUI: int(g_row['id']) e float(v_aq)
-                        cursor.execute("""INSERT INTO bens_imobilizado (tenant_id, grupo_id, descricao_item, marca_modelo, num_serie_placa, plaqueta, localizacao, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, conta_despesa, conta_dep_acumulada, regra_credito) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (emp_id, int(g_row['id']), desc, marca, num_serie, plaqueta, localizacao, nf, forn, dt_c, float(v_aq), c_desp, c_dep, regra_cred))
+                        cursor.execute("""INSERT INTO bens_imobilizado (tenant_id, grupo_id, descricao_item, marca_modelo, num_serie_placa, plaqueta, localizacao, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, conta_despesa, conta_dep_acumulada, regra_credito) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (int(emp_id), int(g_row['id']), desc, marca, num_serie, plaqueta, localizacao, nf, forn, dt_c, float(v_aq), c_desp, c_dep, regra_cred))
                         conn.commit(); conn.close(); st.success("Bem registado com sucesso!"); st.rerun()
 
     with col_ras:
@@ -439,7 +478,6 @@ def modulo_imobilizado():
             meses_selecionados = c_m.multiselect("Meses para Processar", options=list(meses_opcoes.keys()), format_func=lambda x: meses_opcoes[x], default=[hoje_br.month])
             
             if st.button("Gerar Exportação de Lançamentos (XLSX)", type="primary", use_container_width=True):
-                # TRAVA DE TEMPO
                 meses_futuros = [m for m in meses_selecionados if a_proc > hoje_br.year or (a_proc == hoje_br.year and m > hoje_br.month)]
                 if meses_futuros:
                     st.error("ERRO: Não é possível calcular e apropriar despesas de meses futuros.")
@@ -462,7 +500,6 @@ def modulo_imobilizado():
                                 
                                 cota_mensal_cheia = (float(b['valor_compra']) * (float(b['taxa_anual_percentual'])/100)) / 12
                                 
-                                # PRO RATA DIE (CAMINHO A)
                                 if a_proc == hoje_br.year and m_proc == hoje_br.month:
                                     dia_final = min(hoje_br.day, 30)
                                     if a_proc == dt_compra.year and m_proc == dt_compra.month:
@@ -538,7 +575,6 @@ def modulo_imobilizado():
                                 dt_baixa_input = st.date_input("Data Oficial da Baixa", value=hoje_br)
                                 if st.form_submit_button("Confirmar Baixa do Bem"):
                                     conn = get_db_connection(); cursor = conn.cursor()
-                                    # CORRIGIDO AQUI: int(rb['id'])
                                     cursor.execute("UPDATE bens_imobilizado SET status='baixado', data_baixa=%s WHERE id=%s", (dt_baixa_input, int(rb['id'])))
                                     conn.commit(); conn.close()
                                     st.success("Bem baixado com sucesso!"); st.rerun()
@@ -629,7 +665,6 @@ def modulo_parametros():
             if st.form_submit_button("Atualizar Operação"):
                 conn = get_db_connection(); cursor = conn.cursor()
                 try:
-                    # CORRIGIDO AQUI: int(oid)
                     cursor.execute("""UPDATE operacoes SET conta_deb_pis=%s, conta_cred_pis=%s, pis_h_codigo=%s, pis_h_texto=%s, conta_deb_cof=%s, conta_cred_cof=%s, cofins_h_codigo=%s, cofins_h_texto=%s, conta_deb_custo=%s, conta_cred_custo=%s, custo_h_codigo=%s, custo_h_texto=%s, ret_pis_conta_deb=%s, ret_pis_conta_cred=%s, ret_pis_h_codigo=%s, ret_pis_h_texto=%s, ret_cofins_conta_deb=%s, ret_cofins_conta_cred=%s, ret_cofins_h_codigo=%s, ret_cofins_h_texto=%s WHERE id=%s""", (p_deb, p_cred, p_cod, p_txt, c_deb, c_cred, c_cod, c_txt, cu_deb, cu_cred, cu_cod, cu_txt, r_p_deb, r_p_cred, r_p_cod, r_p_txt, r_c_deb, r_c_cred, r_c_cod, r_c_txt, int(oid)))
                     conn.commit(); carregar_operacoes.clear(); st.success("Atualizado!"); st.rerun()
                 except Exception as e: conn.rollback(); st.error(f"Erro: {e}")
@@ -728,7 +763,6 @@ def modulo_parametros():
                     
                     if st.form_submit_button("Atualizar Grupo"):
                         conn = get_db_connection(); cursor = conn.cursor()
-                        # CORRIGIDO AQUI: int(g_row['id'])
                         cursor.execute("UPDATE grupos_imobilizado SET nome_grupo=%s, taxa_anual_percentual=%s, conta_contabil_despesa=%s, conta_contabil_dep_acumulada=%s WHERE id=%s", (n_g, float(tx), cd, cc, int(g_row['id'])))
                         conn.commit(); conn.close(); st.success("Atualizado com sucesso!"); st.rerun()
             else:
@@ -749,7 +783,7 @@ def modulo_parametros():
                 if st.form_submit_button("Adicionar Grupo"):
                     if n_g_n:
                         conn = get_db_connection(); cursor = conn.cursor()
-                        cursor.execute("INSERT INTO grupos_imobilizado (tenant_id, nome_grupo, taxa_anual_percentual, conta_contabil_despesa, conta_contabil_dep_acumulada) VALUES (%s,%s,%s,%s,%s)", (e_id, n_g_n, float(tx_n), cd_n, cc_n))
+                        cursor.execute("INSERT INTO grupos_imobilizado (tenant_id, nome_grupo, taxa_anual_percentual, conta_contabil_despesa, conta_contabil_dep_acumulada) VALUES (%s,%s,%s,%s,%s)", (int(e_id), n_g_n, float(tx_n), cd_n, cc_n))
                         conn.commit(); conn.close(); st.success("Criado com sucesso!"); st.rerun()
 
 # --- 9. GESTÃO DE UTILIZADORES ---
