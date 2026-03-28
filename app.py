@@ -422,7 +422,7 @@ def modulo_relatorios():
 
 # --- 7.5 MÓDULO IMOBILIZADO E DEPRECIAÇÃO ---
 def modulo_imobilizado():
-    st.markdown("### Gestão de Ativo Imobilizado") # REMOVIDO APENAS DAQUI
+    st.markdown("### Gestão de Ativo Imobilizado")
     df_emp = carregar_empresas_ativas()
     
     if st.session_state.nivel_acesso != "SUPER_ADMIN" and st.session_state.empresa_id:
@@ -452,17 +452,29 @@ def modulo_imobilizado():
                 g_sel = st.selectbox("Grupo / Espécie", df_g['nome_grupo'].tolist())
                 g_row = df_g[df_g['nome_grupo'] == g_sel].iloc[0]
                 
-                desc = st.text_input("Descrição do Bem (Ex: Notebook ASUS F16)")
+                desc = st.text_input("Descrição Básica do Bem (Ex: Notebook)")
+                
+                # --- NOVOS CAMPOS OPCIONAIS ---
+                c_m, c_p = st.columns(2)
+                marca = c_m.text_input("Marca / Modelo (Opcional)")
+                num_serie = c_p.text_input("Nº Série / Placa (Opcional)")
+                
+                c_pl, c_loc = st.columns(2)
+                plaqueta = c_pl.text_input("Plaqueta / Patrimônio (Opcional)")
+                localizacao = c_loc.text_input("Localização / Depto (Opcional)")
+                
                 c_n, c_f = st.columns(2)
-                nf = c_n.text_input("Nº da Nota Fiscal")
-                forn = c_f.text_input("Fornecedor")
+                nf = c_n.text_input("Nº da Nota Fiscal (Opcional)")
+                forn = c_f.text_input("Fornecedor (Opcional)")
                 
                 c_v, c_d = st.columns(2)
                 v_aq = c_v.number_input("Valor de Aquisição (R$)", min_value=0.0, step=100.0)
                 dt_c = c_d.date_input("Data da Compra")
                 
+                # --- REGRA DE CRÉDITO PIS/COFINS ---
+                regra_cred = st.selectbox("Regra de Crédito PIS/COFINS", ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"])
+                
                 st.markdown("##### Contas Contábeis da Operação")
-                st.info("Estas contas foram puxadas do grupo, mas você pode editá-las para este bem específico.")
                 c_cd, c_cc = st.columns(2)
                 c_desp = c_cd.text_input("Conta Despesa (D)", value=g_row['conta_contabil_despesa'])
                 c_dep = c_cc.text_input("Conta Dep. Acumulada (C)", value=g_row['conta_contabil_dep_acumulada'])
@@ -470,13 +482,15 @@ def modulo_imobilizado():
                 st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
                 if st.form_submit_button("Registrar no Inventário", use_container_width=True):
                     if not desc or v_aq <= 0:
-                        st.error("Descrição e Valor de Aquisição são obrigatórios e maiores que zero.")
+                        st.error("Descrição Básica e Valor de Aquisição são obrigatórios e maiores que zero.")
                     else:
                         conn = get_db_connection(); cursor = conn.cursor()
                         cursor.execute("""INSERT INTO bens_imobilizado 
-                            (tenant_id, grupo_id, descricao_item, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, conta_despesa, conta_dep_acumulada) 
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""", 
-                            (emp_id, int(g_row['id']), desc, nf, forn, dt_c, v_aq, c_desp, c_dep))
+                            (tenant_id, grupo_id, descricao_item, marca_modelo, num_serie_placa, plaqueta, localizacao, 
+                             numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, conta_despesa, conta_dep_acumulada, regra_credito) 
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", 
+                            (emp_id, int(g_row['id']), desc, marca, num_serie, plaqueta, localizacao, 
+                             nf, forn, dt_c, v_aq, c_desp, c_dep, regra_cred))
                         conn.commit(); conn.close()
                         st.success("Bem registrado com sucesso!")
                         st.rerun()
@@ -484,7 +498,7 @@ def modulo_imobilizado():
     with col_ras:
         st.markdown("#### Processamento em Lote")
         with st.container(height=260, border=True):
-            st.write("Gere o arquivo do ERP contendo a cota de depreciação de múltiplos meses.")
+            st.write("Gere o arquivo do Alterdata contendo a cota de depreciação de múltiplos meses.")
             
             c_a, c_m = st.columns([1, 2])
             a_proc = c_a.number_input("Ano Base", value=hoje_br.year)
@@ -499,12 +513,12 @@ def modulo_imobilizado():
                     conn = get_db_connection()
                     query = f"""SELECT b.*, g.taxa_anual_percentual 
                                 FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id 
-                                WHERE b.tenant_id = {emp_id}"""
+                                WHERE b.tenant_id = {emp_id} AND b.status = 'ativo'"""
                     df_bens = pd.read_sql(query, conn)
                     conn.close()
                     
                     if df_bens.empty:
-                        st.warning("Nenhum bem cadastrado encontrado para esta unidade.")
+                        st.warning("Nenhum bem ativo encontrado para esta unidade.")
                     else:
                         linhas = []
                         for m_proc in sorted(meses_selecionados):
@@ -513,13 +527,19 @@ def modulo_imobilizado():
                             
                             for _, b in df_bens.iterrows():
                                 dt_compra = b['data_compra']
+                                dt_baixa = b['data_baixa']
                                 
                                 se_antes_da_compra = a_proc < dt_compra.year or (a_proc == dt_compra.year and m_proc < dt_compra.month)
-                                if se_antes_da_compra:
+                                if se_antes_da_compra: continue
+                                
+                                # --- INTELIGÊNCIA DA BAIXA ---
+                                # Se o bem já foi baixado num mês/ano ANTERIOR ao processamento, ele é ignorado
+                                if dt_baixa and (a_proc > dt_baixa.year or (a_proc == dt_baixa.year and m_proc > dt_baixa.month)):
                                     continue
                                 
                                 cota_mensal_cheia = (b['valor_compra'] * (b['taxa_anual_percentual']/100)) / 12
                                 
+                                # Regra Pro Rata Die
                                 if a_proc == dt_compra.year and m_proc == dt_compra.month:
                                     dia_compra = min(dt_compra.day, 30)
                                     dias_uso = 30 - dia_compra + 1
@@ -545,16 +565,33 @@ def modulo_imobilizado():
                         st.download_button("⬇️ Baixar XLSX (Lote de Meses)", data=buffer, file_name=f"DEPREC_LOTE_{a_proc}.xlsx", use_container_width=True)
 
         st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
-        st.markdown("#### Consultar Inventário")
-        busca = st.text_input("Buscar Item (Nome, NF ou Fornecedor)")
+        st.markdown("#### Consultar e Baixar Inventário")
+        busca = st.text_input("Buscar Item (Nome, Marca, NF ou Plaqueta)")
         if st.button("Pesquisar", use_container_width=True):
             conn = get_db_connection()
-            q_busca = f"SELECT b.*, g.taxa_anual_percentual FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id} AND (b.descricao_item LIKE '%{busca}%' OR b.numero_nota_fiscal LIKE '%{busca}%' OR b.nome_fornecedor LIKE '%{busca}%')"
+            q_busca = f"SELECT b.*, g.taxa_anual_percentual, g.nome_grupo FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id} AND (b.descricao_item LIKE '%{busca}%' OR b.marca_modelo LIKE '%{busca}%' OR b.numero_nota_fiscal LIKE '%{busca}%' OR b.plaqueta LIKE '%{busca}%')"
             df_res = pd.read_sql(q_busca, conn)
             conn.close()
             
             if not df_res.empty:
-                st.dataframe(df_res[['descricao_item', 'numero_nota_fiscal', 'data_compra', 'valor_compra']], use_container_width=True, hide_index=True)
+                for _, rb in df_res.iterrows():
+                    cor_status = "green" if rb['status'] == 'ativo' else "red"
+                    with st.expander(f"{rb['descricao_item']} - {rb['marca_modelo'] or ''} (Status: {rb['status'].upper()})"):
+                        st.markdown(f"**Grupo:** {rb['nome_grupo']} | **Valor:** {formatar_moeda(rb['valor_compra'])} | **Data Compra:** {rb['data_compra'].strftime('%d/%m/%Y')}")
+                        st.markdown(f"**Série/Placa:** {rb['num_serie_placa'] or 'N/I'} | **Plaqueta:** {rb['plaqueta'] or 'N/I'} | **Local:** {rb['localizacao'] or 'N/I'}")
+                        st.markdown(f"**Regra PIS/COFINS:** {rb['regra_credito']}")
+                        
+                        if rb['status'] == 'ativo':
+                            with st.form(f"baixa_{rb['id']}"):
+                                st.warning("Atenção: A baixa cessa a depreciação e apuração.")
+                                dt_baixa = st.date_input("Data Oficial da Baixa", value=hoje_br)
+                                if st.form_submit_button("Confirmar Baixa do Bem"):
+                                    conn = get_db_connection(); cursor = conn.cursor()
+                                    cursor.execute("UPDATE bens_imobilizado SET status='baixado', data_baixa=%s WHERE id=%s", (dt_baixa, rb['id']))
+                                    conn.commit(); conn.close()
+                                    st.success("Bem baixado com sucesso!"); st.rerun()
+                        else:
+                            st.error(f"Bem baixado no dia {rb['data_baixa'].strftime('%d/%m/%Y')}")
             else:
                 st.info("Nenhum bem encontrado com este filtro.")
 
@@ -667,24 +704,11 @@ def modulo_parametros():
                                     ret_cofins_conta_deb, ret_cofins_conta_cred, ret_cofins_h_codigo, ret_cofins_h_texto
                                 ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
                             """
-                            
-                            valores = (
-                                novo_nome, novo_tipo,
-                                n_p_deb, n_p_cred, n_p_cod, n_p_txt,
-                                n_c_deb, n_c_cred, n_c_cod, n_c_txt,
-                                n_cu_deb, n_cu_cred, n_cu_cod, n_cu_txt
-                            )
-                            
+                            valores = (novo_nome, novo_tipo, n_p_deb, n_p_cred, n_p_cod, n_p_txt, n_c_deb, n_c_cred, n_c_cod, n_c_txt, n_cu_deb, n_cu_cred, n_cu_cod, n_cu_txt)
                             cursor.execute(query_insert, valores)
-                            conn.commit()
-                            carregar_operacoes.clear()
-                            st.success("Nova operação registada com sucesso!")
-                            st.rerun()
-                        except Exception as e: 
-                            conn.rollback()
-                            st.error(f"Erro ao salvar no banco: {e}")
-                        finally: 
-                            conn.close()
+                            conn.commit(); carregar_operacoes.clear(); st.success("Nova operação registada com sucesso!"); st.rerun()
+                        except Exception as e: conn.rollback(); st.error(f"Erro ao salvar no banco: {e}")
+                        finally: conn.close()
 
     with tab_limpeza:
         st.markdown("#### Verificação de Integridade de Operações")
@@ -693,14 +717,12 @@ def modulo_parametros():
             conn = get_db_connection(); cursor = conn.cursor(dictionary=True)
             cursor.execute("SELECT o.id, o.nome, o.tipo, (SELECT COUNT(*) FROM lancamentos l WHERE l.operacao_id = o.id) as total_usado FROM operacoes o ORDER BY o.nome")
             ops = cursor.fetchall(); conn.close()
-            
             st.write("---")
             vistos = {}; duplicados = []
             for o in ops:
                 n = o['nome'].strip().lower()
                 if n in vistos: duplicados.append((o, vistos[n]))
                 else: vistos[n] = o
-            
             if not duplicados: st.success("Nenhuma duplicidade de nome encontrada.")
             else:
                 for d, original in duplicados:
@@ -760,11 +782,26 @@ def modulo_parametros():
                 
         with col_new:
             st.markdown("##### Criar Novo Grupo")
+            st.info("Dica: Use um padrão da Receita ou digite um customizado.")
+            
+            # --- INTELIGÊNCIA DA TABELA DA RECEITA ---
+            opcoes_rf = {
+                "Livre / Customizado": 0.0,
+                "Computadores e Periféricos (20%)": 20.0,
+                "Veículos de Passageiros (20%)": 20.0,
+                "Máquinas e Equipamentos (10%)": 10.0,
+                "Móveis e Utensílios (10%)": 10.0,
+                "Edificações / Imóveis (4%)": 4.0
+            }
+            padrao_sel = st.selectbox("Template RFB", list(opcoes_rf.keys()))
+            nome_sugerido = padrao_sel.split(' (')[0] if padrao_sel != "Livre / Customizado" else ""
+            taxa_sugerida = opcoes_rf[padrao_sel]
+            
             with st.form("nv_grp"):
-                n_g_n = st.text_input("Nome do Grupo (Ex: Máquinas)")
-                tx_n = st.number_input("Taxa Anual (%)", min_value=0.0)
-                cd_n = st.text_input("Conta Despesa (D)")
-                cc_n = st.text_input("Conta Dep. Acumulada (C)")
+                n_g_n = st.text_input("Nome do Grupo", value=nome_sugerido)
+                tx_n = st.number_input("Taxa Anual (%)", min_value=0.0, value=taxa_sugerida)
+                cd_n = st.text_input("Conta Despesa (D) - Alterdata")
+                cc_n = st.text_input("Conta Dep. Acumulada (C) - Alterdata")
                 
                 if st.form_submit_button("Adicionar Grupo"):
                     if n_g_n:
@@ -823,7 +860,7 @@ with st.sidebar:
         "Gestão de Empresas", 
         "Apuração Mensal", 
         "Relatórios e Integração", 
-        "Imobilizado e Depreciação",
+        "📦 Imobilizado & Depreciação",
         "⚙️ Parâmetros Contábeis", 
         "👥 Gestão de Utilizadores"
     ])
@@ -836,6 +873,6 @@ with st.sidebar:
 if menu == "Gestão de Empresas": modulo_empresas()
 elif menu == "Apuração Mensal": modulo_apuracao()
 elif menu == "Relatórios e Integração": modulo_relatorios()
-elif menu == "Imobilizado e Depreciação": modulo_imobilizado()
+elif menu == "📦 Imobilizado & Depreciação": modulo_imobilizado()
 elif menu == "⚙️ Parâmetros Contábeis": modulo_parametros()
 elif menu == "👥 Gestão de Utilizadores": modulo_usuarios()
