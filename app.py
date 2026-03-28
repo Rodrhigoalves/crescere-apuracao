@@ -7,7 +7,7 @@ import io
 import bcrypt
 from fpdf import FPDF
 from dateutil.relativedelta import relativedelta
-import calendar # Adicionado para descobrir o último dia exato do mês
+import calendar 
 
 # --- 1. CONFIGURAÇÕES VISUAIS E INJEÇÃO CSS ---
 st.set_page_config(page_title="Crescere - Apuração Fiscal", layout="wide", initial_sidebar_state="expanded")
@@ -216,7 +216,7 @@ def modulo_apuracao():
         teve_retencao = False
 
         if op_row['tipo'] == 'RECEITA':
-            teve_retencao = st.checkbox("Houve Retenção na Fonte nesta nota?", key=f"check_ret_{fk}")
+            teve_retencao = st.checkbox("☑️ Houve Retenção na Fonte nesta nota?", key=f"check_ret_{fk}")
             if teve_retencao:
                 st.info("Informe os valores exatos retidos no documento.")
                 c_p, c_c = st.columns(2)
@@ -275,7 +275,7 @@ def modulo_apuracao():
                     ret_badge = f" <span style='color:orange;font-size:10px;'>(RETENÇÃO)</span>" if it.get('v_pis_ret', 0) > 0 or it.get('v_cof_ret', 0) > 0 else ""
                     c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}<br>PIS: {formatar_moeda(it['v_pis']).replace('$', '&#36;')} | COF: {formatar_moeda(it['v_cofins']).replace('$', '&#36;')}</small>", unsafe_allow_html=True)
                     c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
-                    if c_del.button("X", key=f"del_{i}"): 
+                    if c_del.button("×", key=f"del_{i}"): 
                         st.session_state.rascunho_lancamentos.pop(i)
                         st.rerun()
                     st.markdown("<hr style='margin: 5px 0;'>", unsafe_allow_html=True)
@@ -416,13 +416,13 @@ def modulo_relatorios():
                     pdf.cell(120, 6, "Saldo Credor para o Mes Seguinte:", 0); pdf.cell(35, 6, formatar_moeda(abs(min(0, res_pis))), 0); pdf.cell(35, 6, formatar_moeda(abs(min(0, res_cof))), 0, ln=True)
                     pdf_bytes = pdf.output(dest='S').encode('latin1')
                     st.success("Ficheiros processados com sucesso!")
-                    c_btn1, c_btn2, _ = st.columns([1, 1, 2]); c_btn1.download_button("Baixar XLSX (ERP)", data=buffer, file_name=f"LCTOS_{comp_db}.xlsx"); c_btn2.download_button("Baixar PDF (Resumo)", data=pdf_bytes, file_name=f"RESUMO_{comp_db}.pdf")
+                    c_btn1, c_btn2, _ = st.columns([1, 1, 2]); c_btn1.download_button("⬇️ Baixar XLSX (ERP)", data=buffer, file_name=f"LCTOS_{comp_db}.xlsx"); c_btn2.download_button("⬇️ Baixar PDF (Resumo)", data=pdf_bytes, file_name=f"RESUMO_{comp_db}.pdf")
             except Exception as e: st.error(f"Erro na geração: {e}")
             finally: conn.close()
 
 # --- 7.5 MÓDULO IMOBILIZADO E DEPRECIAÇÃO ---
 def modulo_imobilizado():
-    st.markdown("### Gestão de Ativo Imobilizado")
+    st.markdown("### Gestão de Ativo Imobilizado") # REMOVIDO APENAS DAQUI
     df_emp = carregar_empresas_ativas()
     
     if st.session_state.nivel_acesso != "SUPER_ADMIN" and st.session_state.empresa_id:
@@ -514,14 +514,12 @@ def modulo_imobilizado():
                             for _, b in df_bens.iterrows():
                                 dt_compra = b['data_compra']
                                 
-                                # Verifica se a compra foi depois do mês sendo processado (ignora o bem)
                                 se_antes_da_compra = a_proc < dt_compra.year or (a_proc == dt_compra.year and m_proc < dt_compra.month)
                                 if se_antes_da_compra:
                                     continue
                                 
                                 cota_mensal_cheia = (b['valor_compra'] * (b['taxa_anual_percentual']/100)) / 12
                                 
-                                # Regra Pro Rata Die: Para o mês exato de aquisição (Mês Comercial = 30 dias)
                                 if a_proc == dt_compra.year and m_proc == dt_compra.month:
                                     dia_compra = min(dt_compra.day, 30)
                                     dias_uso = 30 - dia_compra + 1
@@ -544,7 +542,7 @@ def modulo_imobilizado():
                         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                             df_xlsx.to_excel(writer, index=False, sheet_name='Depreciacao')
                         buffer.seek(0)
-                        st.download_button("Baixar XLSX (Lote de Meses)", data=buffer, file_name=f"DEPREC_LOTE_{a_proc}.xlsx", use_container_width=True)
+                        st.download_button("⬇️ Baixar XLSX (Lote de Meses)", data=buffer, file_name=f"DEPREC_LOTE_{a_proc}.xlsx", use_container_width=True)
 
         st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
         st.markdown("#### Consultar Inventário")
@@ -566,11 +564,11 @@ def modulo_parametros():
         st.error("Acesso restrito.")
         return
         
-    st.markdown("### Parâmetros Contábeis e Integração ERP")
+    st.markdown("### ⚙️ Parâmetros Contábeis e Integração ERP")
     df_op = carregar_operacoes()
     op_nomes = df_op['nome'].tolist()
     
-    tab_edit, tab_novo, tab_fecho, tab_limpeza, tab_imob = st.tabs(["Editar Existente", "Nova Operação", "Fecho por Empresa", "Auditoria/Limpeza", "Grupos Imobilizado"])
+    tab_edit, tab_novo, tab_fecho, tab_limpeza, tab_imob = st.tabs(["✏️ Editar Existente", "➕ Nova Operação", "🏢 Fecho por Empresa", "🧹 Auditoria/Limpeza", "📦 Grupos Imobilizado"])
     
     with tab_edit:
         sel_op = st.selectbox("Selecione a Operação:", op_nomes)
@@ -781,10 +779,10 @@ def modulo_usuarios():
     if st.session_state.nivel_acesso == "CLIENT_OPERATOR": 
         st.error("Acesso restrito.")
         return
-    st.markdown("### Gestão de Utilizadores e Acessos")
+    st.markdown("### 👥 Gestão de Utilizadores e Acessos")
     df_emp = carregar_empresas_ativas()
     if st.session_state.nivel_acesso != "SUPER_ADMIN": df_emp = df_emp[df_emp['id'] == st.session_state.empresa_id]
-    tab_novo, tab_lista = st.tabs(["Novo Utilizador", "Equipa Registada"])
+    tab_novo, tab_lista = st.tabs(["➕ Novo Utilizador", "Equipa Registada"])
     with tab_novo:
         with st.form("form_novo_user"):
             c_emp, c_nivel = st.columns([2, 1])
@@ -817,8 +815,8 @@ with st.sidebar:
         </div>
     """, unsafe_allow_html=True)
     
-    st.markdown("<h2 style='color: #004b87; text-align: center;'>CRESCERE</h2>", unsafe_allow_html=True)
-    st.markdown(f"<p style='text-align: center;'><b>{st.session_state.usuario_logado}</b><br><small>{st.session_state.nivel_acesso}</small></p>", unsafe_allow_html=True)
+    st.markdown("<h2 style='color: #004b87; text-align: center;'>🛡️ CRESCERE</h2>", unsafe_allow_html=True)
+    st.markdown(f"<p style='text-align: center;'>👤 <b>{st.session_state.usuario_logado}</b><br><small>{st.session_state.nivel_acesso}</small></p>", unsafe_allow_html=True)
     st.write("---")
     
     menu = st.radio("Módulos", [
@@ -826,18 +824,18 @@ with st.sidebar:
         "Apuração Mensal", 
         "Relatórios e Integração", 
         "Imobilizado e Depreciação",
-        "Parâmetros Contábeis", 
-        "Gestão de Utilizadores"
+        "⚙️ Parâmetros Contábeis", 
+        "👥 Gestão de Utilizadores"
     ])
     st.write("---")
-    st.link_button("Auditoria de Vendas", "https://conciliador-contabil-hsppms6xpbjstvmmfktgkc.streamlit.app/", use_container_width=True)
+    st.link_button("🔗 Auditoria de Vendas", "https://conciliador-contabil-hsppms6xpbjstvmmfktgkc.streamlit.app/", use_container_width=True)
     st.write("---")
-    if st.button("Encerrar Sessão", use_container_width=True): st.session_state.autenticado = False; st.rerun()
+    if st.button("🚪 Encerrar Sessão", use_container_width=True): st.session_state.autenticado = False; st.rerun()
 
 # --- 11. RENDERIZAÇÃO DE ROTAS ---
 if menu == "Gestão de Empresas": modulo_empresas()
 elif menu == "Apuração Mensal": modulo_apuracao()
 elif menu == "Relatórios e Integração": modulo_relatorios()
 elif menu == "Imobilizado e Depreciação": modulo_imobilizado()
-elif menu == "Parâmetros Contábeis": modulo_parametros()
-elif menu == "Gestão de Utilizadores": modulo_usuarios()
+elif menu == "⚙️ Parâmetros Contábeis": modulo_parametros()
+elif menu == "👥 Gestão de Utilizadores": modulo_usuarios()
