@@ -6,7 +6,6 @@ from datetime import date, datetime, timedelta, timezone # Adicionado timezone
 import io
 import bcrypt
 from fpdf import FPDF
-from dateutil.relativedelta import relativedelta # Adicionado para cálculos de depreciação
 
 # --- 1. CONFIGURAÇÕES VISUAIS E INJEÇÃO CSS ---
 st.set_page_config(page_title="Crescere - Apuração Fiscal", layout="wide", initial_sidebar_state="expanded")
@@ -134,12 +133,7 @@ def modulo_empresas():
             
             c3, c4, c5, c_apelido = st.columns([2, 1.5, 1.5, 2])
             cnpj = c3.text_input("CNPJ", value=f['cnpj'])
-            
-            # --- MUDANÇA 1: TODOS OS REGIMES INCLUÍDOS ---
-            lista_regimes = ["Lucro Real", "Lucro Presumido", "Simples Nacional", "Simples Nacional - Excesso", "MEI", "Arbitrado", "Imune/Isenta", "Inativa"]
-            idx_regime = lista_regimes.index(f.get('regime')) if f.get('regime') in lista_regimes else 0
-            regime = c4.selectbox("Regime", lista_regimes, index=idx_regime)
-            
+            regime = c4.selectbox("Regime", ["Lucro Real", "Lucro Presumido"], index=0 if f.get('regime') == "Lucro Real" else 1)
             tipo = c5.selectbox("Tipo", ["Matriz", "Filial"], index=0 if f.get('tipo') == "Matriz" else 1)
             apelido = c_apelido.text_input("Apelido da Unidade", value=f.get('apelido_unidade', ''))
             
@@ -264,7 +258,7 @@ def modulo_apuracao():
         
         altura_dinamica = 390
         if teve_retencao: altura_dinamica += 135  
-        if exige_doc: altura_dinamica += 85        
+        if exige_doc: altura_dinamica += 85       
         
         with st.container(height=altura_dinamica, border=True): 
             if not st.session_state.rascunho_lancamentos: 
@@ -422,122 +416,6 @@ def modulo_relatorios():
             except Exception as e: st.error(f"Erro na geração: {e}")
             finally: conn.close()
 
-
-# --- 7.5 MÓDULO IMOBILIZADO E DEPRECIAÇÃO (NOVO E PLANO) ---
-def modulo_imobilizado():
-    st.markdown("### 🏢 Gestão de Ativo Imobilizado")
-    df_emp = carregar_empresas_ativas()
-    
-    if st.session_state.nivel_acesso != "SUPER_ADMIN" and st.session_state.empresa_id:
-        df_emp = df_emp[df_emp['id'] == st.session_state.empresa_id]
-        if df_emp.empty: 
-            st.warning("Nenhuma unidade vinculada a este utilizador.")
-            return
-
-    c_emp, c_vazio = st.columns([2, 1])
-    emp_sel = c_emp.selectbox("Unidade", df_emp.apply(lambda r: f"{r['nome']} - {r['apelido_unidade'] or r['tipo']}", axis=1), key="imo_emp")
-    emp_id = int(df_emp.loc[df_emp.apply(lambda r: f"{r['nome']} - {r['apelido_unidade'] or r['tipo']}", axis=1) == emp_sel].iloc[0]['id'])
-
-    st.divider()
-    # Layout plano com duas colunas, idêntico à Apuração
-    col_in, col_ras = st.columns([1, 1], gap="large")
-    
-    conn = get_db_connection()
-    df_g = pd.read_sql(f"SELECT * FROM grupos_imobilizado WHERE tenant_id = {emp_id}", conn)
-    conn.close()
-
-    with col_in:
-        st.markdown("#### Cadastro do Bem")
-        if df_g.empty:
-            st.warning("Cadastre os Grupos em Parâmetros Contábeis primeiro.")
-        else:
-            with st.form("form_novo_bem"):
-                g_sel = st.selectbox("Grupo / Espécie", df_g['nome_grupo'].tolist())
-                g_row = df_g[df_g['nome_grupo'] == g_sel].iloc[0]
-                
-                desc = st.text_input("Descrição do Bem (Ex: Notebook ASUS F16)")
-                c_n, c_f = st.columns(2)
-                nf = c_n.text_input("Nº da Nota Fiscal")
-                forn = c_f.text_input("Fornecedor")
-                
-                c_v, c_d = st.columns(2)
-                v_aq = c_v.number_input("Valor de Aquisição (R$)", min_value=0.0, step=100.0)
-                dt_c = c_d.date_input("Data da Compra")
-                
-                st.markdown("##### Contas Contábeis da Operação")
-                st.info("Estas contas foram puxadas do grupo, mas você pode editá-las para este bem específico.")
-                c_cd, c_cc = st.columns(2)
-                c_desp = c_cd.text_input("Conta Despesa (D)", value=g_row['conta_contabil_despesa'])
-                c_dep = c_cc.text_input("Conta Dep. Acumulada (C)", value=g_row['conta_contabil_dep_acumulada'])
-
-                st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
-                if st.form_submit_button("Registrar no Inventário", use_container_width=True):
-                    if not desc or v_aq <= 0:
-                        st.error("Descrição e Valor de Aquisição são obrigatórios e maiores que zero.")
-                    else:
-                        conn = get_db_connection(); cursor = conn.cursor()
-                        cursor.execute("""INSERT INTO bens_imobilizado 
-                            (tenant_id, grupo_id, descricao_item, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, conta_despesa, conta_dep_acumulada) 
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""", 
-                            (emp_id, int(g_row['id']), desc, nf, forn, dt_c, v_aq, c_desp, c_dep))
-                        conn.commit(); conn.close()
-                        st.success("Bem registrado com sucesso!")
-                        st.rerun()
-
-    with col_ras:
-        st.markdown("#### Processamento em Lote")
-        with st.container(height=180, border=True):
-            st.write("Gere o arquivo do Alterdata contendo a cota mensal de depreciação de todos os bens ativos da empresa.")
-            c_m, c_a = st.columns(2)
-            m_proc = c_m.selectbox("Mês de Processamento", range(1, 13), index=hoje_br.month - 1)
-            a_proc = c_a.number_input("Ano de Processamento", value=hoje_br.year)
-            
-            if st.button("Gerar Exportação de Lançamentos (XLSX)", type="primary", use_container_width=True):
-                conn = get_db_connection()
-                query = f"""SELECT b.*, g.taxa_anual_percentual 
-                            FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id 
-                            WHERE b.tenant_id = {emp_id} AND b.status = 'ativo'"""
-                df_bens = pd.read_sql(query, conn)
-                conn.close()
-                
-                if df_bens.empty:
-                    st.warning("Nenhum bem ativo encontrado para esta unidade.")
-                else:
-                    linhas = []
-                    for _, b in df_bens.iterrows():
-                        cota = (b['valor_compra'] * (b['taxa_anual_percentual']/100)) / 12
-                        c_d_use = b.get('conta_despesa') or b.get('conta_contabil_despesa', '')
-                        c_c_use = b.get('conta_dep_acumulada') or b.get('conta_contabil_dep_acumulada', '')
-                        
-                        linhas.append({
-                            "Lancto Aut.": "", "Debito": str(c_d_use).replace('.', ''), "Credito": str(c_c_use).replace('.', ''),
-                            "Data": f"01/{m_proc:02d}/{a_proc}", "Valor": cota, "Cod. Historico": "", 
-                            "Historico": f"DEPRECIACAO REF {m_proc:02d}/{a_proc} - {b['descricao_item']}",
-                            "Ccusto Debito": "", "Ccusto Credito": "", "Nr.Documento": b['numero_nota_fiscal'] or b['id'], "Complemento": ""
-                        })
-                    
-                    df_xlsx = pd.DataFrame(linhas)
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        df_xlsx.to_excel(writer, index=False, sheet_name='Depreciacao')
-                    buffer.seek(0)
-                    st.download_button("⬇️ Baixar XLSX (ERP Alterdata)", data=buffer, file_name=f"DEPREC_{m_proc:02d}_{a_proc}.xlsx", use_container_width=True)
-
-        st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
-        st.markdown("#### Consultar Inventário")
-        busca = st.text_input("Buscar Item (Nome, NF ou Fornecedor)")
-        if st.button("Pesquisar", use_container_width=True):
-            conn = get_db_connection()
-            q_busca = f"SELECT b.*, g.taxa_anual_percentual FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id} AND (b.descricao_item LIKE '%{busca}%' OR b.numero_nota_fiscal LIKE '%{busca}%' OR b.nome_fornecedor LIKE '%{busca}%')"
-            df_res = pd.read_sql(q_busca, conn)
-            conn.close()
-            
-            if not df_res.empty:
-                st.dataframe(df_res[['descricao_item', 'numero_nota_fiscal', 'data_compra', 'valor_compra']], use_container_width=True, hide_index=True)
-            else:
-                st.info("Nenhum bem encontrado com este filtro.")
-
-
 # --- 8. MÓDULO PARÂMETROS CONTÁBEIS (COM FERRAMENTAS ADM) ---
 def modulo_parametros():
     if st.session_state.nivel_acesso == "CLIENT_OPERATOR": 
@@ -548,8 +426,7 @@ def modulo_parametros():
     df_op = carregar_operacoes()
     op_nomes = df_op['nome'].tolist()
     
-    # --- MUDANÇA 2: 5ª ABA ADICIONADA PRESERVANDO AS 4 ORIGINAIS ---
-    tab_edit, tab_novo, tab_fecho, tab_limpeza, tab_imob = st.tabs(["✏️ Editar Existente", "➕ Nova Operação", "🏢 Fecho por Empresa", "🧹 Auditoria/Limpeza", "📦 Grupos Imobilizado"])
+    tab_edit, tab_novo, tab_fecho, tab_limpeza = st.tabs(["✏️ Editar Existente", "➕ Nova Operação", "🏢 Fecho por Empresa", "🧹 Auditoria/Limpeza"])
     
     with tab_edit:
         sel_op = st.selectbox("Selecione a Operação:", op_nomes)
@@ -601,7 +478,7 @@ def modulo_parametros():
                 finally: conn.close()
 
     with tab_novo:
-        with st.form("form_nova_op", clear_on_submit=True): 
+        with st.form("form_nova_op", clear_on_submit=True): # ADICIONADO clear_on_submit
             c_nome, c_tipo = st.columns([3, 1])
             novo_nome = c_nome.text_input("Nome da Nova Operação")
             novo_tipo = c_tipo.selectbox("Natureza", ["RECEITA", "DESPESA"])
@@ -609,6 +486,7 @@ def modulo_parametros():
             if st.form_submit_button("Registar Nova Operação"):
                 if not novo_nome: st.error("O nome é obrigatório.")
                 else:
+                    # TRAVA DE DUPLICIDADE (Ignora maiúsculas e espaços)
                     nome_limpo = novo_nome.strip().lower()
                     if any(o.strip().lower() == nome_limpo for o in op_nomes):
                         st.error(f"Erro: Já existe uma operação chamada '{novo_nome}'. Verifique na aba 'Editar Existente'.")
@@ -629,6 +507,7 @@ def modulo_parametros():
             ops = cursor.fetchall(); conn.close()
             
             st.write("---")
+            # Encontrar duplicatas por nome (limpeza básica)
             vistos = {}; duplicados = []
             for o in ops:
                 n = o['nome'].strip().lower()
@@ -662,53 +541,6 @@ def modulo_parametros():
                     cursor.execute("UPDATE empresas SET conta_transf_pis=%s, conta_transf_cofins=%s WHERE id=%s", (t_pis, t_cofins, emp_id_f))
                     conn.commit(); carregar_empresas_ativas.clear(); st.success("Atualizado!"); st.rerun()
 
-    # --- MUDANÇA 3: ABA DE GRUPOS DO IMOBILIZADO PLANO SEM DESENHOS ---
-    with tab_imob:
-        df_e = carregar_empresas_ativas()
-        e_sel = st.selectbox("Selecione a Empresa para Gerir Grupos", df_e.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1), key="sel_emp_grp")
-        e_id = int(df_e.loc[df_e.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1) == e_sel].iloc[0]['id'])
-        
-        conn = get_db_connection()
-        df_g = pd.read_sql(f"SELECT * FROM grupos_imobilizado WHERE tenant_id = {e_id}", conn)
-        conn.close()
-        
-        col_edit, col_new = st.columns(2, gap="large")
-        
-        with col_edit:
-            st.markdown("##### Editar Grupo Existente")
-            if not df_g.empty:
-                g_sel = st.selectbox("Selecione o Grupo", df_g['nome_grupo'].tolist())
-                g_row = df_g[df_g['nome_grupo'] == g_sel].iloc[0]
-                
-                with st.form("ed_grp"):
-                    n_g = st.text_input("Nome", value=g_row['nome_grupo'])
-                    tx = st.number_input("Taxa Anual (%)", value=float(g_row['taxa_anual_percentual']))
-                    cd = st.text_input("Conta Despesa", value=g_row['conta_contabil_despesa'])
-                    cc = st.text_input("Conta Dep. Acumulada", value=g_row['conta_contabil_dep_acumulada'])
-                    
-                    if st.form_submit_button("Atualizar Grupo"):
-                        conn = get_db_connection(); cursor = conn.cursor()
-                        cursor.execute("UPDATE grupos_imobilizado SET nome_grupo=%s, taxa_anual_percentual=%s, conta_contabil_despesa=%s, conta_contabil_dep_acumulada=%s WHERE id=%s", (n_g, tx, cd, cc, g_row['id']))
-                        conn.commit(); conn.close(); st.success("Atualizado com sucesso!"); st.rerun()
-            else:
-                st.info("Nenhum grupo cadastrado para esta empresa.")
-                
-        with col_new:
-            st.markdown("##### Criar Novo Grupo")
-            with st.form("nv_grp"):
-                n_g_n = st.text_input("Nome do Grupo (Ex: Máquinas)")
-                tx_n = st.number_input("Taxa Anual (%)", min_value=0.0)
-                cd_n = st.text_input("Conta Despesa (D)")
-                cc_n = st.text_input("Conta Dep. Acumulada (C)")
-                
-                if st.form_submit_button("Adicionar Grupo"):
-                    if n_g_n:
-                        conn = get_db_connection(); cursor = conn.cursor()
-                        cursor.execute("INSERT INTO grupos_imobilizado (tenant_id, nome_grupo, taxa_anual_percentual, conta_contabil_despesa, conta_contabil_dep_acumulada) VALUES (%s,%s,%s,%s,%s)", (e_id, n_g_n, tx_n, cd_n, cc_n))
-                        conn.commit(); conn.close(); st.success("Criado com sucesso!"); st.rerun()
-                    else:
-                        st.error("O Nome do grupo é obrigatório.")
-
 # --- 9. GESTÃO DE UTILIZADORES ---
 def modulo_usuarios():
     if st.session_state.nivel_acesso == "CLIENT_OPERATOR": 
@@ -740,7 +572,7 @@ def modulo_usuarios():
         if st.session_state.nivel_acesso != "SUPER_ADMIN": query += f" WHERE u.empresa_id = {st.session_state.empresa_id}"
         st.dataframe(pd.read_sql(query, conn), use_container_width=True, hide_index=True); conn.close()
 
-# --- 10. MENU LATERAL (PRESERVADO INTACTO COM DATA E RELÓGIO) ---
+# --- 10. MENU LATERAL ---
 with st.sidebar:
     # DATA E DIA DA SEMANA (Fuso Brasília UTC-3)
     dias = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
@@ -754,16 +586,7 @@ with st.sidebar:
     st.markdown("<h2 style='color: #004b87; text-align: center;'>🛡️ CRESCERE</h2>", unsafe_allow_html=True)
     st.markdown(f"<p style='text-align: center;'>👤 <b>{st.session_state.usuario_logado}</b><br><small>{st.session_state.nivel_acesso}</small></p>", unsafe_allow_html=True)
     st.write("---")
-    
-    # --- MUDANÇA 4: IMOBILIZADO INSERIDO APÓS RELATÓRIOS ---
-    menu = st.radio("Módulos", [
-        "Gestão de Empresas", 
-        "Apuração Mensal", 
-        "Relatórios e Integração", 
-        "📦 Imobilizado & Depreciação",
-        "⚙️ Parâmetros Contábeis", 
-        "👥 Gestão de Utilizadores"
-    ])
+    menu = st.radio("Módulos", ["Gestão de Empresas", "Apuração Mensal", "Relatórios e Integração", "⚙️ Parâmetros Contábeis", "👥 Gestão de Utilizadores"])
     st.write("---")
     st.link_button("🔗 Auditoria de Vendas", "https://conciliador-contabil-hsppms6xpbjstvmmfktgkc.streamlit.app/", use_container_width=True)
     st.write("---")
@@ -773,6 +596,5 @@ with st.sidebar:
 if menu == "Gestão de Empresas": modulo_empresas()
 elif menu == "Apuração Mensal": modulo_apuracao()
 elif menu == "Relatórios e Integração": modulo_relatorios()
-elif menu == "📦 Imobilizado & Depreciação": modulo_imobilizado() # Nova Rota
 elif menu == "⚙️ Parâmetros Contábeis": modulo_parametros()
 elif menu == "👥 Gestão de Utilizadores": modulo_usuarios()
