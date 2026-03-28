@@ -721,6 +721,28 @@ def modulo_usuarios():
         conn.close()
 
 # --- 10. MENU LATERAL ---
+import time
+
+with st.sidebar:
+    # --- RELÓGIO DINÂMICO ---
+    relogio_placeholder = st.empty()
+    
+    # Função simples para formatar a data em português
+    dias_semana = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
+    agora = datetime.now()
+    data_formatada = f"{dias_semana[agora.weekday()]}, {agora.strftime('%d/%m/%Y')}"
+    
+    # Injeta o estilo e a hora (o Streamlit vai atualizar isso quando houver interação)
+    relogio_placeholder.markdown(f"""
+        <div style='text-align: center; color: #64748b; font-size: 0.85em; margin-bottom: 10px;'>
+            {data_formatada}<br>
+            <span style='font-size: 1.2em; font-weight: bold; color: #004b87;'>{agora.strftime('%H:%M:%S')}</span>
+        </div>
+    """, unsafe_allow_html=True)
+    # -----------------------
+
+    st.markdown("<h2 style='color: #004b87; text-align: center;'>🛡️ CRESCERE</h2>", unsafe_allow_html=True)
+    # ... resto do código do sidebar ...
 with st.sidebar:
     st.markdown("<h2 style='color: #004b87; text-align: center;'>🛡️ CRESCERE</h2>", unsafe_allow_html=True)
     st.markdown(f"<p style='text-align: center;'>👤 <b>{st.session_state.usuario_logado}</b><br><small>{st.session_state.nivel_acesso}</small></p>", unsafe_allow_html=True)
