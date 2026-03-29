@@ -2,12 +2,12 @@ import streamlit as st
 import mysql.connector
 import pandas as pd
 import requests
-from datetime import date, datetime, timedelta, timezone 
+from datetime import date, datetime, timedelta, timezone
 import io
 import bcrypt
 from fpdf import FPDF
 from dateutil.relativedelta import relativedelta
-import calendar 
+import calendar
 
 # --- 1. CONFIGURAÇÕES VISUAIS E INJEÇÃO CSS ---
 st.set_page_config(page_title="Crescere - Apuração Fiscal", layout="wide", initial_sidebar_state="expanded")
