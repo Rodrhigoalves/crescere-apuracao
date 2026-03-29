@@ -789,6 +789,9 @@ def modulo_usuarios():
     conn = get_db_connection()
     df_users = pd.read_sql("SELECT id, nome, username, nivel_acesso, status_usuario, data_criacao FROM usuarios ORDER BY nome ASC", conn)
     
+    # Busca as empresas para permitir o vínculo no momento da criação
+    df_empresas = pd.read_sql("SELECT id, nome FROM empresas WHERE status_assinatura = 'ATIVO'", conn)
+    
     tab_lista, tab_novo = st.tabs(["Utilizadores Registados", "Adicionar Utilizador"])
     
     with tab_lista:
@@ -803,35 +806,75 @@ def modulo_usuarios():
             if st.form_submit_button("Executar Ação"):
                 cursor = conn.cursor()
                 try:
-                    if nova_acao == "Inativar Acesso": cursor.execute("UPDATE usuarios SET status_usuario = 'INATIVO' WHERE username = %s", (usr_sel,)); st.success(f"Acesso inativado.")
-                    elif nova_acao == "Reativar Acesso": cursor.execute("UPDATE usuarios SET status_usuario = 'ATIVO' WHERE username = %s", (usr_sel,)); st.success(f"Acesso reativado.")
+                    if nova_acao == "Inativar Acesso":
+                        cursor.execute("UPDATE usuarios SET status_usuario = 'INATIVO' WHERE username = %s", (usr_sel,))
+                        st.toast(f"Acesso inativado para {usr_sel}.")
+                    elif nova_acao == "Reativar Acesso":
+                        cursor.execute("UPDATE usuarios SET status_usuario = 'ATIVO' WHERE username = %s", (usr_sel,))
+                        st.toast(f"Acesso reativado para {usr_sel}.")
                     elif nova_acao == "Redefinir Palavra-passe":
-                        if len(nova_senha) < 6: st.error("Senha curta.")
-                        else: cursor.execute("UPDATE usuarios SET senha_hash = %s WHERE username = %s", (gerar_hash_senha(nova_senha), usr_sel)); st.success("Senha atualizada!")
+                        if len(nova_senha) < 6:
+                            st.error("A senha deve ter pelo menos 6 caracteres.")
+                        else:
+                            cursor.execute("UPDATE usuarios SET senha_hash = %s WHERE username = %s", (gerar_hash_senha(nova_senha), usr_sel))
+                            st.toast("Palavra-passe atualizada com sucesso!")
                     conn.commit()
-                except Exception as e: conn.rollback(); st.error(f"Erro: {e}")
-                st.rerun()
-                
+                except Exception as e:
+                    conn.rollback()
+                    st.error(f"Erro no banco: {e}")
+                finally:
+                    conn.close() # Garante o fechamento antes do rerun
+                    import time
+                    time.sleep(1.2) # Pausa rápida para a notificação toast ser lida
+                    st.rerun()
+                    
     with tab_novo:
         with st.form("form_novo_usuario"):
-            c_n, c_u = st.columns(2)
-            novo_nome = c_n.text_input("Nome Completo")
-            novo_user = c_u.text_input("Nome de Utilizador (Login)")
-            c_p, c_n = st.columns(2)
-            nova_pass = c_p.text_input("Palavra-passe Inicial", type="password")
-            nivel = c_n.selectbox("Nível de Acesso", ["CLIENT_OPERATOR", "ADMIN", "SUPER_ADMIN"])
+            # Variáveis das colunas ajustadas
+            col_nome, col_user = st.columns(2)
+            novo_nome = col_nome.text_input("Nome Completo")
+            novo_user = col_user.text_input("Nome de Utilizador (Login)")
+            
+            col_pass, col_nivel = st.columns(2)
+            nova_pass = col_pass.text_input("Palavra-passe Inicial", type="password")
+            nivel = col_nivel.selectbox("Nível de Acesso", ["CLIENT_OPERATOR", "ADMIN", "SUPER_ADMIN"])
+            
+            # Campo para vincular o usuário à empresa correta
+            lista_empresas = ["Nenhuma (Acesso Global)"] + df_empresas['nome'].tolist()
+            emp_vinculada = st.selectbox("Vincular a uma Unidade/Empresa", lista_empresas)
             
             if st.form_submit_button("Criar Utilizador"):
-                if not novo_nome or not novo_user or len(nova_pass) < 6: st.error("Preencha todos os campos corretamente.")
-                elif novo_user in df_users['username'].tolist(): st.error("Usuário já existe.")
+                if not novo_nome or not novo_user or len(nova_pass) < 6: 
+                    st.error("Preencha todos os campos corretamente (senha mín. 6 caracteres).")
+                elif novo_user in df_users['username'].tolist(): 
+                    st.error("Este utilizador já existe.")
                 else:
                     cursor = conn.cursor()
                     try:
-                        cursor.execute("INSERT INTO usuarios (nome, username, senha_hash, nivel_acesso, status_usuario, data_criacao) VALUES (%s, %s, %s, %s, 'ATIVO', NOW())", (novo_nome, novo_user, gerar_hash_senha(nova_pass), nivel))
-                        conn.commit(); st.success("Utilizador criado!"); st.rerun()
-                    except Exception as e: conn.rollback(); st.error(f"Erro: {e}")
-    conn.close()
+                        empresa_id_db = None
+                        if emp_vinculada != "Nenhuma (Acesso Global)":
+                            empresa_id_db = int(df_empresas[df_empresas['nome'] == emp_vinculada].iloc[0]['id'])
 
+                        # INSERT ajustado para receber empresa_id
+                        query = """
+                            INSERT INTO usuarios (nome, username, senha_hash, nivel_acesso, status_usuario, data_criacao, empresa_id) 
+                            VALUES (%s, %s, %s, %s, 'ATIVO', NOW(), %s)
+                        """
+                        cursor.execute(query, (novo_nome, novo_user, gerar_hash_senha(nova_pass), nivel, empresa_id_db))
+                        conn.commit()
+                        st.toast("Utilizador criado com sucesso!", icon="✅")
+                    except Exception as e: 
+                        conn.rollback()
+                        st.error(f"Erro ao inserir no banco: {e}")
+                    finally:
+                        conn.close() # Previne o connection leak
+                        import time
+                        time.sleep(1.2)
+                        st.rerun()
+                        
+    # Bloco extra de segurança para fechar a conexão no fluxo normal
+    if conn.is_connected():
+        conn.close()
 # --- 10. MENU LATERAL ---
 with st.sidebar:
     dias_pt = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
