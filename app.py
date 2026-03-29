@@ -256,7 +256,14 @@ def modulo_apuracao():
                     c_txt, c_val, c_del = st.columns([5, 3, 1])
                     retro_badge = f" <span style='color:red;font-size:10px;'>(EXTEMP: {it['origem']})</span>" if it['retro'] == 1 else ""
                     ret_badge = f" <span style='color:orange;font-size:10px;'>(RETENÇÃO)</span>" if float(it.get('v_pis_ret', 0)) > 0 or float(it.get('v_cof_ret', 0)) > 0 else ""
-                    c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}<br>PIS: {formatar_moeda(it['v_pis']).replace('$', '&#36;')} | COF: {formatar_moeda(it['v_cofins']).replace('$', '&#36;')}</small>", unsafe_allow_html=True)
+                    
+                    # CORREÇÃO DA EXIBIÇÃO: Adicionando Documento, Fornecedor e Histórico
+                    doc_str = f" | Doc: {it['nota']}" if it.get('nota') else ""
+                    forn_str = f" | Forn: {it['fornecedor']}" if it.get('fornecedor') else ""
+                    hist_str = f"<br>Histórico: {it['hist']}" if it.get('hist') else ""
+                    
+                    c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}<br>PIS: {formatar_moeda(it['v_pis']).replace('$', '&#36;')} | COF: {formatar_moeda(it['v_cofins']).replace('$', '&#36;')}<br><span style='color:#64748b;'>{doc_str}{forn_str}{hist_str}</span></small>", unsafe_allow_html=True)
+                    
                     c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
                     if c_del.button("×", key=f"del_{i}"): st.session_state.rascunho_lancamentos.pop(i); st.rerun()
                     st.markdown("<hr style='margin: 5px 0;'>", unsafe_allow_html=True)
@@ -316,7 +323,6 @@ def modulo_relatorios():
             df_export = pd.read_sql(query, conn)
 
             # --- MOTOR DE SALDO CREDOR ACUMULADO ---
-            # Soma de todo o histórico anterior a esta competência para calcular se sobrou crédito
             query_historico = f"""SELECT o.tipo as op_tipo, SUM(l.valor_pis) as t_pis, SUM(l.valor_cofins) as t_cof, SUM(l.valor_pis_retido) as t_pis_ret, SUM(l.valor_cofins_retido) as t_cof_ret FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE {filtro_empresa} AND l.competencia < '{comp_db}' AND l.status_auditoria = 'ATIVO' GROUP BY o.tipo"""
             df_hist = pd.read_sql(query_historico, conn)
             
@@ -335,7 +341,6 @@ def modulo_relatorios():
                 h_pis_cred = hist_cred['t_pis'].sum() if not hist_cred.empty else 0
                 h_cof_cred = hist_cred['t_cof'].sum() if not hist_cred.empty else 0
                 
-                # Se Débito (o que devia) - Crédito (o que tomou) - Retenção for negativo, sobrou saldo
                 res_hist_pis = h_pis_deb - h_pis_cred - h_pis_ret
                 res_hist_cof = h_cof_deb - h_cof_cred - h_cof_ret
                 
@@ -551,7 +556,6 @@ def modulo_imobilizado():
             pdf.add_cabecalho(row_emp_ativa['nome'], row_emp_ativa['cnpj'], "*** RELACAO GERAL DO ATIVO IMOBILIZADO ***")
             
             pdf.set_font("Arial", 'B', 8)
-            # Inserida a coluna Valor Residual com redimensionamento
             pdf.cell(50, 6, "Descricao", 1); pdf.cell(25, 6, "Aquisicao", 1); pdf.cell(30, 6, "Valor Original", 1); pdf.cell(15, 6, "Taxa", 1); pdf.cell(30, 6, "Valor Residual", 1); pdf.cell(40, 6, "Status", 1, ln=True)
             pdf.set_font("Arial", '', 8)
             for _, r in pd.DataFrame(dados_visao).iterrows():
@@ -569,7 +573,6 @@ def modulo_imobilizado():
                 cota_dia = (float(rb['valor_compra']) * (float(rb['taxa_anual_percentual'])/100)) / 365.0
                 
                 with st.expander(f"{rb['descricao_item']} - {rb['marca_modelo'] or ''}"):
-                    # Simulador LIVRE para datas futuras (Projeção)
                     dt_simulada = st.date_input("Data para Simulação/Venda", value=hoje_br, key=f"sim_date_{rb['id']}")
                     if dt_simulada < dt_compra: st.error("Data de simulação não pode ser anterior à data de aquisição.")
                     else:
@@ -593,16 +596,268 @@ def modulo_imobilizado():
                         
                         st.download_button("Gerar Ficha de Projeção (PDF)", data=pdf.output(dest='S').encode('latin1'), file_name=f"FICHA_{rb['id']}.pdf", key=f"btn_ficha_{rb['id']}")
 
-# Omitidos módulos de Parâmetros e Gestão de Utilizadores para manter foco na regra de negócio atualizada (eles continuam idênticos à versão anterior).
+# --- 8. MÓDULO PARÂMETROS CONTÁBEIS ---
+def modulo_parametros():
+    if st.session_state.nivel_acesso == "CLIENT_OPERATOR": st.error("Acesso restrito."); return
+    st.markdown("### Parâmetros Contábeis e Exportação ERP")
+    df_op = carregar_operacoes()
+    op_nomes = df_op['nome'].tolist()
+    
+    tab_edit, tab_novo, tab_fecho, tab_limpeza, tab_imob = st.tabs(["Editar Existente", "Nova Operação", "Fecho por Empresa", "Auditoria/Limpeza", "Grupos Imobilizado"])
+    
+    with tab_edit:
+        sel_op = st.selectbox("Selecione a Operação:", op_nomes)
+        row_op = df_op[df_op['nome'] == sel_op].iloc[0]
+        oid = row_op['id']
+        
+        with st.form("form_edit_param"):
+            st.markdown("##### Configuração PIS")
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+            p_deb = c1.text_input("Débito PIS", value=row_op['conta_deb_pis'] or "", key=f"pd_{oid}")
+            p_cred = c2.text_input("Crédito PIS", value=row_op['conta_cred_pis'] or "", key=f"pc_{oid}")
+            p_cod = c3.text_input("Cód ERP PIS", value=row_op.get('pis_h_codigo', ''), key=f"pcd_{oid}")
+            p_txt = c4.text_input("Texto Padrão PIS", value=row_op.get('pis_h_texto', ''), key=f"ptx_{oid}")
+            
+            st.markdown("##### Configuração COFINS")
+            c5, c6, c7, c8 = st.columns([1, 1, 1, 2])
+            c_deb = c5.text_input("Débito COFINS", value=row_op['conta_deb_cof'] or "", key=f"cd_{oid}")
+            c_cred = c6.text_input("Crédito COFINS", value=row_op['conta_cred_cof'] or "", key=f"cc_{oid}")
+            c_cod = c7.text_input("Cód ERP COFINS", value=row_op.get('cofins_h_codigo', ''), key=f"ccd_{oid}")
+            c_txt = c8.text_input("Texto Padrão COF", value=row_op.get('cofins_h_texto', ''), key=f"ctx_{oid}")
+            
+            st.markdown("##### Configuração CUSTO/VALOR LÍQUIDO")
+            c9, c10, c11, c12 = st.columns([1, 1, 1, 2])
+            cu_deb = c9.text_input("Débito Custo", value=row_op['conta_deb_custo'] or "", key=f"cud_{oid}")
+            cu_cred = c10.text_input("Crédito Custo", value=row_op['conta_cred_custo'] or "", key=f"cuc_{oid}")
+            cu_cod = c11.text_input("Cód ERP Custo", value=row_op.get('custo_h_codigo', ''), key=f"cucd_{oid}")
+            cu_txt = c12.text_input("Texto Padrão Custo", value=row_op.get('custo_h_texto', ''), key=f"cutx_{oid}")
+
+            if row_op['tipo'] == 'RECEITA':
+                with st.expander("Configuração de Retenção na Fonte", expanded=False):
+                    cr1, cr2, cr3, cr4 = st.columns([1, 1, 1, 2])
+                    r_p_deb = cr1.text_input("Débito PIS Ret", value=row_op.get('ret_pis_conta_deb', ''), key=f"rpd_{oid}")
+                    r_p_cred = cr2.text_input("Crédito PIS Ret", value=row_op.get('ret_pis_conta_cred', ''), key=f"rpc_{oid}")
+                    r_p_cod = cr3.text_input("Cód ERP PIS Ret", value=row_op.get('ret_pis_h_codigo', ''), key=f"rpcd_{oid}")
+                    r_p_txt = cr4.text_input("Histórico PIS Ret", value=row_op.get('ret_pis_h_texto', ''), key=f"rptx_{oid}")
+                    cr5, cr6, cr7, cr8 = st.columns([1, 1, 1, 2])
+                    r_c_deb = cr5.text_input("Débito COF Ret", value=row_op.get('ret_cofins_conta_deb', ''), key=f"rcd_{oid}")
+                    r_c_cred = cr6.text_input("Crédito COF Ret", value=row_op.get('ret_cofins_conta_cred', ''), key=f"rcc_{oid}")
+                    r_c_cod = cr7.text_input("Cód ERP COF Ret", value=row_op.get('ret_cofins_h_codigo', ''), key=f"rccd_{oid}")
+                    r_c_txt = cr8.text_input("Histórico COF Ret", value=row_op.get('ret_cofins_h_texto', ''), key=f"rctx_{oid}")
+            else: r_p_deb=r_p_cred=r_p_cod=r_p_txt=r_c_deb=r_c_cred=r_c_cod=r_c_txt=None
+            
+            if st.form_submit_button("Atualizar Operação"):
+                conn = get_db_connection(); cursor = conn.cursor()
+                try:
+                    cursor.execute("""UPDATE operacoes SET conta_deb_pis=%s, conta_cred_pis=%s, pis_h_codigo=%s, pis_h_texto=%s, conta_deb_cof=%s, conta_cred_cof=%s, cofins_h_codigo=%s, cofins_h_texto=%s, conta_deb_custo=%s, conta_cred_custo=%s, custo_h_codigo=%s, custo_h_texto=%s, ret_pis_conta_deb=%s, ret_pis_conta_cred=%s, ret_pis_h_codigo=%s, ret_pis_h_texto=%s, ret_cofins_conta_deb=%s, ret_cofins_conta_cred=%s, ret_cofins_h_codigo=%s, ret_cofins_h_texto=%s WHERE id=%s""", (p_deb, p_cred, p_cod, p_txt, c_deb, c_cred, c_cod, c_txt, cu_deb, cu_cred, cu_cod, cu_txt, r_p_deb, r_p_cred, r_p_cod, r_p_txt, r_c_deb, r_c_cred, r_c_cod, r_c_txt, int(oid)))
+                    conn.commit(); carregar_operacoes.clear(); st.success("Atualizado!"); st.rerun()
+                except Exception as e: conn.rollback(); st.error(f"Erro: {e}")
+                finally: conn.close()
+
+    with tab_novo:
+        with st.form("form_nova_op", clear_on_submit=True): 
+            c_nome, c_tipo = st.columns([3, 1])
+            novo_nome = c_nome.text_input("Nome da Nova Operação")
+            novo_tipo = c_tipo.selectbox("Natureza", ["RECEITA", "DESPESA"])
+            st.markdown("##### Configuração PIS")
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 2]); n_p_deb = c1.text_input("Débito PIS", key="n_pd"); n_p_cred = c2.text_input("Crédito PIS", key="n_pc"); n_p_cod = c3.text_input("Cód ERP PIS", key="n_pcd"); n_p_txt = c4.text_input("Texto Padrão PIS", key="n_ptx")
+            st.markdown("##### Configuração COFINS")
+            c5, c6, c7, c8 = st.columns([1, 1, 1, 2]); n_c_deb = c5.text_input("Débito COFINS", key="n_cd"); n_c_cred = c6.text_input("Crédito COFINS", key="n_cc"); n_c_cod = c7.text_input("Cód ERP COFINS", key="n_ccd"); n_c_txt = c8.text_input("Texto Padrão COF", key="n_ctx")
+            st.markdown("##### Configuração CUSTO/VALOR LÍQUIDO")
+            c9, c10, c11, c12 = st.columns([1, 1, 1, 2]); n_cu_deb = c9.text_input("Débito Custo", key="n_cud"); n_cu_cred = c10.text_input("Crédito Custo", key="n_cuc"); n_cu_cod = c11.text_input("Cód ERP Custo", key="n_cucd"); n_cu_txt = c12.text_input("Texto Padrão Custo", key="n_cutx")
+            st.divider()
+            
+            if st.form_submit_button("Registar Nova Operação"):
+                if not novo_nome: st.error("O nome é obrigatório.")
+                else:
+                    nome_limpo = novo_nome.strip().lower()
+                    if any(o.strip().lower() == nome_limpo for o in op_nomes): st.error(f"Erro: Já existe uma operação chamada '{novo_nome}'. Verifique na aba 'Editar Existente'.")
+                    else:
+                        conn = get_db_connection(); cursor = conn.cursor()
+                        try:
+                            query_insert = """INSERT INTO operacoes (nome, tipo, conta_deb_pis, conta_cred_pis, pis_h_codigo, pis_h_texto, conta_deb_cof, conta_cred_cof, cofins_h_codigo, cofins_h_texto, conta_deb_custo, conta_cred_custo, custo_h_codigo, custo_h_texto, ret_pis_conta_deb, ret_pis_conta_cred, ret_pis_h_codigo, ret_pis_h_texto, ret_cofins_conta_deb, ret_cofins_conta_cred, ret_cofins_h_codigo, ret_cofins_h_texto) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"""
+                            valores = (novo_nome, novo_tipo, n_p_deb, n_p_cred, n_p_cod, n_p_txt, n_c_deb, n_c_cred, n_c_cod, n_c_txt, n_cu_deb, n_cu_cred, n_cu_cod, n_cu_txt)
+                            cursor.execute(query_insert, valores)
+                            conn.commit(); carregar_operacoes.clear(); st.success("Nova operação registada com sucesso!"); st.rerun()
+                        except Exception as e: conn.rollback(); st.error(f"Erro ao salvar no banco: {e}")
+                        finally: conn.close()
+
+    with tab_limpeza:
+        st.markdown("#### Verificação de Integridade de Operações")
+        st.info("Utilize esta ferramenta para identificar operações duplicadas ou sem utilização.")
+        if st.button("Executar Auditoria de Operações"):
+            conn = get_db_connection(); cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT o.id, o.nome, o.tipo, (SELECT COUNT(*) FROM lancamentos l WHERE l.operacao_id = o.id) as total_usado FROM operacoes o ORDER BY o.nome")
+            ops = cursor.fetchall(); conn.close()
+            st.write("---")
+            vistos = {}; duplicados = []
+            for o in ops:
+                n = o['nome'].strip().lower()
+                if n in vistos: duplicados.append((o, vistos[n]))
+                else: vistos[n] = o
+            if not duplicados: st.success("Nenhuma duplicidade de nome encontrada.")
+            else:
+                for d, original in duplicados:
+                    c1, c2 = st.columns([4, 1])
+                    c1.warning(f"DUPLICADO: '{d['nome']}' (ID: {d['id']}) - Usado {d['total_usado']} vezes.")
+                    if d['total_usado'] == 0:
+                        if c2.button("Excluir", key=f"excl_{d['id']}"):
+                            conn = get_db_connection(); cursor = conn.cursor()
+                            cursor.execute(f"DELETE FROM operacoes WHERE id={int(d['id'])}")
+                            conn.commit(); conn.close(); carregar_operacoes.clear(); st.rerun()
+
+    with tab_fecho:
+        st.markdown("##### Contas de Transferência / Fecho (Apuração Mensal)")
+        df_emp_f = carregar_empresas_ativas()
+        if not df_emp_f.empty:
+            with st.form("form_fecho"):
+                emp_sel_f = st.selectbox("Selecione a Empresa", df_emp_f.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1))
+                emp_id_f = int(df_emp_f.loc[df_emp_f.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1) == emp_sel_f].iloc[0]['id'])
+                row_emp_f = df_emp_f[df_emp_f['id'] == emp_id_f].iloc[0]
+                c1, c2 = st.columns(2)
+                t_pis = c1.text_input("Conta Transferência PIS", value=row_emp_f.get('conta_transf_pis') or "")
+                t_cofins = c2.text_input("Conta Transferência COFINS", value=row_emp_f.get('conta_transf_cofins') or "")
+                if st.form_submit_button("Salvar Contas de Fecho"):
+                    conn = get_db_connection(); cursor = conn.cursor()
+                    cursor.execute("UPDATE empresas SET conta_transf_pis=%s, conta_transf_cofins=%s WHERE id=%s", (t_pis, t_cofins, int(emp_id_f)))
+                    conn.commit(); carregar_empresas_ativas.clear(); st.success("Atualizado!"); st.rerun()
+
+    with tab_imob:
+        df_e = carregar_empresas_ativas()
+        e_sel = st.selectbox("Selecione a Empresa para Gerir Grupos", df_e.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1), key="sel_emp_grp")
+        e_id = int(df_e.loc[df_e.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1) == e_sel].iloc[0]['id'])
+        
+        conn = get_db_connection()
+        df_g = pd.read_sql(f"SELECT * FROM grupos_imobilizado WHERE tenant_id = {e_id}", conn)
+        conn.close()
+        
+        col_edit, col_new = st.columns(2, gap="large")
+        
+        with col_edit:
+            st.markdown("##### Editar Grupo Existente")
+            if not df_g.empty:
+                g_sel = st.selectbox("Selecione o Grupo", df_g['nome_grupo'].tolist())
+                g_row = df_g[df_g['nome_grupo'] == g_sel].iloc[0]
+                
+                with st.form("ed_grp"):
+                    n_g = st.text_input("Nome", value=g_row['nome_grupo'])
+                    tx = st.number_input("Taxa Anual (%)", value=float(g_row['taxa_anual_percentual']))
+                    cd = st.text_input("Conta Despesa (ERP)", value=g_row['conta_contabil_despesa'])
+                    cc = st.text_input("Conta Dep. Acumulada (ERP)", value=g_row['conta_contabil_dep_acumulada'])
+                    
+                    if st.form_submit_button("Atualizar Grupo"):
+                        conn = get_db_connection(); cursor = conn.cursor()
+                        cursor.execute("UPDATE grupos_imobilizado SET nome_grupo=%s, taxa_anual_percentual=%s, conta_contabil_despesa=%s, conta_contabil_dep_acumulada=%s WHERE id=%s", (n_g, float(tx), cd, cc, int(g_row['id'])))
+                        conn.commit(); conn.close(); st.success("Atualizado com sucesso!"); st.rerun()
+            else:
+                st.info("Nenhum grupo cadastrado para esta empresa.")
+                
+        with col_new:
+            st.markdown("##### Criar Novo Grupo")
+            opcoes_rf = {"Livre / Customizado": 0.0, "Computadores e Periféricos (20%)": 20.0, "Veículos de Passageiros (20%)": 20.0, "Máquinas e Equipamentos (10%)": 10.0, "Móveis e Utensílios (10%)": 10.0, "Edificações / Imóveis (4%)": 4.0}
+            padrao_sel = st.selectbox("Template RFB", list(opcoes_rf.keys()))
+            nome_sugerido = padrao_sel.split(' (')[0] if padrao_sel != "Livre / Customizado" else ""
+            taxa_sugerida = opcoes_rf[padrao_sel]
+            
+            with st.form("nv_grp"):
+                n_g_n = st.text_input("Nome do Grupo", value=nome_sugerido)
+                tx_n = st.number_input("Taxa Anual (%)", min_value=0.0, value=taxa_sugerida)
+                cd_n = st.text_input("Conta Despesa (D) - ERP")
+                cc_n = st.text_input("Conta Dep. Acumulada (C) - ERP")
+                if st.form_submit_button("Adicionar Grupo"):
+                    if n_g_n:
+                        conn = get_db_connection(); cursor = conn.cursor()
+                        cursor.execute("INSERT INTO grupos_imobilizado (tenant_id, nome_grupo, taxa_anual_percentual, conta_contabil_despesa, conta_contabil_dep_acumulada) VALUES (%s,%s,%s,%s,%s)", (int(e_id), n_g_n, float(tx_n), cd_n, cc_n))
+                        conn.commit(); conn.close(); st.success("Criado com sucesso!"); st.rerun()
+
+# --- 9. GESTÃO DE UTILIZADORES ---
+def modulo_usuarios():
+    if st.session_state.nivel_acesso != "SUPER_ADMIN": st.error("Acesso restrito a administradores."); return
+    
+    st.markdown("### Gestão de Utilizadores")
+    
+    conn = get_db_connection()
+    df_users = pd.read_sql("SELECT id, nome, username, nivel_acesso, status_usuario, data_criacao FROM usuarios ORDER BY nome ASC", conn)
+    
+    tab_lista, tab_novo = st.tabs(["Utilizadores Registados", "Adicionar Utilizador"])
+    
+    with tab_lista:
+        st.dataframe(df_users, use_container_width=True, hide_index=True)
+        
+        st.markdown("##### Gerir Acesso")
+        with st.form("form_gestao_usuario"):
+            c1, c2 = st.columns([2, 1])
+            usr_sel = c1.selectbox("Selecione o Utilizador", df_users['username'].tolist())
+            nova_acao = c2.selectbox("Ação", ["Inativar Acesso", "Reativar Acesso", "Redefinir Palavra-passe"])
+            nova_senha = st.text_input("Nova Palavra-passe (se aplicável)", type="password")
+            
+            if st.form_submit_button("Executar Ação"):
+                cursor = conn.cursor()
+                try:
+                    if nova_acao == "Inativar Acesso":
+                        cursor.execute("UPDATE usuarios SET status_usuario = 'INATIVO' WHERE username = %s", (usr_sel,))
+                        st.success(f"Acesso de {usr_sel} inativado.")
+                    elif nova_acao == "Reativar Acesso":
+                        cursor.execute("UPDATE usuarios SET status_usuario = 'ATIVO' WHERE username = %s", (usr_sel,))
+                        st.success(f"Acesso de {usr_sel} reativado.")
+                    elif nova_acao == "Redefinir Palavra-passe":
+                        if len(nova_senha) < 6: st.error("A senha deve ter pelo menos 6 caracteres.")
+                        else:
+                            hash_novo = gerar_hash_senha(nova_senha)
+                            cursor.execute("UPDATE usuarios SET senha_hash = %s WHERE username = %s", (hash_novo, usr_sel))
+                            st.success("Senha atualizada com sucesso!")
+                    conn.commit()
+                except Exception as e:
+                    conn.rollback(); st.error(f"Erro: {e}")
+                st.rerun()
+                
+    with tab_novo:
+        with st.form("form_novo_usuario"):
+            c_n, c_u = st.columns(2)
+            novo_nome = c_n.text_input("Nome Completo")
+            novo_user = c_u.text_input("Nome de Utilizador (Login)")
+            c_p, c_n = st.columns(2)
+            nova_pass = c_p.text_input("Palavra-passe Inicial", type="password")
+            nivel = c_n.selectbox("Nível de Acesso", ["CLIENT_OPERATOR", "ADMIN", "SUPER_ADMIN"])
+            
+            if st.form_submit_button("Criar Utilizador"):
+                if not novo_nome or not novo_user or len(nova_pass) < 6:
+                    st.error("Preencha todos os campos. A senha deve ter no mínimo 6 caracteres.")
+                elif novo_user in df_users['username'].tolist():
+                    st.error("Nome de utilizador já existe no banco de dados.")
+                else:
+                    cursor = conn.cursor()
+                    try:
+                        hash_bd = gerar_hash_senha(nova_pass)
+                        cursor.execute("INSERT INTO usuarios (nome, username, senha_hash, nivel_acesso, status_usuario, data_criacao) VALUES (%s, %s, %s, %s, 'ATIVO', NOW())", (novo_nome, novo_user, hash_bd, nivel))
+                        conn.commit()
+                        st.success("Utilizador criado com sucesso!")
+                        st.rerun()
+                    except Exception as e:
+                        conn.rollback(); st.error(f"Erro ao criar: {e}")
+    conn.close()
+
 # --- 10. MENU LATERAL ---
 with st.sidebar:
+    dias_pt = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
+    st.markdown(f"""
+        <div style='text-align: center; color: #64748b; font-size: 0.9em; margin-bottom: 10px; border-bottom: 1px solid #e2e8f0; padding-bottom: 10px;'>
+            {dias_pt[hoje_br.weekday()]}<br>
+            <b style='color: #004b87;'>{hoje_br.strftime('%d/%m/%Y')}</b>
+        </div>
+    """, unsafe_allow_html=True)
+
     st.markdown("<h2 style='color: #004b87; text-align: center;'>CRESCERE</h2>", unsafe_allow_html=True)
     st.markdown(f"<p style='text-align: center;'><b>{st.session_state.usuario_logado}</b><br><small>{st.session_state.nivel_acesso}</small></p>", unsafe_allow_html=True)
     st.write("---")
-    menu = st.radio("Módulos", ["Gestão de Empresas", "Apuração Mensal", "Relatórios e Integração", "Imobilizado & Depreciação"])
+    menu = st.radio("Módulos", ["Gestão de Empresas", "Apuração Mensal", "Relatórios e Integração", "Imobilizado & Depreciação", "Parâmetros Contábeis", "Gestão de Utilizadores"])
+    st.write("---")
     if st.button("Encerrar Sessão", use_container_width=True): st.session_state.autenticado = False; st.rerun()
 
+# --- 11. RENDERIZAÇÃO DE ROTAS ---
 if menu == "Gestão de Empresas": modulo_empresas()
 elif menu == "Apuração Mensal": modulo_apuracao()
 elif menu == "Relatórios e Integração": modulo_relatorios()
 elif menu == "Imobilizado & Depreciação": modulo_imobilizado()
+elif menu == "Parâmetros Contábeis": modulo_parametros()
+elif menu == "Gestão de Utilizadores": modulo_usuarios()
