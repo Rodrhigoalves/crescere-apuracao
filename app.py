@@ -238,7 +238,22 @@ def modulo_apuracao():
                 st.error("Para Retenções e Extemporâneos, o Nº do Documento, Fornecedor, Mês Origem e Histórico são obrigatórios.")
             else:
                 vp, vc = calcular_impostos(regime, op_row['nome'], v_base)
-                st.session_state.rascunho_lancamentos.append({"emp_id": int(emp_id), "op_id": int(op_row['id']), "op_nome": op_sel, "v_base": float(v_base), "v_pis": float(vp), "v_cofins": float(vc), "v_pis_ret": float(v_pis_ret), "v_cof_ret": float(v_cof_ret), "hist": hist, "retro": int(retro), "origem": comp_origem if retro else None, "nota": num_nota, "fornecedor": fornecedor})
+                st.session_state.rascunho_lancamentos.append({
+                    "id_unico": str(datetime.now().timestamp()), # <-- O RG ÚNICO INVISÍVEL
+                    "emp_id": int(emp_id), 
+                    "op_id": int(op_row['id']), 
+                    "op_nome": op_sel, 
+                    "v_base": float(v_base), 
+                    "v_pis": float(vp), 
+                    "v_cofins": float(vc), 
+                    "v_pis_ret": float(v_pis_ret), 
+                    "v_cof_ret": float(v_cof_ret), 
+                    "hist": hist, 
+                    "retro": int(retro), 
+                    "origem": comp_origem if retro else None, 
+                    "nota": num_nota, 
+                    "fornecedor": fornecedor
+                })
                 st.session_state.form_key += 1; st.rerun()
 
     with col_ras:
@@ -264,7 +279,8 @@ def modulo_apuracao():
                     c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
                     
                     # A MÁGICA ESTÁ AQUI: Usamos o on_click para remover de forma segura
-                    c_del.button("×", key=f"del_{i}", on_click=remover_do_rascunho, args=(i,))
+                    # A chave agora usa o RG único, e não mais a posição 'i'
+                    c_del.button("×", key=f"del_{it['id_unico']}", on_click=remover_do_rascunho, args=(i,))
                     st.markdown("<hr style='margin: 5px 0;'>", unsafe_allow_html=True)
                     
         if st.button("Gravar na Base de Dados", type="primary", use_container_width=True, disabled=len(st.session_state.rascunho_lancamentos)==0):
