@@ -243,8 +243,14 @@ def modulo_apuracao():
 
     with col_ras:
         st.markdown("#### Rascunho")
+        
+        # Função segura para remover itens (Callback)
+        def remover_do_rascunho(idx):
+            st.session_state.rascunho_lancamentos.pop(idx)
+
         with st.container(height=390, border=True): 
-            if not st.session_state.rascunho_lancamentos: st.markdown("<p style='text-align:center;color:#94a3b8;margin-top:50px;'>Vazio.</p>", unsafe_allow_html=True)
+            if not st.session_state.rascunho_lancamentos: 
+                st.markdown("<p style='text-align:center;color:#94a3b8;margin-top:50px;'>Vazio.</p>", unsafe_allow_html=True)
             else:
                 for i, it in enumerate(st.session_state.rascunho_lancamentos):
                     c_txt, c_val, c_del = st.columns([5, 3, 1])
@@ -256,8 +262,11 @@ def modulo_apuracao():
                     
                     c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}<br>PIS: {formatar_moeda(it['v_pis']).replace('$', '&#36;')} | COF: {formatar_moeda(it['v_cofins']).replace('$', '&#36;')}<br><span style='color:#64748b;'>{doc_str}{forn_str}{hist_str}</span></small>", unsafe_allow_html=True)
                     c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
-                    if c_del.button("×", key=f"del_{i}"): st.session_state.rascunho_lancamentos.pop(i); st.rerun()
+                    
+                    # A MÁGICA ESTÁ AQUI: Usamos o on_click para remover de forma segura
+                    c_del.button("×", key=f"del_{i}", on_click=remover_do_rascunho, args=(i,))
                     st.markdown("<hr style='margin: 5px 0;'>", unsafe_allow_html=True)
+                    
         if st.button("Gravar na Base de Dados", type="primary", use_container_width=True, disabled=len(st.session_state.rascunho_lancamentos)==0):
             conn = get_db_connection(); cursor = conn.cursor()
             try:
