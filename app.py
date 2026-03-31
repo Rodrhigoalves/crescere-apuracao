@@ -162,7 +162,7 @@ def modulo_empresas():
                     conn = get_db_connection(); cursor = conn.cursor()
                     try:
                         if f['id']: cursor.execute("UPDATE empresas SET nome=%s, fantasia=%s, cnpj=%s, regime=%s, tipo=%s, cnae=%s, endereco=%s, apelido_unidade=%s WHERE id=%s", (nome, fanta, cnpj, regime, tipo, cnae, endereco, apelido, int(f['id'])))
-                        else: cursor.execute("INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco, status_assinatura, apelido_unidade) VALUES (%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s)", (nome, fanta, cnpj, regime, tipo, cnae, endereco, apelido))
+                        else: cursor.execute("INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco, status_assinatura, apelido_unidade) VALUES (%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s)", (nome, fanta, cnpj, regime, tipo, cnae, endereco, status_assinatura, apelido))
                         conn.commit(); carregar_empresas_ativas.clear(); st.success("Gravado com sucesso!"); st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": "", "apelido_unidade": "", "conta_transf_pis": "", "conta_transf_cofins": ""}
                     except Exception as e: conn.rollback(); st.error(f"Erro: {e}")
                     finally: conn.close()
@@ -608,16 +608,24 @@ def modulo_imobilizado():
             for _, rb in df_todos.iterrows():
                 dt_base = rb['data_saldo_inicial'] if pd.notnull(rb.get('data_saldo_inicial')) else rb['data_compra']
                 dt_ref = hoje_br.date() if rb['status'] == 'ativo' else rb['data_baixa']
-                dias_totais = max(0, (dt_ref - dt_base).days)
-                cota_dia = (float(rb['valor_compra']) * (float(rb['taxa_anual_percentual'])/100)) / 365.0
+                base_calc = float(rb['valor_compra'])
+                taxa_anual = float(rb['taxa_anual_percentual']) / 100.0
                 
-                # Depreciação começa a contar do zero se dt_base for a compra, ou se soma ao inicial
+                # A mágica do espelho: aplica o mesmo método de cálculo selecionado na aba anterior
+                if metodo_calc == "Mês Comercial (30 Dias)":
+                    dia_base = min(30, dt_base.day)
+                    dia_ref = min(30, dt_ref.day)
+                    dias_totais = max(0, (dt_ref.year - dt_base.year) * 360 + (dt_ref.month - dt_base.month) * 30 + (dia_ref - dia_base))
+                    dep_acumulada = min(base_calc, (base_calc * taxa_anual / 360.0) * dias_totais)
+                else:
+                    dias_totais = max(0, (dt_ref - dt_base).days)
+                    dep_acumulada = min(base_calc, (base_calc * taxa_anual / 365.0) * dias_totais)
+                
                 saldo_ini = float(rb.get('valor_residual_inicial', 0.0))
-                dep_acumulada = min(float(rb['valor_compra']), cota_dia * dias_totais)
                 if pd.notnull(rb.get('data_saldo_inicial')):
                     valor_residual = max(0.0, saldo_ini - dep_acumulada)
                 else:
-                    valor_residual = max(0.0, float(rb['valor_compra']) - dep_acumulada)
+                    valor_residual = max(0.0, base_calc - dep_acumulada)
                 
                 dados_visao.append({"Descrição": f"{rb['descricao_item']} {rb['marca_modelo'] or ''}".strip(), "Data Ref.": dt_base.strftime('%d/%m/%Y'), "Valor Base": formatar_moeda(rb['valor_compra']), "Taxa (%)": f"{rb['taxa_anual_percentual']}%", "Valor Residual": formatar_moeda(valor_residual), "Situação": rb['status'].upper()})
             
@@ -640,17 +648,27 @@ def modulo_imobilizado():
             if not df_res.empty:
                 for _, rb in df_res.iterrows():
                     dt_base = rb['data_saldo_inicial'] if pd.notnull(rb.get('data_saldo_inicial')) else rb['data_compra']
-                    cota_dia = (float(rb['valor_compra']) * (float(rb['taxa_anual_percentual'])/100)) / 365.0
+                    base_calc = float(rb['valor_compra'])
+                    taxa_anual = float(rb['taxa_anual_percentual']) / 100.0
                     saldo_ini = float(rb.get('valor_residual_inicial', 0.0))
                     
                     with st.expander(f"{rb['descricao_item']} - {rb['marca_modelo'] or ''}"):
                         dt_simulada = st.date_input("Data para Simulação/Venda", value=hoje_br, key=f"sim_date_{rb['id']}")
                         if dt_simulada < dt_base: st.error("Data de simulação não pode ser anterior à data base.")
                         else:
-                            dias_simulados = max(0, (dt_simulada - dt_base).days)
-                            dep_simulada = min(float(rb['valor_compra']), cota_dia * dias_simulados)
+                            if metodo_calc == "Mês Comercial (30 Dias)":
+                                dia_base = min(30, dt_base.day)
+                                dia_sim = min(30, dt_simulada.day)
+                                dias_simulados = max(0, (dt_simulada.year - dt_base.year) * 360 + (dt_simulada.month - dt_base.month) * 30 + (dia_sim - dia_base))
+                                dep_simulada = min(base_calc, (base_calc * taxa_anual / 360.0) * dias_simulados)
+                                texto_metodo = "Mês Comercial - 30 Dias"
+                            else:
+                                dias_simulados = max(0, (dt_simulada - dt_base).days)
+                                dep_simulada = min(base_calc, (base_calc * taxa_anual / 365.0) * dias_simulados)
+                                texto_metodo = "Pro Rata Die"
+
                             if pd.notnull(rb.get('data_saldo_inicial')): valor_res_simulado = max(0.0, saldo_ini - dep_simulada)
-                            else: valor_res_simulado = max(0.0, float(rb['valor_compra']) - dep_simulada)
+                            else: valor_res_simulado = max(0.0, base_calc - dep_simulada)
                             
                             pdf = RelatorioCrescerePDF()
                             pdf.add_page(); pdf.add_cabecalho(row_emp_ativa['nome'], row_emp_ativa['cnpj'], "*** FICHA INDIVIDUAL DE ATIVO IMOBILIZADO ***")
@@ -659,7 +677,7 @@ def modulo_imobilizado():
                             pdf.ln(5); pdf.set_font("Arial", 'B', 12); pdf.cell(0, 8, "PROJECAO DE VENDA / GANHO DE CAPITAL", ln=True)
                             pdf.set_font("Arial", '', 10)
                             pdf.cell(0, 6, f"Data da Projecao: {dt_simulada.strftime('%d/%m/%Y')}", ln=True)
-                            pdf.cell(0, 6, f"Depreciacao Acumulada Projetada (Pro Rata Die - {dias_simulados} dias): {formatar_moeda(dep_simulada)}", ln=True)
+                            pdf.cell(0, 6, f"Depreciacao Acumulada Projetada ({texto_metodo} - {dias_simulados} dias): {formatar_moeda(dep_simulada)}", ln=True)
                             pdf.set_font("Arial", 'B', 11); pdf.cell(0, 8, f"VALOR RESIDUAL (CUSTO DO BEM): {formatar_moeda(valor_res_simulado)}", ln=True)
                             st.download_button("Gerar Ficha de Projeção (PDF)", data=pdf.output(dest='S').encode('latin1'), file_name=f"FICHA_{rb['id']}.pdf", key=f"btn_ficha_{rb['id']}")
 
