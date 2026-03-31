@@ -176,11 +176,11 @@ def modulo_empresas():
                 st.session_state.dados_form = df_edit.iloc[0].to_dict(); st.rerun()
             st.divider()
 
-# --- 6. MÓDULO APURAÇÃO (COM VISÃO DO BANCO DE DADOS RESTAURADA) ---
+# --- 6. MÓDULO APURAÇÃO ---
 def modulo_apuracao():
     st.markdown("### Apuração de Impostos (PIS/COFINS)")
     df_emp = carregar_empresas_ativas()
-   
+    
     if st.session_state.nivel_acesso != "SUPER_ADMIN" and st.session_state.empresa_id:
         df_emp = df_emp[df_emp['id'] == st.session_state.empresa_id]
         if df_emp.empty: st.warning("Nenhuma unidade vinculada a este utilizador."); return
@@ -201,14 +201,14 @@ def modulo_apuracao():
     with col_in:
         st.markdown("#### Novo Lançamento")
         fk = st.session_state.form_key
-       
+        
         op_sel = st.selectbox("Operação", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
         op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
-       
+        
         v_base = st.number_input("Valor Total da Fatura / Base (R$)", min_value=0.00, step=100.0, key=f"base_{fk}")
         v_pis_ret = v_cof_ret = 0.0
         teve_retencao = False
-       
+        
         c_retro, c_origem = st.columns([1, 1])
         retro = c_retro.checkbox("Lançamento Extemporâneo", key=f"retro_{fk}")
         comp_origem = c_origem.text_input("Mês de Origem (MM/AAAA)", disabled=not retro, key=f"origem_{fk}")
@@ -222,14 +222,14 @@ def modulo_apuracao():
                 v_cof_ret = c_c.number_input("Valor COFINS Retido (R$)", min_value=0.00, step=10.0, key=f"c_ret_{fk}")
 
         hist = st.text_input("Histórico / Observação (Obrigatório para Extemporâneo)", key=f"hist_{fk}")
-       
+        
         exige_doc = retro or teve_retencao
         if exige_doc:
             c_nota, c_forn = st.columns([1, 2])
             num_nota = c_nota.text_input("Nº do Documento", key=f"nota_{fk}")
             fornecedor = c_forn.text_input("Tomador / Fornecedor", key=f"forn_{fk}")
         else: num_nota = fornecedor = None
-       
+        
         st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
         if st.button("Adicionar ao Rascunho", use_container_width=True):
             if v_base <= 0: st.warning("A base de cálculo deve ser maior que zero.")
@@ -239,7 +239,7 @@ def modulo_apuracao():
             else:
                 vp, vc = calcular_impostos(regime, op_row['nome'], v_base)
                 st.session_state.rascunho_lancamentos.append({
-                    "id_unico": str(datetime.now().timestamp()), # <-- O RG ÚNICO INVISÍVEL
+                    "id_unico": str(datetime.now().timestamp()),
                     "emp_id": int(emp_id),
                     "op_id": int(op_row['id']),
                     "op_nome": op_sel,
@@ -258,8 +258,7 @@ def modulo_apuracao():
 
     with col_ras:
         st.markdown("#### Rascunho")
-       
-        # Função segura para remover itens (Callback)
+        
         def remover_do_rascunho(idx):
             st.session_state.rascunho_lancamentos.pop(idx)
 
@@ -274,15 +273,13 @@ def modulo_apuracao():
                     doc_str = f" | Doc: {it['nota']}" if it.get('nota') else ""
                     forn_str = f" | Forn: {it['fornecedor']}" if it.get('fornecedor') else ""
                     hist_str = f"<br>Histórico: {it['hist']}" if it.get('hist') else ""
-                   
+                    
                     c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}<br>PIS: {formatar_moeda(it['v_pis']).replace('$', '&#36;')} | COF: {formatar_moeda(it['v_cofins']).replace('$', '&#36;')}<br><span style='color:#64748b;'>{doc_str}{forn_str}{hist_str}</span></small>", unsafe_allow_html=True)
                     c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
-                   
-                    # A MÁGICA ESTÁ AQUI: Usamos o on_click para remover de forma segura
-                    # A chave agora usa o RG único, e não mais a posição 'i'
+                    
                     c_del.button("×", key=f"del_{it['id_unico']}", on_click=remover_do_rascunho, args=(i,))
                     st.markdown("<hr style='margin: 5px 0;'>", unsafe_allow_html=True)
-                   
+                    
         if st.button("Gravar na Base de Dados", type="primary", use_container_width=True, disabled=len(st.session_state.rascunho_lancamentos)==0):
             conn = get_db_connection(); cursor = conn.cursor()
             try:
@@ -300,7 +297,6 @@ def modulo_apuracao():
             except Exception as e: conn.rollback(); st.error(f"Erro no banco: {e}")
             finally: conn.close()
 
-    # --- RESTAURAÇÃO DA VISUALIZAÇÃO DO BANCO DE DADOS (AUDITORIA) ---
     st.markdown("---")
     st.markdown("#### Lançamentos Gravados nesta Competência (Auditoria DB)")
     try:
@@ -310,7 +306,7 @@ def modulo_apuracao():
         query_gravados = f"SELECT l.id, o.nome as operacao, l.valor_base, l.valor_pis, l.valor_cofins, l.historico, l.usuario_registro FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE l.empresa_id = {emp_id} AND l.competencia = '{comp_db}' AND l.status_auditoria = 'ATIVO'"
         df_gravados = pd.read_sql(query_gravados, conn)
         conn.close()
-       
+        
         if df_gravados.empty:
             st.info("Nenhum lançamento ativo salvo na base de dados para esta competência.")
         else:
@@ -321,7 +317,7 @@ def modulo_apuracao():
                     c_id, c_motivo = st.columns([1, 3])
                     id_alvo = c_id.selectbox("ID do Lançamento", df_gravados['id'].tolist())
                     motivo = c_motivo.text_input("Motivo do Estorno/Cancelamento (Obrigatório)")
-                   
+                    
                     if st.form_submit_button("Confirmar Estorno"):
                         if not motivo or len(motivo.strip()) < 5: st.error("É obrigatório informar um motivo válido para a auditoria.")
                         else:
@@ -333,7 +329,7 @@ def modulo_apuracao():
     except Exception as e:
         st.error("Verifique o formato da competência.")
 
-# --- 7. MÓDULO RELATÓRIOS E INTEGRAÇÃO (COM PLANILHA ERP RIGOROSA) ---
+# --- 7. MÓDULO RELATÓRIOS E INTEGRAÇÃO ---
 def modulo_relatorios():
     st.markdown("### Exportação para ERP e PDF Analítico")
     df_emp = carregar_empresas_ativas()
@@ -345,13 +341,13 @@ def modulo_relatorios():
     emp_row = df_emp[df_emp['id'] == emp_id].iloc[0]
     competencia = c2.text_input("Competência (MM/AAAA)", value=competencia_padrao)
     consolidar = st.checkbox("Consolidar apuração com Filiais (mesma Raiz CNPJ)")
-   
+    
     if st.button("Gerar Ficheiros e Analisar Saldos"):
         conn = get_db_connection()
         try:
             m, a = competencia.split('/')
             comp_db = f"{a}-{m.zfill(2)}"
-           
+            
             if consolidar:
                 raiz_cnpj = emp_row['cnpj'][:10]
                 df_ids = pd.read_sql(f"SELECT id FROM empresas WHERE cnpj LIKE '{raiz_cnpj}%'", conn)
@@ -362,12 +358,12 @@ def modulo_relatorios():
                 filtro_empresa = f"l.empresa_id = {emp_id}"
                 nome_relatorio_pdf = f"{emp_row['nome']}"
 
-            query = f"SELECT l.*, o.nome as op_nome, o.tipo as op_tipo, o.conta_deb_pis, o.conta_cred_pis, o.pis_h_codigo, o.pis_h_texto, o.conta_deb_cof, o.conta_cred_cof, o.cofins_h_codigo, o.cofins_h_texto, o.conta_deb_custo, o.conta_cred_custo, o.custo_h_codigo, o.custo_h_texto FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE {filtro_empresa} AND l.competencia = '{comp_db}' AND l.status_auditoria = 'ATIVO'"
+            query = f"SELECT l.*, o.nome as op_nome, o.tipo as op_tipo, e.apelido_unidade, e.tipo as emp_tipo, o.conta_deb_pis, o.conta_cred_pis, o.pis_h_codigo, o.pis_h_texto, o.conta_deb_cof, o.conta_cred_cof, o.cofins_h_codigo, o.cofins_h_texto, o.conta_deb_custo, o.conta_cred_custo, o.custo_h_codigo, o.custo_h_texto FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id JOIN empresas e ON l.empresa_id = e.id WHERE {filtro_empresa} AND l.competencia = '{comp_db}' AND l.status_auditoria = 'ATIVO'"
             df_export = pd.read_sql(query, conn)
 
             query_hist = f"SELECT o.tipo as op_tipo, SUM(l.valor_pis) as t_pis, SUM(l.valor_cofins) as t_cof, SUM(l.valor_pis_retido) as t_pis_ret, SUM(l.valor_cofins_retido) as t_cof_ret FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE {filtro_empresa} AND l.competencia < '{comp_db}' AND l.status_auditoria = 'ATIVO' GROUP BY o.tipo"
             df_hist = pd.read_sql(query_hist, conn)
-           
+            
             saldo_ant_pis = 0.0; saldo_ant_cof = 0.0
             if not df_hist.empty:
                 hist_deb = df_hist[df_hist['op_tipo'] == 'RECEITA']
@@ -377,7 +373,7 @@ def modulo_relatorios():
                 if res_hist_pis < 0: saldo_ant_pis = abs(res_hist_pis)
                 if res_hist_cof < 0: saldo_ant_cof = abs(res_hist_cof)
 
-            # --- EXPORTAÇÃO EXCEL (USANDO AS 11 COLUNAS RIGOROSAMENTE) ---
+            # --- EXPORTAÇÃO EXCEL ---
             linhas_excel = []
             if not df_export.empty:
                 def p_txt(txt, op_nome): return txt.replace("{operacao}", op_nome).replace("{competencia}", competencia) if txt else f"VLR REF {op_nome} COMP {competencia}"
@@ -391,43 +387,48 @@ def modulo_relatorios():
                     if pd.notnull(r['conta_deb_custo']) and pd.notnull(r['conta_cred_custo']):
                         v_custo = r['valor_base'] - r['valor_pis'] - r['valor_cofins']
                         linhas_excel.append(criar_linha_erp(r['conta_deb_custo'], r['conta_cred_custo'], d_str, v_custo, r.get('custo_h_codigo'), f"CUSTO LIQ - {p_txt(r.get('custo_h_texto'), r['op_nome'])}", doc))
-           
+            
             df_xlsx = pd.DataFrame(linhas_excel)
             buffer = io.BytesIO()
-            # Força as 11 colunas na ordem correta, mesmo vazias, para não quebrar o ERP
             colunas_erp = ["Lancto Aut.", "Debito", "Credito", "Data", "Valor", "Cod. Historico", "Historico", "Ccusto Debito", "Ccusto Credito", "Nr.Documento", "Complemento"]
             if df_xlsx.empty: df_xlsx = pd.DataFrame(columns=colunas_erp)
             else: df_xlsx = df_xlsx[colunas_erp]
-           
+            
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_xlsx.to_excel(writer, index=False, sheet_name='Lançamentos')
-           
+            
             # --- GERAÇÃO DO PDF ---
             pdf = RelatorioCrescerePDF()
             pdf.add_page(); pdf.add_cabecalho(nome_relatorio_pdf, emp_row['cnpj'], "*** DEMONSTRATIVO DE APURACAO - PIS E COFINS ***", competencia)
             deb_pis = deb_cof = cred_pis = cred_cof = ret_pis = ret_cof = ext_pis = ext_cof = 0
-           
+            
             pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "1. BASE DE CALCULO DAS RECEITAS (DEBITOS)", ln=True); pdf.set_font("Arial", 'B', 9); pdf.cell(90, 6, "Operacao", 1); pdf.cell(35, 6, "Base", 1); pdf.cell(30, 6, "PIS", 1); pdf.cell(35, 6, "COFINS", 1, ln=True); pdf.set_font("Arial", '', 9)
             if not df_export.empty:
                 for _, r in df_export[(df_export['op_tipo'] == 'RECEITA') & (df_export['origem_retroativa'] == 0)].iterrows():
-                    pdf.cell(90, 6, f"{r['op_nome']}"[:50], 1); pdf.cell(35, 6, formatar_moeda(r['valor_base']), 1); pdf.cell(30, 6, formatar_moeda(r['valor_pis']), 1); pdf.cell(35, 6, formatar_moeda(r['valor_cofins']), 1, ln=True)
+                    desc_op = r['op_nome']
+                    if consolidar and r['emp_tipo'] == 'Filial':
+                        desc_op += f" ({r['apelido_unidade'] or 'Filial'})"
+                    pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r['valor_base']), 1); pdf.cell(30, 6, formatar_moeda(r['valor_pis']), 1); pdf.cell(35, 6, formatar_moeda(r['valor_cofins']), 1, ln=True)
                     deb_pis += r['valor_pis']; deb_cof += r['valor_cofins']; ret_pis += r['valor_pis_retido']; ret_cof += r['valor_cofins_retido']
-           
+            
             pdf.ln(5); pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "2. INSUMOS, CREDITOS E EXTEMPORANEOS", ln=True); pdf.set_font("Arial", 'B', 9); pdf.cell(90, 6, "Operacao", 1); pdf.cell(35, 6, "Base", 1); pdf.cell(30, 6, "PIS", 1); pdf.cell(35, 6, "COFINS", 1, ln=True); pdf.set_font("Arial", '', 9)
             if not df_export.empty:
                 for _, r in df_export[df_export['op_tipo'] == 'DESPESA'].iterrows():
-                    pdf.cell(90, 6, f"{r['op_nome']}"[:50], 1); pdf.cell(35, 6, formatar_moeda(r['valor_base']), 1); pdf.cell(30, 6, formatar_moeda(r['valor_pis']), 1); pdf.cell(35, 6, formatar_moeda(r['valor_cofins']), 1, ln=True)
+                    desc_op = r['op_nome']
+                    if consolidar and r['emp_tipo'] == 'Filial':
+                        desc_op += f" ({r['apelido_unidade'] or 'Filial'})"
+                    pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r['valor_base']), 1); pdf.cell(30, 6, formatar_moeda(r['valor_pis']), 1); pdf.cell(35, 6, formatar_moeda(r['valor_cofins']), 1, ln=True)
                     if r['origem_retroativa'] == 1: ext_pis += r['valor_pis']; ext_cof += r['valor_cofins']
                     else: cred_pis += r['valor_pis']; cred_cof += r['valor_cofins']
-           
+            
             pdf.ln(10); pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "3. QUADRO DE APURACAO FINAL", ln=True); pdf.set_font("Arial", '', 10)
             pdf.cell(120, 6, "A) Total de Debitos:", 0); pdf.cell(35, 6, formatar_moeda(deb_pis), 0); pdf.cell(35, 6, formatar_moeda(deb_cof), 0, ln=True)
             pdf.cell(120, 6, "B) (-) Creditos do Mes:", 0); pdf.cell(35, 6, formatar_moeda(cred_pis), 0); pdf.cell(35, 6, formatar_moeda(cred_cof), 0, ln=True)
             pdf.cell(120, 6, "C) (-) Retencoes na Fonte:", 0); pdf.cell(35, 6, formatar_moeda(ret_pis), 0); pdf.cell(35, 6, formatar_moeda(ret_cof), 0, ln=True)
             pdf.cell(120, 6, "D) (-) Creditos Extemporaneos:", 0); pdf.cell(35, 6, formatar_moeda(ext_pis), 0); pdf.cell(35, 6, formatar_moeda(ext_cof), 0, ln=True)
             pdf.cell(120, 6, "E) (-) Saldo Credor Mes Anterior:", 0); pdf.cell(35, 6, formatar_moeda(saldo_ant_pis), 0); pdf.cell(35, 6, formatar_moeda(saldo_ant_cof), 0, ln=True)
-           
+            
             res_pis = deb_pis - cred_pis - ret_pis - ext_pis - saldo_ant_pis; res_cof = deb_cof - cred_cof - ret_cof - ext_cof - saldo_ant_cof
-           
+            
             pdf.set_font("Arial", 'B', 11)
             pdf.cell(120, 8, "(=) TOTAL IMPOSTO A RECOLHER:", 0); pdf.cell(35, 8, formatar_moeda(max(0, res_pis)), 0); pdf.cell(35, 8, formatar_moeda(max(0, res_cof)), 0, ln=True)
             pdf.set_font("Arial", 'B', 9); pdf.set_text_color(0, 100, 0)
@@ -441,7 +442,7 @@ def modulo_relatorios():
                 pdf.ln(5); pdf.set_font("Arial", 'B', 9); pdf.cell(0, 6, "NOTA DE AUDITORIA - APROVEITAMENTO DE CREDITO EXTEMPORANEO:", ln=True); pdf.set_font("Arial", '', 8)
                 pdf.multi_cell(0, 4, "Esta apuracao inclui a apropriacao de credito tributario originado em competencia anterior, lancado tempestivamente neste periodo."); pdf.ln(2)
                 for _, r in df_ext.iterrows(): pdf.multi_cell(0, 4, f"- Origem: {r['competencia_origem']} | Doc: {r['num_nota']} - {r['fornecedor']} | PIS: {formatar_moeda(r['valor_pis'])} | COF: {formatar_moeda(r['valor_cofins'])}\n  Justificativa: {r['historico']}")
-           
+            
             df_fut = pd.read_sql(f"SELECT * FROM lancamentos l WHERE {filtro_empresa} AND l.competencia_origem = '{comp_db}' AND l.competencia != '{comp_db}' AND l.status_auditoria = 'ATIVO'", conn)
             if not df_fut.empty:
                 pdf.ln(5); pdf.set_font("Arial", 'B', 9); pdf.cell(0, 6, "NOTA DE AUDITORIA - CREDITO APROPRIADO EXTEMPORANEAMENTE (NO FUTURO):", ln=True); pdf.set_font("Arial", '', 8)
@@ -455,159 +456,275 @@ def modulo_relatorios():
         except Exception as e: st.error(f"Erro na geração: {e}")
         finally: conn.close()
 
-# --- 7.5 MÓDULO IMOBILIZADO E DEPRECIAÇÃO (COM PLANILHA ERP RIGOROSA) ---
+# --- 7.5 MÓDULO IMOBILIZADO E DEPRECIAÇÃO ---
 def modulo_imobilizado():
     st.markdown("### Gestão de Ativo Imobilizado")
     df_emp = carregar_empresas_ativas()
     if st.session_state.nivel_acesso != "SUPER_ADMIN" and st.session_state.empresa_id: df_emp = df_emp[df_emp['id'] == st.session_state.empresa_id]
-   
+    
     c_emp, c_vazio = st.columns([2, 1])
     emp_sel = c_emp.selectbox("Unidade", df_emp.apply(lambda r: f"{r['nome']} - {r['apelido_unidade'] or r['tipo']}", axis=1), key="imo_emp")
     emp_id = int(df_emp.loc[df_emp.apply(lambda r: f"{r['nome']} - {r['apelido_unidade'] or r['tipo']}", axis=1) == emp_sel].iloc[0]['id'])
     row_emp_ativa = df_emp[df_emp['id'] == emp_id].iloc[0]
 
     st.divider()
-    col_in, col_ras = st.columns([1, 1], gap="large")
+    
+    # Controle de Abas Dinâmico com a nova Manutenção
+    abas = ["Cadastro e Processamento", "Inventário Dinâmico"]
+    if st.session_state.nivel_acesso in ["SUPER_ADMIN", "ADMIN"]: abas.append("Manutenção de Ativos (Admin)")
+    
+    tabs = st.tabs(abas)
+    tab_main = tabs[0]
+    tab_inv = tabs[1]
+    tab_manut = tabs[2] if len(tabs) > 2 else None
+
     conn = get_db_connection()
     df_g = pd.read_sql(f"SELECT * FROM grupos_imobilizado WHERE tenant_id = {emp_id}", conn)
     conn.close()
 
-    with col_in:
-        st.markdown("#### Cadastro do Bem")
-        if df_g.empty: st.warning("Cadastre os Grupos em Parâmetros Contábeis primeiro.")
-        else:
-            with st.form("form_novo_bem"):
-                g_sel = st.selectbox("Grupo / Espécie", df_g['nome_grupo'].tolist())
-                g_row = df_g[df_g['nome_grupo'] == g_sel].iloc[0]
-                desc = st.text_input("Descrição Básica do Bem")
-                c_m, c_p = st.columns(2)
-                marca = c_m.text_input("Marca / Modelo (Opcional)")
-                num_serie = c_p.text_input("Nº Série / Placa (Opcional)")
-                c_pl, c_loc = st.columns(2)
-                plaqueta = c_pl.text_input("Plaqueta / Património (Opcional)")
-                localizacao = c_loc.text_input("Localização / Depto (Opcional)")
-                c_n, c_f = st.columns(2)
-                nf = c_n.text_input("Nº da Nota Fiscal (Opcional)")
-                forn = c_f.text_input("Fornecedor (Opcional)")
-                c_v, c_d = st.columns(2)
-                v_aq = c_v.number_input("Valor de Aquisição (R$)", min_value=0.0, step=100.0)
-                dt_c = c_d.date_input("Data da Compra")
-                regra_cred = st.selectbox("Regra de Crédito PIS/COFINS", ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"])
+    with tab_main:
+        col_in, col_ras = st.columns([1, 1], gap="large")
+        with col_in:
+            st.markdown("#### Cadastro do Bem")
+            if df_g.empty: st.warning("Cadastre os Grupos em Parâmetros Contábeis primeiro.")
+            else:
+                with st.form("form_novo_bem"):
+                    g_sel = st.selectbox("Grupo / Espécie", df_g['nome_grupo'].tolist())
+                    g_row = df_g[df_g['nome_grupo'] == g_sel].iloc[0]
+                    desc = st.text_input("Descrição Básica do Bem")
+                    c_m, c_p = st.columns(2)
+                    marca = c_m.text_input("Marca / Modelo (Opcional)")
+                    num_serie = c_p.text_input("Nº Série / Placa (Opcional)")
+                    c_pl, c_loc = st.columns(2)
+                    plaqueta = c_pl.text_input("Plaqueta / Património (Opcional)")
+                    localizacao = c_loc.text_input("Localização / Depto (Opcional)")
+                    c_n, c_f = st.columns(2)
+                    nf = c_n.text_input("Nº da Nota Fiscal (Opcional)")
+                    forn = c_f.text_input("Fornecedor (Opcional)")
+                    c_v, c_d = st.columns(2)
+                    v_aq = c_v.number_input("Valor de Aquisição (R$)", min_value=0.0, step=100.0)
+                    dt_c = c_d.date_input("Data da Compra")
+                    regra_cred = st.selectbox("Regra de Crédito PIS/COFINS", ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"])
+                    
+                    st.markdown("---")
+                    st.markdown("##### Saldo de Implantação (Opcional)")
+                    tem_saldo = st.checkbox("Informar Saldo Residual de Implantação (Bens Antigos)")
+                    c_si, c_vi = st.columns(2)
+                    dt_saldo = c_si.date_input("Data do Saldo Inicial", disabled=not tem_saldo)
+                    v_saldo = c_vi.number_input("Valor Residual Inicial (R$)", min_value=0.0, step=100.0, disabled=not tem_saldo)
 
-                if st.form_submit_button("Registar no Inventário"):
-                    if not desc or v_aq <= 0: st.error("Descrição e Valor são obrigatórios.")
-                    elif dt_c > hoje_br.date(): st.error("A Data de Compra não pode ser no futuro.")
-                    else:
-                        conn = get_db_connection(); cursor = conn.cursor()
-                        cursor.execute("""INSERT INTO bens_imobilizado (tenant_id, grupo_id, descricao_item, marca_modelo, num_serie_placa, plaqueta, localizacao, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, regra_credito) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (int(emp_id), int(g_row['id']), desc, marca, num_serie, plaqueta, localizacao, nf, forn, dt_c, float(v_aq), regra_cred))
-                        conn.commit(); conn.close(); st.success("Bem registado com sucesso!"); st.rerun()
+                    if st.form_submit_button("Registar no Inventário"):
+                        if not desc or v_aq <= 0: st.error("Descrição e Valor são obrigatórios.")
+                        elif dt_c > hoje_br.date(): st.error("A Data de Compra não pode ser no futuro.")
+                        else:
+                            dt_s = dt_saldo if tem_saldo else None
+                            v_s = float(v_saldo) if tem_saldo else 0.0
+                            conn = get_db_connection(); cursor = conn.cursor()
+                            cursor.execute("""INSERT INTO bens_imobilizado (tenant_id, grupo_id, descricao_item, marca_modelo, num_serie_placa, plaqueta, localizacao, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, regra_credito, data_saldo_inicial, valor_residual_inicial) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (int(emp_id), int(g_row['id']), desc, marca, num_serie, plaqueta, localizacao, nf, forn, dt_c, float(v_aq), regra_cred, dt_s, v_s))
+                            conn.commit(); conn.close(); st.success("Bem registado com sucesso!"); st.rerun()
 
-    with col_ras:
-        st.markdown("#### Processamento em Lote (Exportação ERP)")
-        with st.container(height=260, border=True):
-            c_a, c_m = st.columns([1, 2])
-            a_proc = c_a.number_input("Ano Base", value=hoje_br.year)
-            meses_opcoes = {1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr", 5: "Mai", 6: "Jun", 7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez"}
-            meses_selecionados = c_m.multiselect("Meses para Processar", options=list(meses_opcoes.keys()), format_func=lambda x: meses_opcoes[x], default=[hoje_br.month])
-           
-            meses_futuros = [m for m in meses_selecionados if a_proc > hoje_br.year or (a_proc == hoje_br.year and m > hoje_br.month)]
-           
-            if meses_futuros: st.error("ERRO: O processamento bloqueou a apropriação de despesas de meses futuros (CPC 27).")
-            elif st.button("Gerar Exportação de Lançamentos (XLSX)"):
-                conn = get_db_connection()
-                df_bens = pd.read_sql(f"SELECT b.*, g.taxa_anual_percentual, g.conta_contabil_despesa, g.conta_contabil_dep_acumulada FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id} AND b.status = 'ativo'", conn)
-                conn.close()
-                if not df_bens.empty:
-                    linhas = []
-                    for m_proc in sorted(meses_selecionados):
-                        last_day = calendar.monthrange(a_proc, m_proc)[1]
-                        dia_final_calculo = hoje_br.day if (a_proc == hoje_br.year and m_proc == hoje_br.month) else last_day
-                        data_lancamento_str = f"{dia_final_calculo:02d}/{m_proc:02d}/{a_proc}"
-                       
-                        for _, b in df_bens.iterrows():
-                            dt_compra = b['data_compra']
-                            if a_proc < dt_compra.year or (a_proc == dt_compra.year and m_proc < dt_compra.month): continue
-                            dia_inicial = dt_compra.day if (a_proc == dt_compra.year and m_proc == dt_compra.month) else 1
-                            dias_uso = max(0, dia_final_calculo - dia_inicial + 1)
-                           
-                            cota = ((float(b['valor_compra']) * (float(b['taxa_anual_percentual'])/100)) / 365.0) * dias_uso
-                            c_d_use = b.get('conta_despesa') or b.get('conta_contabil_despesa', '')
-                            c_c_use = b.get('conta_dep_acumulada') or b.get('conta_contabil_dep_acumulada', '')
-                           
-                            # USANDO A FUNÇÃO TRAVA DE 11 COLUNAS AQUI TAMBÉM
-                            linhas.append(criar_linha_erp(c_d_use, c_c_use, data_lancamento_str, cota, "", f"DEPRECIACAO REF {m_proc:02d}/{a_proc} - {b['descricao_item']}", b['numero_nota_fiscal'] or b['id']))
-                   
-                    df_xlsx = pd.DataFrame(linhas)
-                    buffer = io.BytesIO()
-                    colunas_erp = ["Lancto Aut.", "Debito", "Credito", "Data", "Valor", "Cod. Historico", "Historico", "Ccusto Debito", "Ccusto Credito", "Nr.Documento", "Complemento"]
-                    if df_xlsx.empty: df_xlsx = pd.DataFrame(columns=colunas_erp)
-                    else: df_xlsx = df_xlsx[colunas_erp]
-                   
-                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_xlsx.to_excel(writer, index=False, sheet_name='Depreciacao')
-                    st.download_button("Gerar Exportação de Lançamentos (XLSX)", data=buffer.getvalue(), file_name=f"DEPREC_LOTE_{a_proc}.xlsx")
+        with col_ras:
+            st.markdown("#### Processamento em Lote (Exportação ERP)")
+            with st.container(height=380, border=True):
+                c_a, c_m = st.columns([1, 2])
+                a_proc = c_a.number_input("Ano Base", value=hoje_br.year)
+                meses_opcoes = {1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr", 5: "Mai", 6: "Jun", 7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez"}
+                meses_selecionados = c_m.multiselect("Meses para Processar", options=list(meses_opcoes.keys()), format_func=lambda x: meses_opcoes[x], default=[hoje_br.month])
+                
+                st.markdown("---")
+                metodo_calc = st.selectbox("Método de Cálculo", ["Pro Rata Die (Dias Exatos)", "Mês Comercial (30 Dias)"])
+                tipo_export = st.radio("Tipo de Exportação", ["Analítica (Item a Item)", "Sintética (Agrupada por Grupo)"])
+                
+                meses_futuros = [m for m in meses_selecionados if a_proc > hoje_br.year or (a_proc == hoje_br.year and m > hoje_br.month)]
+                
+                if meses_futuros: st.error("ERRO: O processamento bloqueou a apropriação de despesas de meses futuros (CPC 27).")
+                elif st.button("Gerar Exportação de Lançamentos (XLSX)", type="primary"):
+                    conn = get_db_connection()
+                    df_bens = pd.read_sql(f"SELECT b.*, g.taxa_anual_percentual, g.conta_contabil_despesa, g.conta_contabil_dep_acumulada, g.nome_grupo FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id} AND b.status = 'ativo'", conn)
+                    conn.close()
+                    if not df_bens.empty:
+                        linhas = []
+                        for m_proc in sorted(meses_selecionados):
+                            last_day = calendar.monthrange(a_proc, m_proc)[1]
+                            dia_final_calculo = hoje_br.day if (a_proc == hoje_br.year and m_proc == hoje_br.month) else last_day
+                            data_lancamento_str = f"{dia_final_calculo:02d}/{m_proc:02d}/{a_proc}"
+                            
+                            registros_calc = []
+                            for _, b in df_bens.iterrows():
+                                dt_base = b['data_saldo_inicial'] if pd.notnull(b.get('data_saldo_inicial')) else b['data_compra']
+                                if a_proc < dt_base.year or (a_proc == dt_base.year and m_proc < dt_base.month): continue
+                                
+                                dia_inicial = dt_base.day if (a_proc == dt_base.year and m_proc == dt_base.month) else 1
+                                base_calc = float(b['valor_compra']) # Taxa linear sempre atua sobre o custo original de aquisição
+                                taxa_anual = float(b['taxa_anual_percentual']) / 100.0
+                                
+                                if metodo_calc == "Mês Comercial (30 Dias)":
+                                    dias_comerciais = 30 - dia_inicial + 1 if dia_inicial > 1 else 30
+                                    cota = (base_calc * taxa_anual / 360.0) * dias_comerciais
+                                else:
+                                    dias_uso = max(0, dia_final_calculo - dia_inicial + 1)
+                                    cota = (base_calc * taxa_anual / 365.0) * dias_uso
+                                
+                                c_d_use = b.get('conta_despesa') or b.get('conta_contabil_despesa', '')
+                                c_c_use = b.get('conta_dep_acumulada') or b.get('conta_contabil_dep_acumulada', '')
+                                
+                                registros_calc.append({
+                                    'c_d_use': c_d_use, 'c_c_use': c_c_use, 'data_lanc': data_lancamento_str, 'cota': cota,
+                                    'desc': b['descricao_item'], 'nf': b['numero_nota_fiscal'] or b['id'], 'grupo': b['nome_grupo']
+                                })
+                            
+                            if tipo_export == "Sintética (Agrupada por Grupo)":
+                                df_calc = pd.DataFrame(registros_calc)
+                                if not df_calc.empty:
+                                    df_grp = df_calc.groupby(['c_d_use', 'c_c_use', 'grupo', 'data_lanc'])['cota'].sum().reset_index()
+                                    for _, r in df_grp.iterrows():
+                                        linhas.append(criar_linha_erp(r['c_d_use'], r['c_c_use'], r['data_lanc'], r['cota'], "", f"DEPRECIACAO ACUMULADA - {str(r['grupo']).upper()} NO MES", ""))
+                            else:
+                                for r in registros_calc:
+                                    linhas.append(criar_linha_erp(r['c_d_use'], r['c_c_use'], r['data_lanc'], r['cota'], "", f"DEPRECIACAO REF {m_proc:02d}/{a_proc} - {r['desc']}", r['nf']))
+                        
+                        df_xlsx = pd.DataFrame(linhas)
+                        buffer = io.BytesIO()
+                        colunas_erp = ["Lancto Aut.", "Debito", "Credito", "Data", "Valor", "Cod. Historico", "Historico", "Ccusto Debito", "Ccusto Credito", "Nr.Documento", "Complemento"]
+                        if df_xlsx.empty: df_xlsx = pd.DataFrame(columns=colunas_erp)
+                        else: df_xlsx = df_xlsx[colunas_erp]
+                        
+                        with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_xlsx.to_excel(writer, index=False, sheet_name='Depreciacao')
+                        st.download_button("Baixar Planilha ERP (XLSX)", data=buffer.getvalue(), file_name=f"DEPREC_{a_proc}.xlsx")
 
-    st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
-    st.markdown("#### Consultar Inventário Dinâmico")
-   
-    mostrar_inativos = st.checkbox("Exibir bens inativos (baixados nos últimos 5 anos)")
-    limite_anos = hoje_br.year - 5
-    filtro_status = "1=1" if mostrar_inativos else "b.status = 'ativo'"
-    if mostrar_inativos: filtro_status += f" AND (b.data_baixa IS NULL OR YEAR(b.data_baixa) >= {limite_anos})"
+    with tab_inv:
+        st.markdown("#### Consultar Inventário Dinâmico")
+        mostrar_inativos = st.checkbox("Exibir bens inativos (baixados nos últimos 5 anos)")
+        limite_anos = hoje_br.year - 5
+        filtro_status = "1=1" if mostrar_inativos else "b.status = 'ativo'"
+        if mostrar_inativos: filtro_status += f" AND (b.data_baixa IS NULL OR YEAR(b.data_baixa) >= {limite_anos})"
 
-    conn = get_db_connection()
-    df_todos = pd.read_sql(f"SELECT b.*, g.taxa_anual_percentual, g.nome_grupo FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id} AND {filtro_status}", conn)
-    conn.close()
+        conn = get_db_connection()
+        df_todos = pd.read_sql(f"SELECT b.*, g.taxa_anual_percentual, g.nome_grupo FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id} AND {filtro_status}", conn)
+        conn.close()
 
-    if not df_todos.empty:
-        dados_visao = []
-        for _, rb in df_todos.iterrows():
-            dt_compra = rb['data_compra']
-            dt_ref = hoje_br.date() if rb['status'] == 'ativo' else rb['data_baixa']
-            dias_totais = max(0, (dt_ref - dt_compra).days)
-            cota_dia = (float(rb['valor_compra']) * (float(rb['taxa_anual_percentual'])/100)) / 365.0
-            dep_acumulada = min(float(rb['valor_compra']), cota_dia * dias_totais)
-            valor_residual = max(0.0, float(rb['valor_compra']) - dep_acumulada)
-           
-            dados_visao.append({"Descrição": f"{rb['descricao_item']} {rb['marca_modelo'] or ''}".strip(), "Data Aquisição": dt_compra.strftime('%d/%m/%Y'), "Valor Original": formatar_moeda(rb['valor_compra']), "Taxa (%)": f"{rb['taxa_anual_percentual']}%", "Valor Residual": formatar_moeda(valor_residual), "Situação": rb['status'].upper()})
-       
-        st.dataframe(pd.DataFrame(dados_visao), use_container_width=True, hide_index=True)
-
-        if st.button("Gerar Relação Geral (PDF)"):
-            pdf = RelatorioCrescerePDF()
-            pdf.add_page(); pdf.add_cabecalho(row_emp_ativa['nome'], row_emp_ativa['cnpj'], "*** RELACAO GERAL DO ATIVO IMOBILIZADO ***")
-            pdf.set_font("Arial", 'B', 8)
-            pdf.cell(50, 6, "Descricao", 1); pdf.cell(25, 6, "Aquisicao", 1); pdf.cell(30, 6, "Valor Original", 1); pdf.cell(15, 6, "Taxa", 1); pdf.cell(30, 6, "Valor Residual", 1); pdf.cell(40, 6, "Status", 1, ln=True)
-            pdf.set_font("Arial", '', 8)
-            for _, r in pd.DataFrame(dados_visao).iterrows():
-                pdf.cell(50, 6, r['Descrição'][:30], 1); pdf.cell(25, 6, r['Data Aquisição'], 1); pdf.cell(30, 6, r['Valor Original'], 1); pdf.cell(15, 6, r['Taxa (%)'], 1); pdf.cell(30, 6, r['Valor Residual'], 1); pdf.cell(40, 6, r['Situação'], 1, ln=True)
-            st.download_button("Baixar Relação PDF", data=pdf.output(dest='S').encode('latin1'), file_name=f"IMOBILIZADO_{emp_id}.pdf")
-
-    st.markdown("---")
-    busca = st.text_input("Pesquisar Item Específico para Simulação de Ganho de Capital:")
-    if busca:
-        df_res = df_todos[(df_todos['descricao_item'].str.contains(busca, case=False, na=False))]
-        if not df_res.empty:
-            for _, rb in df_res.iterrows():
-                dt_compra = rb['data_compra']
+        if not df_todos.empty:
+            dados_visao = []
+            for _, rb in df_todos.iterrows():
+                dt_base = rb['data_saldo_inicial'] if pd.notnull(rb.get('data_saldo_inicial')) else rb['data_compra']
+                dt_ref = hoje_br.date() if rb['status'] == 'ativo' else rb['data_baixa']
+                dias_totais = max(0, (dt_ref - dt_base).days)
                 cota_dia = (float(rb['valor_compra']) * (float(rb['taxa_anual_percentual'])/100)) / 365.0
-                with st.expander(f"{rb['descricao_item']} - {rb['marca_modelo'] or ''}"):
-                    dt_simulada = st.date_input("Data para Simulação/Venda", value=hoje_br, key=f"sim_date_{rb['id']}")
-                    if dt_simulada < dt_compra: st.error("Data de simulação não pode ser anterior à data de aquisição.")
-                    else:
-                        dias_simulados = max(0, (dt_simulada - dt_compra).days)
-                        dep_simulada = min(float(rb['valor_compra']), cota_dia * dias_simulados)
-                        valor_res_simulado = max(0.0, float(rb['valor_compra']) - dep_simulada)
-                       
-                        pdf = RelatorioCrescerePDF()
-                        pdf.add_page(); pdf.add_cabecalho(row_emp_ativa['nome'], row_emp_ativa['cnpj'], "*** FICHA INDIVIDUAL DE ATIVO IMOBILIZADO ***")
-                        pdf.set_font("Arial", 'B', 10); pdf.cell(30, 6, "Bem:"); pdf.set_font("Arial", '', 10); pdf.cell(0, 6, f"{rb['descricao_item']} - {rb['marca_modelo'] or ''}", ln=True)
-                        pdf.set_font("Arial", 'B', 10); pdf.cell(30, 6, "Data Compra:"); pdf.set_font("Arial", '', 10); pdf.cell(0, 6, f"{dt_compra.strftime('%d/%m/%Y')} (Valor Original: {formatar_moeda(rb['valor_compra'])})", ln=True)
-                        pdf.ln(5); pdf.set_font("Arial", 'B', 12); pdf.cell(0, 8, "PROJECAO DE VENDA / GANHO DE CAPITAL", ln=True)
-                        pdf.set_font("Arial", '', 10)
-                        pdf.cell(0, 6, f"Data da Projecao: {dt_simulada.strftime('%d/%m/%Y')}", ln=True)
-                        pdf.cell(0, 6, f"Depreciacao Acumulada Projetada (Pro Rata Die - {dias_simulados} dias): {formatar_moeda(dep_simulada)}", ln=True)
-                        pdf.set_font("Arial", 'B', 11); pdf.cell(0, 8, f"VALOR RESIDUAL (CUSTO DO BEM): {formatar_moeda(valor_res_simulado)}", ln=True)
-                        st.download_button("Gerar Ficha de Projeção (PDF)", data=pdf.output(dest='S').encode('latin1'), file_name=f"FICHA_{rb['id']}.pdf", key=f"btn_ficha_{rb['id']}")
+                
+                # Depreciação começa a contar do zero se dt_base for a compra, ou se soma ao inicial
+                saldo_ini = float(rb.get('valor_residual_inicial', 0.0))
+                dep_acumulada = min(float(rb['valor_compra']), cota_dia * dias_totais)
+                if pd.notnull(rb.get('data_saldo_inicial')):
+                    valor_residual = max(0.0, saldo_ini - dep_acumulada)
+                else:
+                    valor_residual = max(0.0, float(rb['valor_compra']) - dep_acumulada)
+                
+                dados_visao.append({"Descrição": f"{rb['descricao_item']} {rb['marca_modelo'] or ''}".strip(), "Data Ref.": dt_base.strftime('%d/%m/%Y'), "Valor Base": formatar_moeda(rb['valor_compra']), "Taxa (%)": f"{rb['taxa_anual_percentual']}%", "Valor Residual": formatar_moeda(valor_residual), "Situação": rb['status'].upper()})
+            
+            st.dataframe(pd.DataFrame(dados_visao), use_container_width=True, hide_index=True)
+
+            if st.button("Gerar Relação Geral (PDF)"):
+                pdf = RelatorioCrescerePDF()
+                pdf.add_page(); pdf.add_cabecalho(row_emp_ativa['nome'], row_emp_ativa['cnpj'], "*** RELACAO GERAL DO ATIVO IMOBILIZADO ***")
+                pdf.set_font("Arial", 'B', 8)
+                pdf.cell(50, 6, "Descricao", 1); pdf.cell(25, 6, "Data Base", 1); pdf.cell(30, 6, "Valor de Custo", 1); pdf.cell(15, 6, "Taxa", 1); pdf.cell(30, 6, "Valor Residual", 1); pdf.cell(40, 6, "Status", 1, ln=True)
+                pdf.set_font("Arial", '', 8)
+                for _, r in pd.DataFrame(dados_visao).iterrows():
+                    pdf.cell(50, 6, r['Descrição'][:30], 1); pdf.cell(25, 6, r['Data Ref.'], 1); pdf.cell(30, 6, r['Valor Base'], 1); pdf.cell(15, 6, r['Taxa (%)'], 1); pdf.cell(30, 6, r['Valor Residual'], 1); pdf.cell(40, 6, r['Situação'], 1, ln=True)
+                st.download_button("Baixar Relação PDF", data=pdf.output(dest='S').encode('latin1'), file_name=f"IMOBILIZADO_{emp_id}.pdf")
+
+        st.markdown("---")
+        busca = st.text_input("Pesquisar Item Específico para Simulação de Ganho de Capital:")
+        if busca:
+            df_res = df_todos[(df_todos['descricao_item'].str.contains(busca, case=False, na=False))]
+            if not df_res.empty:
+                for _, rb in df_res.iterrows():
+                    dt_base = rb['data_saldo_inicial'] if pd.notnull(rb.get('data_saldo_inicial')) else rb['data_compra']
+                    cota_dia = (float(rb['valor_compra']) * (float(rb['taxa_anual_percentual'])/100)) / 365.0
+                    saldo_ini = float(rb.get('valor_residual_inicial', 0.0))
+                    
+                    with st.expander(f"{rb['descricao_item']} - {rb['marca_modelo'] or ''}"):
+                        dt_simulada = st.date_input("Data para Simulação/Venda", value=hoje_br, key=f"sim_date_{rb['id']}")
+                        if dt_simulada < dt_base: st.error("Data de simulação não pode ser anterior à data base.")
+                        else:
+                            dias_simulados = max(0, (dt_simulada - dt_base).days)
+                            dep_simulada = min(float(rb['valor_compra']), cota_dia * dias_simulados)
+                            if pd.notnull(rb.get('data_saldo_inicial')): valor_res_simulado = max(0.0, saldo_ini - dep_simulada)
+                            else: valor_res_simulado = max(0.0, float(rb['valor_compra']) - dep_simulada)
+                            
+                            pdf = RelatorioCrescerePDF()
+                            pdf.add_page(); pdf.add_cabecalho(row_emp_ativa['nome'], row_emp_ativa['cnpj'], "*** FICHA INDIVIDUAL DE ATIVO IMOBILIZADO ***")
+                            pdf.set_font("Arial", 'B', 10); pdf.cell(30, 6, "Bem:"); pdf.set_font("Arial", '', 10); pdf.cell(0, 6, f"{rb['descricao_item']} - {rb['marca_modelo'] or ''}", ln=True)
+                            pdf.set_font("Arial", 'B', 10); pdf.cell(30, 6, "Data Base:"); pdf.set_font("Arial", '', 10); pdf.cell(0, 6, f"{dt_base.strftime('%d/%m/%Y')} (Custo Original: {formatar_moeda(rb['valor_compra'])})", ln=True)
+                            pdf.ln(5); pdf.set_font("Arial", 'B', 12); pdf.cell(0, 8, "PROJECAO DE VENDA / GANHO DE CAPITAL", ln=True)
+                            pdf.set_font("Arial", '', 10)
+                            pdf.cell(0, 6, f"Data da Projecao: {dt_simulada.strftime('%d/%m/%Y')}", ln=True)
+                            pdf.cell(0, 6, f"Depreciacao Acumulada Projetada (Pro Rata Die - {dias_simulados} dias): {formatar_moeda(dep_simulada)}", ln=True)
+                            pdf.set_font("Arial", 'B', 11); pdf.cell(0, 8, f"VALOR RESIDUAL (CUSTO DO BEM): {formatar_moeda(valor_res_simulado)}", ln=True)
+                            st.download_button("Gerar Ficha de Projeção (PDF)", data=pdf.output(dest='S').encode('latin1'), file_name=f"FICHA_{rb['id']}.pdf", key=f"btn_ficha_{rb['id']}")
+
+    if tab_manut:
+        with tab_manut:
+            st.markdown("#### Manutenção de Ativos (Edição/Transferência/Exclusão)")
+            conn = get_db_connection()
+            df_todos_manut = pd.read_sql(f"SELECT b.*, g.nome_grupo FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id}", conn)
+            conn.close()
+            
+            if not df_todos_manut.empty:
+                bem_sel = st.selectbox("Selecione o Bem para Manutenção", df_todos_manut.apply(lambda r: f"[{r['id']}] {r['descricao_item']} - {r['marca_modelo'] or ''} ({r['status'].upper()})", axis=1))
+                bem_id = int(bem_sel.split("]")[0].replace("[", ""))
+                bem_row = df_todos_manut[df_todos_manut['id'] == bem_id].iloc[0]
+                
+                with st.form("form_manut_bem"):
+                    st.markdown("##### Dados do Bem")
+                    m_desc = st.text_input("Descrição", value=bem_row['descricao_item'])
+                    c_m1, c_m2 = st.columns(2)
+                    m_marca = c_m1.text_input("Marca/Modelo", value=bem_row['marca_modelo'] or "")
+                    m_serie = c_m2.text_input("Nº Série", value=bem_row['num_serie_placa'] or "")
+                    c_m3, c_m4 = st.columns(2)
+                    m_plaq = c_m3.text_input("Plaqueta", value=bem_row['plaqueta'] or "")
+                    m_loc = c_m4.text_input("Localização", value=bem_row['localizacao'] or "")
+                    c_m5, c_m6 = st.columns(2)
+                    m_nf = c_m5.text_input("Nota Fiscal", value=bem_row['numero_nota_fiscal'] or "")
+                    m_forn = c_m6.text_input("Fornecedor", value=bem_row['nome_fornecedor'] or "")
+                    
+                    c_m7, c_m8 = st.columns(2)
+                    m_vaq = c_m7.number_input("Valor Aquisição Base (R$)", value=float(bem_row['valor_compra']), min_value=0.0, step=100.0)
+                    m_dtc = c_m8.date_input("Data Compra", value=bem_row['data_compra'])
+                    
+                    lista_regras = ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"]
+                    m_regra = st.selectbox("Regra de Crédito PIS/COFINS", lista_regras, index=lista_regras.index(bem_row['regra_credito']) if bem_row['regra_credito'] in lista_regras else 0)
+                    
+                    st.markdown("##### Saldo de Implantação")
+                    c_m9, c_m10 = st.columns(2)
+                    m_dtsi = c_m9.date_input("Data Saldo Inicial", value=bem_row['data_saldo_inicial'] if pd.notnull(bem_row.get('data_saldo_inicial')) else None)
+                    m_vri = c_m10.number_input("Valor Residual Inicial (R$)", value=float(bem_row.get('valor_residual_inicial', 0.0)), min_value=0.0, step=100.0)
+                    
+                    st.markdown("##### Transferência / Status")
+                    c_m11, c_m12 = st.columns(2)
+                    
+                    # Identifica o índice da empresa atual para pré-selecionar no dropdown
+                    todas_empresas = df_emp.apply(lambda r: f"{r['nome']} - {r['apelido_unidade'] or r['tipo']}", axis=1).tolist()
+                    empresa_atual_str = df_emp[df_emp['id'] == emp_id].apply(lambda r: f"{r['nome']} - {r['apelido_unidade'] or r['tipo']}", axis=1).iloc[0]
+                    idx_emp = todas_empresas.index(empresa_atual_str) if empresa_atual_str in todas_empresas else 0
+                    
+                    nova_empresa = c_m11.selectbox("Transferir para Unidade", todas_empresas, index=idx_emp)
+                    novo_emp_id = int(df_emp.loc[df_emp.apply(lambda r: f"{r['nome']} - {r['apelido_unidade'] or r['tipo']}", axis=1) == nova_empresa].iloc[0]['id'])
+                    
+                    lista_status = ["ativo", "inativo", "baixado"]
+                    m_status = c_m12.selectbox("Status", lista_status, index=lista_status.index(bem_row['status']) if bem_row['status'] in lista_status else 0)
+                    
+                    if st.form_submit_button("Atualizar Bem", type="primary"):
+                        conn_m = get_db_connection(); cursor_m = conn_m.cursor()
+                        try:
+                            # Prepara nulos para o banco se a data inicial estiver vazia
+                            val_dtsi = m_dtsi if m_dtsi is not None else None
+                            cursor_m.execute("""UPDATE bens_imobilizado SET descricao_item=%s, marca_modelo=%s, num_serie_placa=%s, plaqueta=%s, localizacao=%s, numero_nota_fiscal=%s, nome_fornecedor=%s, valor_compra=%s, data_compra=%s, regra_credito=%s, data_saldo_inicial=%s, valor_residual_inicial=%s, tenant_id=%s, status=%s WHERE id=%s""", (m_desc, m_marca, m_serie, m_plaq, m_loc, m_nf, m_forn, float(m_vaq), m_dtc, m_regra, val_dtsi, float(m_vri), novo_emp_id, m_status, bem_id))
+                            conn_m.commit(); st.success("Bem atualizado com sucesso!"); st.rerun()
+                        except Exception as e:
+                            conn_m.rollback(); st.error(f"Erro ao atualizar: {e}")
+                        finally:
+                            conn_m.close()
 
 # --- 8. MÓDULO PARÂMETROS CONTÁBEIS ---
 def modulo_parametros():
@@ -615,14 +732,14 @@ def modulo_parametros():
     st.markdown("### Parâmetros Contábeis e Exportação ERP")
     df_op = carregar_operacoes()
     op_nomes = df_op['nome'].tolist()
-   
+    
     tab_edit, tab_novo, tab_fecho, tab_limpeza, tab_imob = st.tabs(["Editar Existente", "Nova Operação", "Fecho por Empresa", "Auditoria/Limpeza", "Grupos Imobilizado"])
-   
+    
     with tab_edit:
         sel_op = st.selectbox("Selecione a Operação:", op_nomes)
         row_op = df_op[df_op['nome'] == sel_op].iloc[0]
         oid = row_op['id']
-       
+        
         with st.form("form_edit_param"):
             st.markdown("##### Configuração PIS")
             c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
@@ -630,14 +747,14 @@ def modulo_parametros():
             p_cred = c2.text_input("Crédito PIS", value=row_op['conta_cred_pis'] or "", key=f"pc_{oid}")
             p_cod = c3.text_input("Cód ERP PIS", value=row_op.get('pis_h_codigo', ''), key=f"pcd_{oid}")
             p_txt = c4.text_input("Texto Padrão PIS", value=row_op.get('pis_h_texto', ''), key=f"ptx_{oid}")
-           
+            
             st.markdown("##### Configuração COFINS")
             c5, c6, c7, c8 = st.columns([1, 1, 1, 2])
             c_deb = c5.text_input("Débito COFINS", value=row_op['conta_deb_cof'] or "", key=f"cd_{oid}")
             c_cred = c6.text_input("Crédito COFINS", value=row_op['conta_cred_cof'] or "", key=f"cc_{oid}")
             c_cod = c7.text_input("Cód ERP COFINS", value=row_op.get('cofins_h_codigo', ''), key=f"ccd_{oid}")
             c_txt = c8.text_input("Texto Padrão COF", value=row_op.get('cofins_h_texto', ''), key=f"ctx_{oid}")
-           
+            
             st.markdown("##### Configuração CUSTO/VALOR LÍQUIDO")
             c9, c10, c11, c12 = st.columns([1, 1, 1, 2])
             cu_deb = c9.text_input("Débito Custo", value=row_op['conta_deb_custo'] or "", key=f"cud_{oid}")
@@ -658,7 +775,7 @@ def modulo_parametros():
                     r_c_cod = cr7.text_input("Cód ERP COF Ret", value=row_op.get('ret_cofins_h_codigo', ''), key=f"rccd_{oid}")
                     r_c_txt = cr8.text_input("Histórico COF Ret", value=row_op.get('ret_cofins_h_texto', ''), key=f"rctx_{oid}")
             else: r_p_deb=r_p_cred=r_p_cod=r_p_txt=r_c_deb=r_c_cred=r_c_cod=r_c_txt=None
-           
+            
             if st.form_submit_button("Atualizar Operação"):
                 conn = get_db_connection(); cursor = conn.cursor()
                 try:
@@ -679,7 +796,7 @@ def modulo_parametros():
             st.markdown("##### Configuração CUSTO/VALOR LÍQUIDO")
             c9, c10, c11, c12 = st.columns([1, 1, 1, 2]); n_cu_deb = c9.text_input("Débito Custo", key="n_cud"); n_cu_cred = c10.text_input("Crédito Custo", key="n_cuc"); n_cu_cod = c11.text_input("Cód ERP Custo", key="n_cucd"); n_cu_txt = c12.text_input("Texto Padrão Custo", key="n_cutx")
             st.divider()
-           
+            
             if st.form_submit_button("Registar Nova Operação"):
                 if not novo_nome: st.error("O nome é obrigatório.")
                 else:
@@ -739,37 +856,37 @@ def modulo_parametros():
         df_e = carregar_empresas_ativas()
         e_sel = st.selectbox("Selecione a Empresa para Gerir Grupos", df_e.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1), key="sel_emp_grp")
         e_id = int(df_e.loc[df_e.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1) == e_sel].iloc[0]['id'])
-       
+        
         conn = get_db_connection()
         df_g = pd.read_sql(f"SELECT * FROM grupos_imobilizado WHERE tenant_id = {e_id}", conn)
         conn.close()
-       
+        
         col_edit, col_new = st.columns(2, gap="large")
-       
+        
         with col_edit:
             st.markdown("##### Editar Grupo Existente")
             if not df_g.empty:
                 g_sel = st.selectbox("Selecione o Grupo", df_g['nome_grupo'].tolist())
                 g_row = df_g[df_g['nome_grupo'] == g_sel].iloc[0]
-               
+                
                 with st.form("ed_grp"):
                     n_g = st.text_input("Nome", value=g_row['nome_grupo'])
                     tx = st.number_input("Taxa Anual (%)", value=float(g_row['taxa_anual_percentual']))
                     cd = st.text_input("Conta Despesa (ERP)", value=g_row['conta_contabil_despesa'])
                     cc = st.text_input("Conta Dep. Acumulada (ERP)", value=g_row['conta_contabil_dep_acumulada'])
-                   
+                    
                     if st.form_submit_button("Atualizar Grupo"):
                         conn = get_db_connection(); cursor = conn.cursor()
                         cursor.execute("UPDATE grupos_imobilizado SET nome_grupo=%s, taxa_anual_percentual=%s, conta_contabil_despesa=%s, conta_contabil_dep_acumulada=%s WHERE id=%s", (n_g, float(tx), cd, cc, int(g_row['id'])))
                         conn.commit(); conn.close(); st.success("Atualizado!"); st.rerun()
             else: st.info("Nenhum grupo cadastrado.")
-               
+                
         with col_new:
             st.markdown("##### Criar Novo Grupo")
             opcoes_rf = {"Livre / Customizado": 0.0, "Computadores e Periféricos (20%)": 20.0, "Veículos de Passageiros (20%)": 20.0, "Máquinas e Equipamentos (10%)": 10.0, "Móveis e Utensílios (10%)": 10.0, "Edificações / Imóveis (4%)": 4.0}
             padrao_sel = st.selectbox("Template RFB", list(opcoes_rf.keys()))
             nome_sugerido = padrao_sel.split(' (')[0] if padrao_sel != "Livre / Customizado" else ""
-           
+            
             with st.form("nv_grp"):
                 n_g_n = st.text_input("Nome do Grupo", value=nome_sugerido)
                 tx_n = st.number_input("Taxa Anual (%)", min_value=0.0, value=opcoes_rf[padrao_sel])
@@ -784,16 +901,16 @@ def modulo_parametros():
 # --- 9. GESTÃO DE UTILIZADORES ---
 def modulo_usuarios():
     if st.session_state.nivel_acesso != "SUPER_ADMIN": st.error("Acesso restrito."); return
-   
+    
     st.markdown("### Gestão de Utilizadores")
     conn = get_db_connection()
     df_users = pd.read_sql("SELECT id, nome, username, nivel_acesso, status_usuario, data_criacao FROM usuarios ORDER BY nome ASC", conn)
-   
+    
     # Busca as empresas para permitir o vínculo no momento da criação
     df_empresas = pd.read_sql("SELECT id, nome FROM empresas WHERE status_assinatura = 'ATIVO'", conn)
-   
+    
     tab_lista, tab_novo = st.tabs(["Utilizadores Registados", "Adicionar Utilizador"])
-   
+    
     with tab_lista:
         st.dataframe(df_users, use_container_width=True, hide_index=True)
         st.markdown("##### Gerir Acesso")
@@ -802,7 +919,7 @@ def modulo_usuarios():
             usr_sel = c1.selectbox("Selecione o Utilizador", df_users['username'].tolist())
             nova_acao = c2.selectbox("Ação", ["Inativar Acesso", "Reativar Acesso", "Redefinir Palavra-passe"])
             nova_senha = st.text_input("Nova Palavra-passe (se aplicável)", type="password")
-           
+            
             if st.form_submit_button("Executar Ação"):
                 cursor = conn.cursor()
                 try:
@@ -823,26 +940,24 @@ def modulo_usuarios():
                     conn.rollback()
                     st.error(f"Erro no banco: {e}")
                 finally:
-                    conn.close() # Garante o fechamento antes do rerun
+                    conn.close() 
                     import time
-                    time.sleep(1.2) # Pausa rápida para a notificação toast ser lida
+                    time.sleep(1.2) 
                     st.rerun()
-                   
+                    
     with tab_novo:
         with st.form("form_novo_usuario"):
-            # Variáveis das colunas ajustadas
             col_nome, col_user = st.columns(2)
             novo_nome = col_nome.text_input("Nome Completo")
             novo_user = col_user.text_input("Nome de Utilizador (Login)")
-           
+            
             col_pass, col_nivel = st.columns(2)
             nova_pass = col_pass.text_input("Palavra-passe Inicial", type="password")
             nivel = col_nivel.selectbox("Nível de Acesso", ["CLIENT_OPERATOR", "ADMIN", "SUPER_ADMIN"])
-           
-            # Campo para vincular o usuário à empresa correta
+            
             lista_empresas = ["Nenhuma (Acesso Global)"] + df_empresas['nome'].tolist()
             emp_vinculada = st.selectbox("Vincular a uma Unidade/Empresa", lista_empresas)
-           
+            
             if st.form_submit_button("Criar Utilizador"):
                 if not novo_nome or not novo_user or len(nova_pass) < 6:
                     st.error("Preencha todos os campos corretamente (senha mín. 6 caracteres).")
@@ -855,7 +970,6 @@ def modulo_usuarios():
                         if emp_vinculada != "Nenhuma (Acesso Global)":
                             empresa_id_db = int(df_empresas[df_empresas['nome'] == emp_vinculada].iloc[0]['id'])
 
-                        # INSERT ajustado para receber empresa_id
                         query = """
                             INSERT INTO usuarios (nome, username, senha_hash, nivel_acesso, status_usuario, data_criacao, empresa_id)
                             VALUES (%s, %s, %s, %s, 'ATIVO', NOW(), %s)
@@ -867,14 +981,14 @@ def modulo_usuarios():
                         conn.rollback()
                         st.error(f"Erro ao inserir no banco: {e}")
                     finally:
-                        conn.close() # Previne o connection leak
+                        conn.close() 
                         import time
                         time.sleep(1.2)
                         st.rerun()
-                       
-    # Bloco extra de segurança para fechar a conexão no fluxo normal
+                        
     if conn.is_connected():
         conn.close()
+
 # --- 10. MENU LATERAL ---
 with st.sidebar:
     dias_pt = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
