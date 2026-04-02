@@ -496,7 +496,7 @@ def modulo_imobilizado():
     df_g = pd.read_sql(f"SELECT * FROM grupos_imobilizado WHERE tenant_id = {emp_id}", conn)
     conn.close()
 
-    # --- FUNÇÃO DE FRAGMENTO (MANUTENÇÃO) DEFINIDA AQUI ---
+    # --- FUNÇÃO DE FRAGMENTO (MANUTENÇÃO) ---
     if len(tabs) > 2:
         @st.fragment
         def fragmento_manutencao(emp_id_param):
@@ -522,13 +522,18 @@ def modulo_imobilizado():
                     is_reclass = r['id'] in bens_com_plano or pd.notnull(r.get('data_saldo_inicial'))
                     prefix = "✓ " if is_reclass else ""
                     
-                    nome_display = f"{prefix}[{r['id']}] {desc} - {marca} ({r['status'].upper()}){aviso}"
+                    # --- FILTRO INTELIGENTE / BUSCA MULTIFUNCIONAL ---
+                    nf_str = f" | NF: {r['numero_nota_fiscal']}" if pd.notnull(r.get('numero_nota_fiscal')) and str(r.get('numero_nota_fiscal')).strip() else ""
+                    plaq_str = f" | Plq: {r['plaqueta']}" if pd.notnull(r.get('plaqueta')) and str(r.get('plaqueta')).strip() else ""
+                    val_str = f" | {formatar_moeda(r['valor_compra'])}" if pd.notnull(r.get('valor_compra')) else ""
+                    
+                    nome_display = f"{prefix}[{r['id']}] {desc} {marca}{nf_str}{plaq_str}{val_str} ({r['status'].upper()}){aviso}"
                     lista_formatada_itens.append({'id': r['id'], 'display': nome_display, 'is_reclass': 1 if is_reclass else 0})
                 
                 lista_formatada_itens.sort(key=lambda x: (x['is_reclass'], x['display']))
                 opcoes_selectbox = [x['display'] for x in lista_formatada_itens]
 
-                bem_sel = st.selectbox("Selecione o Bem para Manutenção", opcoes_selectbox, key="select_manutencao_bem")
+                bem_sel = st.selectbox("Busque o Bem (Digite o Nome, Nota Fiscal, Plaqueta ou Valor)", opcoes_selectbox, key="select_manutencao_bem")
                 bem_id = int(bem_sel.split("]")[0].replace("[", "").replace("✓ ", ""))
                 bem_row = df_todos_manut[df_todos_manut['id'] == bem_id].iloc[0]
                 
@@ -567,7 +572,10 @@ def modulo_imobilizado():
                         st.markdown("##### Estratégia Contábil")
                         c_e1, c_e2 = st.columns(2)
                         lista_regras = ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"]
-                        m_regra = c_e1.selectbox("Regra de Crédito", lista_regras, index=lista_regras.index(bem_row['regra_credito']) if bem_row['regra_credito'] in lista_regras else 0)
+                        
+                        # --- CORREÇÃO DO RÓTULO DO CAMPO DE CRÉDITO ---
+                        m_regra = c_e1.selectbox("Regra de Crédito PIS/COFINS", lista_regras, index=lista_regras.index(bem_row['regra_credito']) if bem_row['regra_credito'] in lista_regras else 0)
+                        
                         m_taxa_cust = c_e2.number_input("Taxa Custom (%) ", value=float(bem_row.get('taxa_customizada', 0.0) or 0.0), min_value=0.0, step=1.0)
                         
                         idx_cenario_atual = 0
