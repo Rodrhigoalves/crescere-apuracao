@@ -665,8 +665,6 @@ def modulo_imobilizado():
                         idx_emp = todas_empresas.index(empresa_atual_str) if empresa_atual_str in todas_empresas else 0
                         
                         nova_empresa = c_a1.selectbox("Transferir para Unidade", todas_empresas, index=idx_emp, key=f"emp_m_{bem_id}")
-                        
-                        # --- LINHA RESTAURADA ---
                         novo_emp_id = int(df_emp.loc[df_emp.apply(formatar_nome_empresa, axis=1) == nova_empresa].iloc[0]['id'])
                         
                         lista_status = ["ativo", "inativo", "baixado"]
@@ -1020,6 +1018,106 @@ def modulo_imobilizado():
                 dados_visao.append({"Descrição": f"{desc_limpa} {marca_limpa}".strip(), "Data Ref.": dt_base.strftime('%d/%m/%Y'), "Valor Base": formatar_moeda(rb['valor_compra']), "Taxa (%)": taxa_display, "Valor Residual": formatar_moeda(valor_residual), "Situação": rb['status'].upper()})
             
             if dados_visao: st.dataframe(pd.DataFrame(dados_visao), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        with st.expander("🖨️ Central de Relatórios de Inventário", expanded=False):
+            st.info("Gere o relatório completo em PDF para a contabilidade ou auditoria, com opção de retroagir saldos exatos até 31/12/2025.")
+            
+            c_filtro, c_data, c_btn = st.columns([2, 1, 1])
+            opcoes_grupos = ["Todos os Grupos"] + df_g['nome_grupo'].tolist() if not df_g.empty else ["Todos os Grupos"]
+            grupo_filtro = c_filtro.selectbox("Filtrar por Grupo", opcoes_grupos, key="filtro_grupo_pdf")
+            
+            data_minima = date(2025, 12, 31)
+            data_posicao = c_data.date_input("Data Base (Posição)", value=hoje_br.date(), min_value=data_minima, max_value=hoje_br.date(), key="dt_pos_pdf")
+            
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            if c_btn.button("Gerar PDF do Inventário", type="primary", use_container_width=True):
+                conn_pdf = get_db_connection()
+                df_pdf = pd.read_sql(f"SELECT b.*, g.taxa_anual_percentual, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id}", conn_pdf)
+                df_planos_pdf = pd.read_sql(f"SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = {emp_id}", conn_pdf)
+                if not df_planos_pdf.empty: df_planos_pdf['mes_referencia'] = pd.to_datetime(df_planos_pdf['mes_referencia']).dt.date
+                conn_pdf.close()
+                
+                if df_pdf.empty:
+                    st.warning("Nenhum bem encontrado para esta unidade.")
+                else:
+                    pdf_inv = RelatorioCrescerePDF()
+                    pdf_inv.add_page()
+                    pdf_inv.add_cabecalho(row_emp_ativa['nome'], row_emp_ativa['cnpj'], "INVENTARIO DE ATIVO IMOBILIZADO", f"Posicao em: {data_posicao.strftime('%d/%m/%Y')} | Grupo: {grupo_filtro}")
+                    
+                    pdf_inv.set_font("Arial", 'B', 8)
+                    pdf_inv.cell(10, 6, "ID", 1); pdf_inv.cell(65, 6, "Descricao", 1); pdf_inv.cell(20, 6, "Aquisicao", 1); pdf_inv.cell(25, 6, "Vlr. Base", 1); pdf_inv.cell(30, 6, "Dep. Acumul.", 1); pdf_inv.cell(40, 6, "Saldo Residual", 1, ln=True)
+                    pdf_inv.set_font("Arial", '', 8)
+                    
+                    t_base = 0.0; t_dep = 0.0; t_res = 0.0
+                    
+                    for _, r in df_pdf.iterrows():
+                        if grupo_filtro != "Todos os Grupos" and r.get('nome_grupo') != grupo_filtro: continue
+                        
+                        dt_base = r['data_saldo_inicial'] if pd.notnull(r.get('data_saldo_inicial')) else r['data_compra']
+                        if isinstance(dt_base, datetime) or isinstance(dt_base, pd.Timestamp): dt_base = dt_base.date()
+                        
+                        dt_compra_orig = r['data_compra']
+                        if isinstance(dt_compra_orig, datetime) or isinstance(dt_compra_orig, pd.Timestamp): dt_compra_orig = dt_compra_orig.date()
+
+                        if dt_compra_orig > data_posicao: continue
+                        
+                        if r['status'] != 'ativo' and pd.notnull(r.get('data_baixa')):
+                            dt_baixa = r['data_baixa']
+                            if isinstance(dt_baixa, datetime) or isinstance(dt_baixa, pd.Timestamp): dt_baixa = dt_baixa.date()
+                            if dt_baixa <= data_posicao: continue
+
+                        base_calc = float(r['valor_compra'])
+                        if pd.notnull(r.get('taxa_customizada')) and float(r['taxa_customizada']) > 0: taxa_anual = float(r['taxa_customizada']) / 100.0
+                        elif pd.notnull(r.get('taxa_anual_percentual')): taxa_anual = float(r['taxa_anual_percentual']) / 100.0
+                        else: taxa_anual = 0.0
+                        
+                        saldo_ini = float(r.get('valor_residual_inicial', 0.0))
+                        dep_acumulada = 0.0
+                        plano_do_bem = df_planos_pdf[df_planos_pdf['bem_id'] == r['id']] if not df_planos_pdf.empty else pd.DataFrame()
+                        
+                        if not plano_do_bem.empty:
+                            dep_acumulada = plano_do_bem[plano_do_bem['mes_referencia'] <= data_posicao]['valor_cota'].sum()
+                        else:
+                            if dt_base > data_posicao: dep_acumulada = 0.0
+                            else:
+                                dias_totais = max(0, (data_posicao - dt_base).days)
+                                dep_acumulada = min(base_calc, (base_calc * taxa_anual / 365.0) * dias_totais)
+                        
+                        if pd.notnull(r.get('data_saldo_inicial')):
+                            if data_posicao < dt_base:
+                                valor_residual = base_calc
+                                dep_acumulada = 0.0
+                            else: valor_residual = max(0.0, saldo_ini - dep_acumulada)
+                        else: 
+                            valor_residual = max(0.0, base_calc - dep_acumulada)
+                            
+                        if dep_acumulada > base_calc: dep_acumulada = base_calc
+
+                        desc_limpa = limpar_texto(r.get('descricao_item'))[:35]
+                        
+                        pdf_inv.cell(10, 6, str(r['id']), 1)
+                        pdf_inv.cell(65, 6, desc_limpa, 1)
+                        pdf_inv.cell(20, 6, dt_compra_orig.strftime('%d/%m/%Y'), 1)
+                        pdf_inv.cell(25, 6, formatar_moeda(base_calc), 1)
+                        pdf_inv.cell(30, 6, formatar_moeda(dep_acumulada), 1)
+                        pdf_inv.cell(40, 6, formatar_moeda(valor_residual), 1, ln=True)
+                        
+                        t_base += base_calc; t_dep += dep_acumulada; t_res += valor_residual
+                        
+                    pdf_inv.set_font("Arial", 'B', 9)
+                    pdf_inv.cell(95, 8, "TOTAIS DA POSICAO", 1)
+                    pdf_inv.cell(25, 8, formatar_moeda(t_base), 1)
+                    pdf_inv.cell(30, 8, formatar_moeda(t_dep), 1)
+                    pdf_inv.cell(40, 8, formatar_moeda(t_res), 1, ln=True)
+                    
+                    pdf_bytes_inv = pdf_inv.output(dest='S').encode('latin1')
+                    st.session_state['pdf_inv_b64'] = pdf_bytes_inv
+                    st.session_state['pdf_inv_nome'] = f"Inventario_{row_emp_ativa['apelido_unidade'] or row_emp_ativa['id']}_{data_posicao.strftime('%m%Y')}.pdf"
+
+            if 'pdf_inv_b64' in st.session_state:
+                st.success("Relatório processado e pronto para download!")
+                st.download_button("⬇️ Baixar Arquivo PDF", data=st.session_state['pdf_inv_b64'], file_name=st.session_state['pdf_inv_nome'], mime="application/pdf", use_container_width=True)
 
     if len(tabs) > 2:
         with tabs[2]:
