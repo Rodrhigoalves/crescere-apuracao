@@ -536,7 +536,9 @@ def modulo_imobilizado():
                         st.markdown("---")
                         st.markdown("##### Saldo de Implantação / Histórico Contábil")
                         c_si, c_da = st.columns(2)
-                        dt_saldo = c_si.date_input("Data Base do Balancete (Última Posição)")
+                        
+                        data_padrao_saldo = date(hoje_br.year - 1, 12, 31)
+                        dt_saldo = c_si.date_input("Data Base do Balancete (Última Posição)", value=data_padrao_saldo)
                         v_dep_acumulada = c_da.number_input("Depreciação Acumulada Anterior (R$)", min_value=0.0, max_value=float(v_aq) if float(v_aq)>0 else 10000000.0, value=0.0, step=100.0)
                         
                         v_residual_atual = max(0.0, float(v_aq) - float(v_dep_acumulada))
@@ -551,19 +553,11 @@ def modulo_imobilizado():
                             if cota_sugerida > 0 and v_residual_atual > 0:
                                 st.markdown("##### Grade de Conferência")
                                 
-                                # Lógica Pro-Rata Automática
-                                ultimo_dia_mes = calendar.monthrange(dt_saldo.year, dt_saldo.month)[1]
-                                if dt_saldo.day < ultimo_dia_mes:
-                                    dias_restantes = ultimo_dia_mes - dt_saldo.day
-                                    primeira_cota_calc = round((cota_sugerida / ultimo_dia_mes) * dias_restantes, 2)
-                                    mes_inicio_plan = dt_saldo.month
-                                    ano_inicio_plan = dt_saldo.year
-                                else:
-                                    primeira_cota_calc = cota_sugerida
-                                    mes_inicio_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
-                                    ano_inicio_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
+                                primeira_cota_calc = cota_sugerida
+                                mes_inicio_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
+                                ano_inicio_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
                                 
-                                primeira_cota_manual = st.number_input("Ajuste da 1ª Parcela (Opcional - R$)", min_value=0.0, max_value=float(v_residual_atual), value=float(primeira_cota_calc), step=10.0, key="cota_cad_manual", help="Calculado automaticamente via pro-rata ou cota cheia. Ajuste se necessário.")
+                                primeira_cota_manual = st.number_input("Ajuste da 1ª Parcela (Opcional - R$)", min_value=0.0, max_value=float(v_residual_atual), value=float(primeira_cota_calc), step=10.0, key="cota_cad_manual")
                                 
                                 with st.expander("👀 Ver Prévia Dinâmica do Plano de Voo", expanded=True):
                                     preview_data = []
@@ -619,15 +613,8 @@ def modulo_imobilizado():
 
                                 if "3" in cenario and cota_sugerida > 0 and v_s_db > 0:
                                     saldo_restante = v_s_db
-                                    
-                                    ultimo_dia_mes_db = calendar.monthrange(dt_saldo.year, dt_saldo.month)[1]
-                                    if dt_saldo.day < ultimo_dia_mes_db:
-                                        mes_plan = dt_saldo.month
-                                        ano_plan = dt_saldo.year
-                                    else:
-                                        mes_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
-                                        ano_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
-                                        
+                                    mes_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
+                                    ano_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
                                     data_plan = date(ano_plan, mes_plan, 1)
 
                                     is_first_month = True
@@ -916,148 +903,146 @@ def modulo_imobilizado():
                 bem_row = df_todos_manut[df_todos_manut['id'] == bem_id].iloc[0]
                 
                 with st.container(border=True):
-                    st.markdown("##### Dados do Bem")
+                    # --- DIVISÃO EM COLUNAS ---
+                    col_fisico, col_estrategia = st.columns([1, 1], gap="large")
                     
-                    if df_grupos_locais.empty:
-                        st.warning("⚠️ Esta unidade não possui Grupos Contábeis cadastrados. Crie um grupo em Parâmetros Contábeis para poder gerenciar este bem adequadamente.")
-                        m_grupo_id = bem_row['grupo_id']
-                    else:
-                        lista_grupos_locais = df_grupos_locais['nome_grupo'].tolist()
-                        idx_grp = 0
-                        nome_grupo_atual = limpar_texto(bem_row.get('nome_grupo'))
-                        if nome_grupo_atual in lista_grupos_locais:
-                            idx_grp = lista_grupos_locais.index(nome_grupo_atual)
+                    with col_fisico:
+                        st.markdown("##### Dados Físicos e Base")
+                        if df_grupos_locais.empty:
+                            st.warning("⚠️ Crie um Grupo em Parâmetros Contábeis primeiro.")
+                            m_grupo_id = bem_row['grupo_id']
                         else:
-                            st.error("⚠️ Este bem foi transferido de outra unidade e está órfão. Selecione um Grupo Contábil local abaixo.")
+                            lista_grupos_locais = df_grupos_locais['nome_grupo'].tolist()
+                            nome_grupo_atual = limpar_texto(bem_row.get('nome_grupo'))
+                            idx_grp = lista_grupos_locais.index(nome_grupo_atual) if nome_grupo_atual in lista_grupos_locais else 0
+                            if nome_grupo_atual not in lista_grupos_locais:
+                                st.error("⚠️ Este bem está órfão de grupo. Vincule abaixo:")
+                            m_grupo_nome = st.selectbox("Grupo Local", lista_grupos_locais, index=idx_grp)
+                            m_grupo_id = int(df_grupos_locais[df_grupos_locais['nome_grupo'] == m_grupo_nome].iloc[0]['id'])
+                        
+                        m_desc = st.text_input("Descrição", value=limpar_texto(bem_row['descricao_item']))
+                        c_f1, c_f2 = st.columns(2)
+                        m_marca = c_f1.text_input("Marca/Modelo", value=limpar_texto(bem_row.get('marca_modelo')))
+                        m_serie = c_f2.text_input("Nº Série", value=limpar_texto(bem_row.get('num_serie_placa')))
+                        c_f3, c_f4 = st.columns(2)
+                        m_plaq = c_f3.text_input("Plaqueta", value=limpar_texto(bem_row.get('plaqueta')))
+                        m_loc = c_f4.text_input("Localização", value=limpar_texto(bem_row.get('localizacao')))
+                        c_f5, c_f6 = st.columns(2)
+                        m_nf = c_f5.text_input("Nota Fiscal", value=limpar_texto(bem_row.get('numero_nota_fiscal')))
+                        m_forn = c_f6.text_input("Fornecedor", value=limpar_texto(bem_row.get('nome_fornecedor')))
+                        c_f7, c_f8 = st.columns(2)
+                        m_vaq = c_f7.number_input("Valor Aquisição (R$)", value=float(bem_row['valor_compra']), min_value=0.0, step=100.0)
+                        m_dtc = c_f8.date_input("Data Compra", value=bem_row['data_compra'])
+
+                    with col_estrategia:
+                        st.markdown("##### Estratégia Contábil")
+                        c_e1, c_e2 = st.columns(2)
+                        lista_regras = ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"]
+                        m_regra = c_e1.selectbox("Crédito PIS/COF", lista_regras, index=lista_regras.index(bem_row['regra_credito']) if bem_row['regra_credito'] in lista_regras else 0, key="m_regra")
+                        m_taxa_cust = c_e2.number_input("Taxa Custom (%) ", value=float(bem_row.get('taxa_customizada', 0.0) or 0.0), min_value=0.0, step=1.0)
+                        
+                        idx_cenario_atual = 0
+                        if pd.notnull(bem_row.get('data_saldo_inicial')):
+                            idx_cenario_atual = 2 if bem_id in bens_com_plano else 1
+                        
+                        cenario_manut = st.selectbox("Cenário de Depreciação", [
+                            "1. Bem Novo (Cálculo Automático)", 
+                            "2. Cliente Novo (Sem Histórico)", 
+                            "3. Continuidade (Memória Cota Fixa)"
+                        ], index=idx_cenario_atual, key="cenario_manut")
+
+                        confirmacao_manut = True
+                        
+                        if "1" not in cenario_manut:
+                            c_e3, c_e4 = st.columns(2)
+                            data_padrao_saldo = date(hoje_br.year - 1, 12, 31)
+                            valor_dtsi_atual = bem_row['data_saldo_inicial'] if pd.notnull(bem_row.get('data_saldo_inicial')) else data_padrao_saldo
+                            m_dtsi = c_e3.date_input("Data Saldo Inicial", value=valor_dtsi_atual)
                             
-                        m_grupo_nome = st.selectbox("Vincular ao Grupo Local", lista_grupos_locais, index=idx_grp)
-                        m_grupo_id = int(df_grupos_locais[df_grupos_locais['nome_grupo'] == m_grupo_nome].iloc[0]['id'])
-                    
-                    m_desc = st.text_input("Descrição", value=limpar_texto(bem_row['descricao_item']))
-                    c_m1, c_m2 = st.columns(2)
-                    m_marca = c_m1.text_input("Marca/Modelo", value=limpar_texto(bem_row.get('marca_modelo')))
-                    m_serie = c_m2.text_input("Nº Série", value=limpar_texto(bem_row.get('num_serie_placa')))
-                    c_m3, c_m4 = st.columns(2)
-                    m_plaq = c_m3.text_input("Plaqueta", value=limpar_texto(bem_row.get('plaqueta')))
-                    m_loc = c_m4.text_input("Localização", value=limpar_texto(bem_row.get('localizacao')))
-                    c_m5, c_m6 = st.columns(2)
-                    m_nf = c_m5.text_input("Nota Fiscal", value=limpar_texto(bem_row.get('numero_nota_fiscal')))
-                    m_forn = c_m6.text_input("Fornecedor", value=limpar_texto(bem_row.get('nome_fornecedor')))
-                    
-                    c_m7, c_m8 = st.columns(2)
-                    m_vaq = c_m7.number_input("Valor Aquisição Base (R$)", value=float(bem_row['valor_compra']), min_value=0.0, step=100.0)
-                    m_dtc = c_m8.date_input("Data Compra", value=bem_row['data_compra'])
-                    
-                    st.markdown("##### Regras Específicas")
-                    c_r3, c_r4 = st.columns(2)
-                    lista_regras = ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"]
-                    m_regra = c_r3.selectbox("Regra de Crédito PIS/COFINS", lista_regras, index=lista_regras.index(bem_row['regra_credito']) if bem_row['regra_credito'] in lista_regras else 0, key="m_regra_credito_manutencao")
-                    m_taxa_cust = c_r4.number_input("Taxa Customizada (% - Opcional) ", value=float(bem_row.get('taxa_customizada', 0.0) or 0.0), min_value=0.0, step=1.0)
+                            v_res_inicial_db = float(bem_row.get('valor_residual_inicial', 0.0))
+                            dep_ac_calc = float(m_vaq) - v_res_inicial_db if pd.notnull(bem_row.get('data_saldo_inicial')) else 0.0
+                            m_dep_ac = c_e4.number_input("Deprec. Acumulada (R$)", value=float(max(0, dep_ac_calc)), min_value=0.0, step=100.0)
+                            m_vri_calculado = max(0.0, float(m_vaq) - float(m_dep_ac))
+                            st.markdown(f"<small>Valor Residual: <b>{formatar_moeda(m_vri_calculado)}</b></small>", unsafe_allow_html=True)
+                            
+                            if "3" in cenario_manut:
+                                taxa_usada_m = float(m_taxa_cust) if m_taxa_cust > 0 else float(df_grupos_locais[df_grupos_locais['id']==m_grupo_id]['taxa_anual_percentual'].iloc[0]) if not df_grupos_locais.empty else 10.0
+                                cota_sugerida_m = round((float(m_vaq) * (taxa_usada_m / 100.0)) / 12.0, 2)
+                                st.info(f"Cota Mensal (Sugerida): **{formatar_moeda(cota_sugerida_m)}**")
+                            else: cota_sugerida_m = 0.0
+                        else:
+                            m_dtsi = None; m_vri_calculado = 0.0; cota_sugerida_m = 0.0
+                            st.info("Campos de saldo ocultos (Depreciação via Custo/Data).")
+                
+                    # --- GRADE DE CONFERÊNCIA E ADMIN EXPANDER (Full Width) ---
+                    if "3" in cenario_manut and cota_sugerida_m > 0 and m_vri_calculado > 0:
+                        st.markdown("##### Grade de Conferência")
+                        # Cenário 3 = Sempre Cota Cheia no início
+                        primeira_cota_calc_m = cota_sugerida_m
+                        mes_inicio_plan_m = m_dtsi.month + 1 if m_dtsi.month < 12 else 1
+                        ano_inicio_plan_m = m_dtsi.year if m_dtsi.month < 12 else m_dtsi.year + 1
+
+                        primeira_cota_manual_m = st.number_input("Ajuste da 1ª Parcela (Opcional - R$)", min_value=0.0, max_value=float(m_vri_calculado), value=float(primeira_cota_calc_m), step=10.0, key=f"cota_manut_{bem_id}")
+                        
+                        with st.expander("👀 Ver Prévia do Plano de Voo", expanded=True):
+                            preview_data_m = []
+                            s_rest_m = m_vri_calculado
+                            d_plan_m = date(ano_inicio_plan_m, mes_inicio_plan_m, 1)
+                            
+                            c_at_1_m = min(s_rest_m, float(primeira_cota_manual_m))
+                            if c_at_1_m > 0:
+                                preview_data_m.append({"Mês": d_plan_m.strftime('%m/%Y'), "Cota Projetada": formatar_moeda(c_at_1_m), "Saldo Restante": formatar_moeda(s_rest_m - c_at_1_m)})
+                                s_rest_m -= c_at_1_m
+                                m_plan_m = d_plan_m.month + 1 if d_plan_m.month < 12 else 1
+                                a_plan_m = d_plan_m.year if d_plan_m.month < 12 else d_plan_m.year + 1
+                                d_plan_m = date(a_plan_m, m_plan_m, 1)
+                            
+                            while s_rest_m > 0.009 and len(preview_data_m) < 6: # Tabela compacta
+                                c_at_m = min(s_rest_m, float(cota_sugerida_m))
+                                preview_data_m.append({"Mês": d_plan_m.strftime('%m/%Y'), "Cota Projetada": formatar_moeda(c_at_m), "Saldo Restante": formatar_moeda(s_rest_m - c_at_m)})
+                                s_rest_m -= c_at_m
+                                m_plan_m = d_plan_m.month + 1 if d_plan_m.month < 12 else 1
+                                a_plan_m = d_plan_m.year if d_plan_m.month < 12 else d_plan_m.year + 1
+                                d_plan_m = date(a_plan_m, m_plan_m, 1)
+                            
+                            if preview_data_m:
+                                st.dataframe(pd.DataFrame(preview_data_m), hide_index=True, use_container_width=True)
+                                if s_rest_m > 0.009: st.markdown(f"<small style='color:gray;'>*... e assim sucessivamente até zerar.*</small>", unsafe_allow_html=True)
+
+                        confirmacao_manut = st.checkbox("Confirmo que a memória de cálculo acima está correta.", key="conf_manut")
+                    else:
+                        primeira_cota_manual_m = 0.0
+                        if "3" in cenario_manut: confirmacao_manut = False
                     
                     st.markdown("---")
-                    st.markdown("##### Atualização de Estratégia e Saldo")
-                    
-                    idx_cenario_atual = 0
-                    if pd.notnull(bem_row.get('data_saldo_inicial')):
-                        idx_cenario_atual = 2 if bem_id in bens_com_plano else 1
-                    
-                    cenario_manut = st.selectbox("Cenário de Depreciação (Atualizar Regra)", [
-                        "1. Bem Novo (Folha em Branco - Cálculo Automático)", 
-                        "2. Cliente Novo (Saldo de Partida - Sem Histórico Mensal)", 
-                        "3. Continuidade (Memória de Cálculo - Cota Fixa Histórica)"
-                    ], index=idx_cenario_atual, key="cenario_manut")
+                    with st.expander("⚙️ Gestão Administrativa (Transferência e Status)", expanded=False):
+                        st.warning("⚠️ **Atenção:** Alterar a unidade ou o status impacta diretamente nos relatórios gerenciais e na apuração de impostos.")
+                        c_a1, c_a2 = st.columns(2)
+                        
+                        todas_empresas = df_emp.apply(formatar_nome_empresa, axis=1).tolist()
+                        empresa_atual_str = df_emp[df_emp['id'] == emp_id].apply(formatar_nome_empresa, axis=1).iloc[0]
+                        idx_emp = todas_empresas.index(empresa_atual_str) if empresa_atual_str in todas_empresas else 0
+                        
+                        nova_empresa = c_a1.selectbox("Transferir para Unidade", todas_empresas, index=idx_emp)
+                        novo_emp_id = int(df_emp.loc[df_emp.apply(formatar_nome_empresa, axis=1) == nova_empresa].iloc[0]['id'])
+                        
+                        lista_status = ["ativo", "inativo", "baixado"]
+                        m_status = c_a2.selectbox("Status", lista_status, index=lista_status.index(bem_row['status']) if bem_row['status'] in lista_status else 0)
+                        
+                        texto_confirma = st.text_input("Para salvar alterações administrativas, digite **CONFIRMO** abaixo:", placeholder="Digite CONFIRMO", key=f"conf_admin_{bem_id}")
 
-                    confirmacao_manut = True
-                    
-                    if "1" not in cenario_manut:
-                        c_m9, c_m10 = st.columns(2)
-                        m_dtsi = c_m9.date_input("Data Saldo Inicial", value=bem_row['data_saldo_inicial'] if pd.notnull(bem_row.get('data_saldo_inicial')) else hoje_br.date())
-                        
-                        v_res_inicial_db = float(bem_row.get('valor_residual_inicial', 0.0))
-                        dep_ac_calc = float(m_vaq) - v_res_inicial_db if pd.notnull(bem_row.get('data_saldo_inicial')) else 0.0
-                        
-                        m_dep_ac = c_m10.number_input("Depreciação Acumulada Anterior (R$)", value=float(max(0, dep_ac_calc)), min_value=0.0, step=100.0)
-                        
-                        m_vri_calculado = max(0.0, float(m_vaq) - float(m_dep_ac))
-                        
-                        if "3" in cenario_manut:
-                            st.info("Atenção: Salvar este item como Continuidade apagará o Plano de Voo antigo e criará um novo com as informações atualizadas.")
-                            taxa_usada_m = float(m_taxa_cust) if m_taxa_cust > 0 else float(df_grupos_locais[df_grupos_locais['id']==m_grupo_id]['taxa_anual_percentual'].iloc[0]) if not df_grupos_locais.empty else 10.0
-                            cota_sugerida_m = round((float(m_vaq) * (taxa_usada_m / 100.0)) / 12.0, 2)
-                            
-                            st.info(f"Cota Mensal Padrão projetada: **{formatar_moeda(cota_sugerida_m)}**")
-                            
-                            if cota_sugerida_m > 0 and m_vri_calculado > 0:
-                                st.markdown("##### Grade de Conferência")
-                                
-                                # Lógica Pro-Rata Automática
-                                ultimo_dia_mes_m = calendar.monthrange(m_dtsi.year, m_dtsi.month)[1]
-                                if m_dtsi.day < ultimo_dia_mes_m:
-                                    dias_restantes_m = ultimo_dia_mes_m - m_dtsi.day
-                                    primeira_cota_calc_m = round((cota_sugerida_m / ultimo_dia_mes_m) * dias_restantes_m, 2)
-                                    mes_inicio_plan_m = m_dtsi.month
-                                    ano_inicio_plan_m = m_dtsi.year
-                                else:
-                                    primeira_cota_calc_m = cota_sugerida_m
-                                    mes_inicio_plan_m = m_dtsi.month + 1 if m_dtsi.month < 12 else 1
-                                    ano_inicio_plan_m = m_dtsi.year if m_dtsi.month < 12 else m_dtsi.year + 1
-
-                                primeira_cota_manual_m = st.number_input("Ajuste da 1ª Parcela (Opcional - R$)", min_value=0.0, max_value=float(m_vri_calculado), value=float(primeira_cota_calc_m), step=10.0, key=f"cota_manut_{bem_id}")
-                                
-                                with st.expander("👀 Ver Prévia Dinâmica do Plano de Voo", expanded=True):
-                                    preview_data_m = []
-                                    s_rest_m = m_vri_calculado
-                                    d_plan_m = date(ano_inicio_plan_m, mes_inicio_plan_m, 1)
-                                    
-                                    c_at_1_m = min(s_rest_m, float(primeira_cota_manual_m))
-                                    if c_at_1_m > 0:
-                                        preview_data_m.append({"Mês": d_plan_m.strftime('%m/%Y'), "Cota Projetada": formatar_moeda(c_at_1_m), "Saldo Restante": formatar_moeda(s_rest_m - c_at_1_m)})
-                                        s_rest_m -= c_at_1_m
-                                        m_plan_m = d_plan_m.month + 1 if d_plan_m.month < 12 else 1
-                                        a_plan_m = d_plan_m.year if d_plan_m.month < 12 else d_plan_m.year + 1
-                                        d_plan_m = date(a_plan_m, m_plan_m, 1)
-                                    
-                                    while s_rest_m > 0.009 and len(preview_data_m) < 12:
-                                        c_at_m = min(s_rest_m, float(cota_sugerida_m))
-                                        preview_data_m.append({"Mês": d_plan_m.strftime('%m/%Y'), "Cota Projetada": formatar_moeda(c_at_m), "Saldo Restante": formatar_moeda(s_rest_m - c_at_m)})
-                                        s_rest_m -= c_at_m
-                                        m_plan_m = d_plan_m.month + 1 if d_plan_m.month < 12 else 1
-                                        a_plan_m = d_plan_m.year if d_plan_m.month < 12 else d_plan_m.year + 1
-                                        d_plan_m = date(a_plan_m, m_plan_m, 1)
-                                    
-                                    if preview_data_m:
-                                        st.dataframe(pd.DataFrame(preview_data_m), hide_index=True, use_container_width=True)
-                                        if s_rest_m > 0.009: 
-                                            st.markdown(f"<small style='color:gray;'>*... e assim sucessivamente por mais meses até zerar.*</small>", unsafe_allow_html=True)
-
-                                confirmacao_manut = st.checkbox("Confirmo que a memória de cálculo acima está correta e pronta para ser atualizada.", key="conf_manut")
-                            else: confirmacao_manut = False
-                        else: primeira_cota_manual_m = 0.0; cota_sugerida_m = 0.0
-                    else:
-                        m_dtsi = None; m_vri_calculado = 0.0; primeira_cota_manual_m = 0.0; cota_sugerida_m = 0.0
-                        st.info("Campos de saldo ocultos. O sistema utilizará a Data e Valor de Compra para calcular a depreciação.")
-                    
-                    st.markdown("##### Transferência / Status")
-                    c_m11, c_m12 = st.columns(2)
-                    
-                    todas_empresas = df_emp.apply(formatar_nome_empresa, axis=1).tolist()
-                    empresa_atual_str = df_emp[df_emp['id'] == emp_id].apply(formatar_nome_empresa, axis=1).iloc[0]
-                    idx_emp = todas_empresas.index(empresa_atual_str) if empresa_atual_str in todas_empresas else 0
-                    
-                    nova_empresa = c_m11.selectbox("Transferir para Unidade", todas_empresas, index=idx_emp)
-                    novo_emp_id = int(df_emp.loc[df_emp.apply(formatar_nome_empresa, axis=1) == nova_empresa].iloc[0]['id'])
-                    
-                    lista_status = ["ativo", "inativo", "baixado"]
-                    m_status = c_m12.selectbox("Status", lista_status, index=lista_status.index(bem_row['status']) if bem_row['status'] in lista_status else 0)
-                    
                     st.markdown("<br>", unsafe_allow_html=True)
                     
                     btn_disabled_m = ("3" in cenario_manut and not confirmacao_manut)
                     if btn_disabled_m: st.warning("⚠️ Confirme a memória de cálculo para habilitar a gravação.")
                     
                     if st.button("Atualizar Bem", type="primary", use_container_width=True, disabled=btn_disabled_m):
-                        if ("1" not in cenario_manut) and m_vri_calculado <= 0: st.error("Você marcou um cenário com saldo. A Depreciação Acumulada zerou o bem.")
-                        elif "3" in cenario_manut and cota_sugerida_m <= 0: st.error("Erro na base de cálculo. O Valor de Aquisição e a Taxa devem ser maiores que zero.")
+                        mudou_admin = (novo_emp_id != emp_id) or (m_status != bem_row['status'])
+                        
+                        if mudou_admin and texto_confirma.strip().upper() != "CONFIRMO":
+                            st.error("🔒 ERRO: Para transferir ou inativar/baixar este bem, você deve digitar CONFIRMO na aba de Gestão Administrativa.")
+                        elif ("1" not in cenario_manut) and m_vri_calculado <= 0: st.error("A Depreciação Acumulada zerou o valor do bem.")
+                        elif "3" in cenario_manut and cota_sugerida_m <= 0: st.error("Erro na base de cálculo. Verifique Aquisição/Taxa.")
                         else:
                             conn_m = get_db_connection(); cursor_m = conn_m.cursor()
                             try:
@@ -1066,20 +1051,14 @@ def modulo_imobilizado():
                                 
                                 cursor_m.execute("""UPDATE bens_imobilizado SET grupo_id=%s, descricao_item=%s, marca_modelo=%s, num_serie_placa=%s, plaqueta=%s, localizacao=%s, numero_nota_fiscal=%s, nome_fornecedor=%s, valor_compra=%s, data_compra=%s, regra_credito=%s, data_saldo_inicial=%s, valor_residual_inicial=%s, taxa_customizada=%s, tenant_id=%s, status=%s WHERE id=%s""", (m_grupo_id, m_desc, m_marca, m_serie, m_plaq, m_loc, m_nf, m_forn, float(m_vaq), m_dtc, m_regra, val_dtsi, float(m_vri_calculado), val_tx_cust, novo_emp_id, m_status, bem_id))
                                 
-                                if m_status != 'ativo': cursor_m.execute("UPDATE bens_imobilizado SET data_baixa = CURDATE() WHERE id=%s AND data_baixa IS NULL", (bem_id,))
+                                if m_status != 'ativo' and bem_row['status'] == 'ativo': cursor_m.execute("UPDATE bens_imobilizado SET data_baixa = CURDATE() WHERE id=%s AND data_baixa IS NULL", (bem_id,))
                                 
                                 if "3" in cenario_manut and cota_sugerida_m > 0 and float(m_vri_calculado) > 0:
                                     cursor_m.execute("DELETE FROM plano_depreciacao_itens WHERE bem_id = %s AND status_contabil = 'PENDENTE'", (bem_id,))
                                     
                                     saldo_restante = float(m_vri_calculado)
-                                    ultimo_dia_db = calendar.monthrange(val_dtsi.year, val_dtsi.month)[1]
-                                    if val_dtsi.day < ultimo_dia_db:
-                                        mes_plan = val_dtsi.month
-                                        ano_plan = val_dtsi.year
-                                    else:
-                                        mes_plan = val_dtsi.month + 1 if val_dtsi.month < 12 else 1
-                                        ano_plan = val_dtsi.year if val_dtsi.month < 12 else val_dtsi.year + 1
-                                        
+                                    mes_plan = val_dtsi.month + 1 if val_dtsi.month < 12 else 1
+                                    ano_plan = val_dtsi.year if val_dtsi.month < 12 else val_dtsi.year + 1
                                     data_plan = date(ano_plan, mes_plan, 1)
 
                                     is_first_m = True
@@ -1093,7 +1072,7 @@ def modulo_imobilizado():
                                 elif "1" in cenario_manut or "2" in cenario_manut:
                                     cursor_m.execute("DELETE FROM plano_depreciacao_itens WHERE bem_id = %s AND status_contabil = 'PENDENTE'", (bem_id,))
 
-                                conn_m.commit(); st.success("Bem atualizado e reclassificado com sucesso!"); st.rerun()
+                                conn_m.commit(); st.success("Bem atualizado com sucesso!"); st.rerun()
                             except Exception as e:
                                 conn_m.rollback(); st.error(f"Erro ao atualizar: {e}")
                             finally:
