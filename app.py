@@ -551,32 +551,32 @@ def modulo_imobilizado():
                             idx_grp = lista_grupos_locais.index(nome_grupo_atual) if nome_grupo_atual in lista_grupos_locais else 0
                             if nome_grupo_atual not in lista_grupos_locais:
                                 st.error("⚠️ Este bem foi transferido e está órfão. Selecione um Grupo Local:")
-                            m_grupo_nome = st.selectbox("Vincular ao Grupo Local", lista_grupos_locais, index=idx_grp)
+                            m_grupo_nome = st.selectbox("Vincular ao Grupo Local", lista_grupos_locais, index=idx_grp, key=f"grp_m_{bem_id}")
                             m_grupo_id = int(df_grupos_locais[df_grupos_locais['nome_grupo'] == m_grupo_nome].iloc[0]['id'])
                         
-                        m_desc = st.text_input("Descrição", value=limpar_texto(bem_row['descricao_item']))
+                        m_desc = st.text_input("Descrição", value=limpar_texto(bem_row['descricao_item']), key=f"desc_m_{bem_id}")
                         c_f1, c_f2 = st.columns(2)
-                        m_marca = c_f1.text_input("Marca/Modelo", value=limpar_texto(bem_row.get('marca_modelo')))
-                        m_serie = c_f2.text_input("Nº Série", value=limpar_texto(bem_row.get('num_serie_placa')))
+                        m_marca = c_f1.text_input("Marca/Modelo", value=limpar_texto(bem_row.get('marca_modelo')), key=f"marca_m_{bem_id}")
+                        m_serie = c_f2.text_input("Nº Série", value=limpar_texto(bem_row.get('num_serie_placa')), key=f"serie_m_{bem_id}")
                         c_f3, c_f4 = st.columns(2)
-                        m_plaq = c_f3.text_input("Plaqueta", value=limpar_texto(bem_row.get('plaqueta')))
-                        m_loc = c_f4.text_input("Localização", value=limpar_texto(bem_row.get('localizacao')))
+                        m_plaq = c_f3.text_input("Plaqueta", value=limpar_texto(bem_row.get('plaqueta')), key=f"plaq_m_{bem_id}")
+                        m_loc = c_f4.text_input("Localização", value=limpar_texto(bem_row.get('localizacao')), key=f"loc_m_{bem_id}")
                         c_f5, c_f6 = st.columns(2)
-                        m_nf = c_f5.text_input("Nota Fiscal", value=limpar_texto(bem_row.get('numero_nota_fiscal')))
-                        m_forn = c_f6.text_input("Fornecedor", value=limpar_texto(bem_row.get('nome_fornecedor')))
+                        m_nf = c_f5.text_input("Nota Fiscal", value=limpar_texto(bem_row.get('numero_nota_fiscal')), key=f"nf_m_{bem_id}")
+                        m_forn = c_f6.text_input("Fornecedor", value=limpar_texto(bem_row.get('nome_fornecedor')), key=f"forn_m_{bem_id}")
                         c_f7, c_f8 = st.columns(2)
-                        m_vaq = c_f7.number_input("Valor Aquisição Base (R$)", value=float(bem_row['valor_compra']), min_value=0.0, step=100.0)
-                        m_dtc = c_f8.date_input("Data Compra", value=bem_row['data_compra'])
+                        m_vaq = c_f7.number_input("Valor Aquisição Base (R$)", value=float(bem_row['valor_compra']), min_value=0.0, step=100.0, key=f"vaq_m_{bem_id}")
+                        m_dtc = c_f8.date_input("Data Compra", value=bem_row['data_compra'], key=f"dtc_m_{bem_id}")
 
                     with col_estrategia:
                         st.markdown("##### Estratégia Contábil")
                         c_e1, c_e2 = st.columns(2)
                         lista_regras = ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"]
                         
-                        # --- CORREÇÃO DO RÓTULO DO CAMPO DE CRÉDITO ---
-                        m_regra = c_e1.selectbox("Regra de Crédito PIS/COFINS", lista_regras, index=lista_regras.index(bem_row['regra_credito']) if bem_row['regra_credito'] in lista_regras else 0)
+                        # --- CORREÇÃO DO RÓTULO COM A CHAVE ÚNICA ---
+                        m_regra = c_e1.selectbox("Regra de Crédito PIS/COFINS", lista_regras, index=lista_regras.index(bem_row['regra_credito']) if bem_row['regra_credito'] in lista_regras else 0, key=f"regra_m_{bem_id}")
                         
-                        m_taxa_cust = c_e2.number_input("Taxa Custom (%) ", value=float(bem_row.get('taxa_customizada', 0.0) or 0.0), min_value=0.0, step=1.0)
+                        m_taxa_cust = c_e2.number_input("Taxa Custom (%) ", value=float(bem_row.get('taxa_customizada', 0.0) or 0.0), min_value=0.0, step=1.0, key=f"taxa_m_{bem_id}")
                         
                         idx_cenario_atual = 0
                         if pd.notnull(bem_row.get('data_saldo_inicial')):
@@ -586,7 +586,7 @@ def modulo_imobilizado():
                             "1. Bem Novo (Cálculo Automático)", 
                             "2. Cliente Novo (Sem Histórico Mensal)", 
                             "3. Continuidade (Memória Cota Fixa)"
-                        ], index=idx_cenario_atual, key="cenario_manut")
+                        ], index=idx_cenario_atual, key=f"cenario_m_{bem_id}")
 
                         confirmacao_manut = True
                         
@@ -594,12 +594,12 @@ def modulo_imobilizado():
                             c_e3, c_e4 = st.columns(2)
                             data_padrao_saldo = date(hoje_br.year - 1, 12, 31)
                             valor_dtsi_atual = bem_row['data_saldo_inicial'] if pd.notnull(bem_row.get('data_saldo_inicial')) else data_padrao_saldo
-                            m_dtsi = c_e3.date_input("Data Saldo Inicial", value=valor_dtsi_atual)
+                            m_dtsi = c_e3.date_input("Data Saldo Inicial", value=valor_dtsi_atual, key=f"dtsi_m_{bem_id}")
                             
                             v_res_inicial_db = float(bem_row.get('valor_residual_inicial', 0.0))
                             dep_ac_calc = float(m_vaq) - v_res_inicial_db if pd.notnull(bem_row.get('data_saldo_inicial')) else 0.0
                             
-                            m_dep_ac = c_e4.number_input("Deprec. Acumulada Anterior (R$)", value=float(max(0, dep_ac_calc)), min_value=0.0, step=100.0)
+                            m_dep_ac = c_e4.number_input("Deprec. Acumulada Anterior (R$)", value=float(max(0, dep_ac_calc)), min_value=0.0, step=100.0, key=f"depac_m_{bem_id}")
                             m_vri_calculado = max(0.0, float(m_vaq) - float(m_dep_ac))
                             
                             st.markdown(f"<small>Valor Residual Atual: <b>{formatar_moeda(m_vri_calculado)}</b></small>", unsafe_allow_html=True)
@@ -650,7 +650,7 @@ def modulo_imobilizado():
                                 if s_rest_m > 0.009: 
                                     st.markdown(f"<small style='color:gray;'>*... e assim sucessivamente até zerar.*</small>", unsafe_allow_html=True)
 
-                        confirmacao_manut = st.checkbox("Confirmo que a memória de cálculo acima está correta.", key="conf_manut")
+                        confirmacao_manut = st.checkbox("Confirmo que a memória de cálculo acima está correta.", key=f"conf_manut_{bem_id}")
                     else:
                         primeira_cota_manual_m = 0.0
                         if "3" in cenario_manut and m_vri_calculado > 0: confirmacao_manut = False
@@ -665,15 +665,14 @@ def modulo_imobilizado():
                         empresa_atual_str = df_emp[df_emp['id'] == emp_id_param].apply(formatar_nome_empresa, axis=1).iloc[0]
                         idx_emp = todas_empresas.index(empresa_atual_str) if empresa_atual_str in todas_empresas else 0
                         
-                        nova_empresa = c_a1.selectbox("Transferir para Unidade", todas_empresas, index=idx_emp)
-                        novo_emp_id = int(df_emp.loc[df_emp.apply(formatar_nome_empresa, axis=1) == nova_empresa].iloc[0]['id'])
+                        nova_empresa = c_a1.selectbox("Transferir para Unidade", todas_empresas, index=idx_emp, key=f"emp_m_{bem_id}")
                         
                         lista_status = ["ativo", "inativo", "baixado"]
-                        m_status = c_a2.selectbox("Status Físico", lista_status, index=lista_status.index(bem_row['status']) if bem_row['status'] in lista_status else 0)
+                        m_status = c_a2.selectbox("Status Físico", lista_status, index=lista_status.index(bem_row['status']) if bem_row['status'] in lista_status else 0, key=f"status_m_{bem_id}")
                         
                         st.markdown("---")
                         st.error("🔴 **ZONA CRÍTICA: Exclusão Definitiva**")
-                        confirm_excluir = st.checkbox("Desejo excluir este ativo e todo o seu histórico do banco de dados permanentemente.")
+                        confirm_excluir = st.checkbox("Desejo excluir este ativo e todo o seu histórico do banco de dados permanentemente.", key=f"chk_del_m_{bem_id}")
                         texto_confirma = st.text_input("Para salvar alterações administrativas ou Excluir o bem, digite **CONFIRMO** em maiúsculo:", placeholder="Digite CONFIRMO", key=f"conf_admin_{bem_id}")
 
                     st.markdown("<br>", unsafe_allow_html=True)
