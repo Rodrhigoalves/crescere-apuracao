@@ -491,7 +491,7 @@ def modulo_imobilizado():
     tabs = st.tabs(abas)
 
     # --- ABA MANUTENÇÃO OTIMIZADA COM ST.FRAGMENT ---
-    @st.experimental_fragment
+    @st.fragment
     def fragmento_manutencao(emp_id):
         st.markdown("#### Manutenção de Ativos (Edição/Transferência/Exclusão)")
         conn = get_db_connection()
