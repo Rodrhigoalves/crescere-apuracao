@@ -573,7 +573,6 @@ def modulo_imobilizado():
                         c_e1, c_e2 = st.columns(2)
                         lista_regras = ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"]
                         
-                        # --- CORREÇÃO DO RÓTULO COM A CHAVE ÚNICA ---
                         m_regra = c_e1.selectbox("Regra de Crédito PIS/COFINS", lista_regras, index=lista_regras.index(bem_row['regra_credito']) if bem_row['regra_credito'] in lista_regras else 0, key=f"regra_m_{bem_id}")
                         
                         m_taxa_cust = c_e2.number_input("Taxa Custom (%) ", value=float(bem_row.get('taxa_customizada', 0.0) or 0.0), min_value=0.0, step=1.0, key=f"taxa_m_{bem_id}")
@@ -666,6 +665,9 @@ def modulo_imobilizado():
                         idx_emp = todas_empresas.index(empresa_atual_str) if empresa_atual_str in todas_empresas else 0
                         
                         nova_empresa = c_a1.selectbox("Transferir para Unidade", todas_empresas, index=idx_emp, key=f"emp_m_{bem_id}")
+                        
+                        # --- LINHA RESTAURADA ---
+                        novo_emp_id = int(df_emp.loc[df_emp.apply(formatar_nome_empresa, axis=1) == nova_empresa].iloc[0]['id'])
                         
                         lista_status = ["ativo", "inativo", "baixado"]
                         m_status = c_a2.selectbox("Status Físico", lista_status, index=lista_status.index(bem_row['status']) if bem_row['status'] in lista_status else 0, key=f"status_m_{bem_id}")
