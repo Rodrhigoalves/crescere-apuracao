@@ -49,7 +49,7 @@ class RelatorioCrescerePDF(FPDF):
         self.cell(0, 5, 'Desenvolvido por Rodrhigo Alves | Conciliacao e Auditoria Contabil', 0, 1, 'C')
         self.cell(0, 5, f'Pagina {self.page_no()}', 0, 0, 'C')
 
-# --- FUNÇÃO PADRÃO PARA EXPORTAÇÃO ERP (MANTÉM AS 11 COLUNAS EXATAS) ---
+# --- FUNÇÃO PADRÃO PARA EXPORTAÇÃO ERP ---
 def criar_linha_erp(deb, cred, data, valor, cod_hist, hist, nr_doc):
     return {
         "Lancto Aut.": "",
@@ -162,7 +162,7 @@ def modulo_empresas():
                     conn = get_db_connection(); cursor = conn.cursor()
                     try:
                         if f['id']: cursor.execute("UPDATE empresas SET nome=%s, fantasia=%s, cnpj=%s, regime=%s, tipo=%s, cnae=%s, endereco=%s, apelido_unidade=%s WHERE id=%s", (nome, fanta, cnpj, regime, tipo, cnae, endereco, apelido, int(f['id'])))
-                        else: cursor.execute("INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco, status_assinatura, apelido_unidade) VALUES (%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s)", (nome, fanta, cnpj, regime, tipo, cnae, endereco, status_assinatura, apelido))
+                        else: cursor.execute("INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco, status_assinatura, apelido_unidade) VALUES (%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s)", (nome, fanta, cnpj, regime, tipo, cnae, endereco, apelido))
                         conn.commit(); carregar_empresas_ativas.clear(); st.success("Gravado com sucesso!"); st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": "", "apelido_unidade": "", "conta_transf_pis": "", "conta_transf_cofins": ""}
                     except Exception as e: conn.rollback(); st.error(f"Erro: {e}")
                     finally: conn.close()
@@ -469,7 +469,6 @@ def modulo_imobilizado():
 
     st.divider()
     
-    # Controle de Abas Dinâmico com a nova Manutenção
     abas = ["Cadastro e Processamento", "Inventário Dinâmico"]
     if st.session_state.nivel_acesso in ["SUPER_ADMIN", "ADMIN"]: abas.append("Manutenção de Ativos (Admin)")
     
@@ -488,6 +487,12 @@ def modulo_imobilizado():
             st.markdown("#### Cadastro do Bem")
             if df_g.empty: st.warning("Cadastre os Grupos em Parâmetros Contábeis primeiro.")
             else:
+                cenario = st.selectbox("Cenário de Implantação (Estratégia de Depreciação)", [
+                    "1. Bem Novo (Folha em Branco - Cálculo Automático)", 
+                    "2. Cliente Novo (Saldo de Partida - Sem Histórico Mensal)", 
+                    "3. Continuidade (Memória de Cálculo - Cota Fixa Histórica)"
+                ])
+                
                 with st.form("form_novo_bem"):
                     g_sel = st.selectbox("Grupo / Espécie", df_g['nome_grupo'].tolist())
                     g_row = df_g[df_g['nome_grupo'] == g_sel].iloc[0]
@@ -502,26 +507,58 @@ def modulo_imobilizado():
                     nf = c_n.text_input("Nº da Nota Fiscal (Opcional)")
                     forn = c_f.text_input("Fornecedor (Opcional)")
                     c_v, c_d = st.columns(2)
-                    v_aq = c_v.number_input("Valor de Aquisição (R$)", min_value=0.0, step=100.0)
-                    dt_c = c_d.date_input("Data da Compra")
+                    v_aq = c_v.number_input("Valor de Aquisição Base (R$)", min_value=0.0, step=100.0)
+                    dt_c = c_d.date_input("Data da Compra Original")
                     regra_cred = st.selectbox("Regra de Crédito PIS/COFINS", ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"])
                     
-                    st.markdown("---")
-                    st.markdown("##### Saldo de Implantação (Opcional)")
-                    tem_saldo = st.checkbox("Informar Saldo Residual de Implantação (Bens Antigos)")
-                    c_si, c_vi = st.columns(2)
-                    dt_saldo = c_si.date_input("Data do Saldo Inicial", disabled=not tem_saldo)
-                    v_saldo = c_vi.number_input("Valor Residual Inicial (R$)", min_value=0.0, step=100.0, disabled=not tem_saldo)
+                    if "2" in cenario or "3" in cenario:
+                        st.markdown("---")
+                        st.markdown("##### Saldo de Implantação / Histórico")
+                        c_si, c_vi = st.columns(2)
+                        dt_saldo = c_si.date_input("Data Base do Balancete (Última Posição)")
+                        v_saldo = c_vi.number_input("Valor Residual no Balancete (R$)", min_value=0.0, step=100.0)
+                    else:
+                        dt_saldo = None; v_saldo = 0.0
+
+                    if "3" in cenario:
+                        st.info("Informe a cota exata que você vinha depreciando. O sistema criará um Plano de Voo para zerar o bem usando este valor mensal.")
+                        v_cota_fixa = st.number_input("Valor da Parcela/Cota Mensal Histórica (R$)", min_value=0.0, step=10.0)
+                    else:
+                        v_cota_fixa = 0.0
 
                     if st.form_submit_button("Registar no Inventário"):
-                        if not desc or v_aq <= 0: st.error("Descrição e Valor são obrigatórios.")
+                        if not desc or v_aq <= 0: st.error("Descrição e Valor de Aquisição são obrigatórios.")
                         elif dt_c > hoje_br.date(): st.error("A Data de Compra não pode ser no futuro.")
+                        elif ("2" in cenario or "3" in cenario) and v_saldo <= 0: st.error("No cenário escolhido, o Valor Residual é obrigatório.")
+                        elif "3" in cenario and v_cota_fixa <= 0: st.error("No cenário de Continuidade, o valor da cota histórica é obrigatório.")
                         else:
-                            dt_s = dt_saldo if tem_saldo else None
-                            v_s = float(v_saldo) if tem_saldo else 0.0
                             conn = get_db_connection(); cursor = conn.cursor()
-                            cursor.execute("""INSERT INTO bens_imobilizado (tenant_id, grupo_id, descricao_item, marca_modelo, num_serie_placa, plaqueta, localizacao, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, regra_credito, data_saldo_inicial, valor_residual_inicial) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (int(emp_id), int(g_row['id']), desc, marca, num_serie, plaqueta, localizacao, nf, forn, dt_c, float(v_aq), regra_cred, dt_s, v_s))
-                            conn.commit(); conn.close(); st.success("Bem registado com sucesso!"); st.rerun()
+                            try:
+                                dt_s_db = dt_saldo if ("2" in cenario or "3" in cenario) else None
+                                v_s_db = float(v_saldo) if ("2" in cenario or "3" in cenario) else 0.0
+                                
+                                cursor.execute("""INSERT INTO bens_imobilizado (tenant_id, grupo_id, descricao_item, marca_modelo, num_serie_placa, plaqueta, localizacao, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, regra_credito, data_saldo_inicial, valor_residual_inicial) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (int(emp_id), int(g_row['id']), desc, marca, num_serie, plaqueta, localizacao, nf, forn, dt_c, float(v_aq), regra_cred, dt_s_db, v_s_db))
+                                bem_id = cursor.lastrowid
+
+                                # Geração do Plano de Voo Automático (Memória de Cálculo)
+                                if "3" in cenario and v_cota_fixa > 0 and v_s_db > 0:
+                                    saldo_restante = v_s_db
+                                    ano_plan = dt_saldo.year
+                                    mes_plan = dt_saldo.month
+                                    if mes_plan == 12: mes_plan = 1; ano_plan += 1
+                                    else: mes_plan += 1
+                                    data_plan = date(ano_plan, mes_plan, 1)
+
+                                    while saldo_restante > 0.009: # Previne loop infinito por dízimas
+                                        cota_atual = min(saldo_restante, float(v_cota_fixa))
+                                        cursor.execute("INSERT INTO plano_depreciacao_itens (bem_id, mes_referencia, valor_cota, tipo_registro, status_contabil) VALUES (%s, %s, %s, 'PROJETADO', 'PENDENTE')", (bem_id, data_plan.strftime('%Y-%m-%d'), cota_atual))
+                                        saldo_restante -= cota_atual
+                                        if data_plan.month == 12: data_plan = date(data_plan.year + 1, 1, 1)
+                                        else: data_plan = date(data_plan.year, data_plan.month + 1, 1)
+
+                                conn.commit(); st.success("Bem registado com sucesso (e Plano de Voo gerado, se aplicável)!"); st.rerun()
+                            except Exception as e: conn.rollback(); st.error(f"Erro ao salvar: {e}")
+                            finally: conn.close()
 
         with col_ras:
             st.markdown("#### Processamento em Lote (Exportação ERP)")
@@ -532,7 +569,7 @@ def modulo_imobilizado():
                 meses_selecionados = c_m.multiselect("Meses para Processar", options=list(meses_opcoes.keys()), format_func=lambda x: meses_opcoes[x], default=[hoje_br.month])
                 
                 st.markdown("---")
-                metodo_calc = st.selectbox("Método de Cálculo", ["Pro Rata Die (Dias Exatos)", "Mês Comercial (30 Dias)"])
+                metodo_calc = st.selectbox("Método de Cálculo (Para itens sem Plano Fixo)", ["Pro Rata Die (Dias Exatos)", "Mês Comercial (30 Dias)"])
                 tipo_export = st.radio("Tipo de Exportação", ["Analítica (Item a Item)", "Sintética (Agrupada por Grupo)"])
                 
                 meses_futuros = [m for m in meses_selecionados if a_proc > hoje_br.year or (a_proc == hoje_br.year and m > hoje_br.month)]
@@ -541,37 +578,55 @@ def modulo_imobilizado():
                 elif st.button("Gerar Exportação de Lançamentos (XLSX)", type="primary"):
                     conn = get_db_connection()
                     df_bens = pd.read_sql(f"SELECT b.*, g.taxa_anual_percentual, g.conta_contabil_despesa, g.conta_contabil_dep_acumulada, g.nome_grupo FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id} AND b.status = 'ativo'", conn)
+                    # Busca os planos fixos existentes para esta empresa
+                    df_planos = pd.read_sql(f"SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = {emp_id}", conn)
+                    if not df_planos.empty: df_planos['mes_referencia'] = pd.to_datetime(df_planos['mes_referencia']).dt.date
                     conn.close()
+
                     if not df_bens.empty:
                         linhas = []
                         for m_proc in sorted(meses_selecionados):
                             last_day = calendar.monthrange(a_proc, m_proc)[1]
                             dia_final_calculo = hoje_br.day if (a_proc == hoje_br.year and m_proc == hoje_br.month) else last_day
                             data_lancamento_str = f"{dia_final_calculo:02d}/{m_proc:02d}/{a_proc}"
+                            data_ref_plano = date(a_proc, m_proc, 1)
                             
                             registros_calc = []
                             for _, b in df_bens.iterrows():
                                 dt_base = b['data_saldo_inicial'] if pd.notnull(b.get('data_saldo_inicial')) else b['data_compra']
                                 if a_proc < dt_base.year or (a_proc == dt_base.year and m_proc < dt_base.month): continue
                                 
-                                dia_inicial = dt_base.day if (a_proc == dt_base.year and m_proc == dt_base.month) else 1
-                                base_calc = float(b['valor_compra']) # Taxa linear sempre atua sobre o custo original de aquisição
-                                taxa_anual = float(b['taxa_anual_percentual']) / 100.0
+                                cota = 0.0
+                                usou_plano = False
                                 
-                                if metodo_calc == "Mês Comercial (30 Dias)":
-                                    dias_comerciais = 30 - dia_inicial + 1 if dia_inicial > 1 else 30
-                                    cota = (base_calc * taxa_anual / 360.0) * dias_comerciais
-                                else:
-                                    dias_uso = max(0, dia_final_calculo - dia_inicial + 1)
-                                    cota = (base_calc * taxa_anual / 365.0) * dias_uso
+                                # 1. Checa se tem Plano Fixo (Prioridade Máxima)
+                                if not df_planos.empty:
+                                    plano_item = df_planos[(df_planos['bem_id'] == b['id']) & (df_planos['mes_referencia'] == data_ref_plano)]
+                                    if not plano_item.empty:
+                                        cota = float(plano_item.iloc[0]['valor_cota'])
+                                        usou_plano = True
                                 
-                                c_d_use = b.get('conta_despesa') or b.get('conta_contabil_despesa', '')
-                                c_c_use = b.get('conta_dep_acumulada') or b.get('conta_contabil_dep_acumulada', '')
+                                # 2. Se não tem Plano, calcula via Mês Comercial ou Pro Rata
+                                if not usou_plano:
+                                    dia_inicial = dt_base.day if (a_proc == dt_base.year and m_proc == dt_base.month) else 1
+                                    base_calc = float(b['valor_compra'])
+                                    taxa_anual = float(b['taxa_anual_percentual']) / 100.0
+                                    
+                                    if metodo_calc == "Mês Comercial (30 Dias)":
+                                        dias_comerciais = 30 - dia_inicial + 1 if dia_inicial > 1 else 30
+                                        cota = (base_calc * taxa_anual / 360.0) * dias_comerciais
+                                    else:
+                                        dias_uso = max(0, dia_final_calculo - dia_inicial + 1)
+                                        cota = (base_calc * taxa_anual / 365.0) * dias_uso
                                 
-                                registros_calc.append({
-                                    'c_d_use': c_d_use, 'c_c_use': c_c_use, 'data_lanc': data_lancamento_str, 'cota': cota,
-                                    'desc': b['descricao_item'], 'nf': b['numero_nota_fiscal'] or b['id'], 'grupo': b['nome_grupo']
-                                })
+                                if cota > 0:
+                                    c_d_use = b.get('conta_despesa') or b.get('conta_contabil_despesa', '')
+                                    c_c_use = b.get('conta_dep_acumulada') or b.get('conta_contabil_dep_acumulada', '')
+                                    
+                                    registros_calc.append({
+                                        'c_d_use': c_d_use, 'c_c_use': c_c_use, 'data_lanc': data_lancamento_str, 'cota': cota,
+                                        'desc': b['descricao_item'], 'nf': b['numero_nota_fiscal'] or b['id'], 'grupo': b['nome_grupo']
+                                    })
                             
                             if tipo_export == "Sintética (Agrupada por Grupo)":
                                 df_calc = pd.DataFrame(registros_calc)
@@ -601,31 +656,45 @@ def modulo_imobilizado():
 
         conn = get_db_connection()
         df_todos = pd.read_sql(f"SELECT b.*, g.taxa_anual_percentual, g.nome_grupo FROM bens_imobilizado b JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id} AND {filtro_status}", conn)
+        df_planos_inv = pd.read_sql(f"SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = {emp_id}", conn)
+        if not df_planos_inv.empty: df_planos_inv['mes_referencia'] = pd.to_datetime(df_planos_inv['mes_referencia']).dt.date
         conn.close()
 
         if not df_todos.empty:
             dados_visao = []
             for _, rb in df_todos.iterrows():
                 dt_base = rb['data_saldo_inicial'] if pd.notnull(rb.get('data_saldo_inicial')) else rb['data_compra']
-                dt_ref = hoje_br.date() if rb['status'] == 'ativo' else rb['data_baixa']
+                
+                # Prevenção de quebra em itens inativos sem data_baixa consistente
+                if rb['status'] == 'ativo':
+                    dt_ref = hoje_br.date()
+                else:
+                    dt_ref = rb['data_baixa'] if pd.notnull(rb.get('data_baixa')) else dt_base
+                    if isinstance(dt_ref, datetime) or isinstance(dt_ref, pd.Timestamp): dt_ref = dt_ref.date()
+
                 base_calc = float(rb['valor_compra'])
                 taxa_anual = float(rb['taxa_anual_percentual']) / 100.0
-                
-                # A mágica do espelho: aplica o mesmo método de cálculo selecionado na aba anterior
-                if metodo_calc == "Mês Comercial (30 Dias)":
-                    dia_base = min(30, dt_base.day)
-                    dia_ref = min(30, dt_ref.day)
-                    dias_totais = max(0, (dt_ref.year - dt_base.year) * 360 + (dt_ref.month - dt_base.month) * 30 + (dia_ref - dia_base))
-                    dep_acumulada = min(base_calc, (base_calc * taxa_anual / 360.0) * dias_totais)
-                else:
-                    dias_totais = max(0, (dt_ref - dt_base).days)
-                    dep_acumulada = min(base_calc, (base_calc * taxa_anual / 365.0) * dias_totais)
-                
                 saldo_ini = float(rb.get('valor_residual_inicial', 0.0))
-                if pd.notnull(rb.get('data_saldo_inicial')):
-                    valor_residual = max(0.0, saldo_ini - dep_acumulada)
+                dep_acumulada = 0.0
+                
+                # Calcula Depreciação Acumulada
+                plano_do_bem = df_planos_inv[df_planos_inv['bem_id'] == rb['id']] if not df_planos_inv.empty else pd.DataFrame()
+                
+                if not plano_do_bem.empty:
+                    # Usa a soma das parcelas do plano até a data de hoje
+                    dep_acumulada = plano_do_bem[plano_do_bem['mes_referencia'] <= dt_ref]['valor_cota'].sum()
                 else:
-                    valor_residual = max(0.0, base_calc - dep_acumulada)
+                    if metodo_calc == "Mês Comercial (30 Dias)":
+                        dia_base = min(30, dt_base.day)
+                        dia_ref = min(30, dt_ref.day)
+                        dias_totais = max(0, (dt_ref.year - dt_base.year) * 360 + (dt_ref.month - dt_base.month) * 30 + (dia_ref - dia_base))
+                        dep_acumulada = min(base_calc, (base_calc * taxa_anual / 360.0) * dias_totais)
+                    else:
+                        dias_totais = max(0, (dt_ref - dt_base).days)
+                        dep_acumulada = min(base_calc, (base_calc * taxa_anual / 365.0) * dias_totais)
+                
+                if pd.notnull(rb.get('data_saldo_inicial')): valor_residual = max(0.0, saldo_ini - dep_acumulada)
+                else: valor_residual = max(0.0, base_calc - dep_acumulada)
                 
                 dados_visao.append({"Descrição": f"{rb['descricao_item']} {rb['marca_modelo'] or ''}".strip(), "Data Ref.": dt_base.strftime('%d/%m/%Y'), "Valor Base": formatar_moeda(rb['valor_compra']), "Taxa (%)": f"{rb['taxa_anual_percentual']}%", "Valor Residual": formatar_moeda(valor_residual), "Situação": rb['status'].upper()})
             
@@ -642,7 +711,7 @@ def modulo_imobilizado():
                 st.download_button("Baixar Relação PDF", data=pdf.output(dest='S').encode('latin1'), file_name=f"IMOBILIZADO_{emp_id}.pdf")
 
         st.markdown("---")
-        busca = st.text_input("Pesquisar Item Específico para Simulação de Ganho de Capital:")
+        busca = st.text_input("Pesquisar Item Específico para Simulação de Ganho de Capital / Auditoria:")
         if busca:
             df_res = df_todos[(df_todos['descricao_item'].str.contains(busca, case=False, na=False))]
             if not df_res.empty:
@@ -652,20 +721,37 @@ def modulo_imobilizado():
                     taxa_anual = float(rb['taxa_anual_percentual']) / 100.0
                     saldo_ini = float(rb.get('valor_residual_inicial', 0.0))
                     
-                    with st.expander(f"{rb['descricao_item']} - {rb['marca_modelo'] or ''}"):
+                    with st.expander(f"Auditoria/Simulação: {rb['descricao_item']} - {rb['marca_modelo'] or ''}"):
+                        plano_do_bem = df_planos_inv[df_planos_inv['bem_id'] == rb['id']] if not df_planos_inv.empty else pd.DataFrame()
+                        
+                        if not plano_do_bem.empty:
+                            st.markdown("###### Plano de Depreciação Ativo (Continuidade)")
+                            plano_do_bem['Mês'] = pd.to_datetime(plano_do_bem['mes_referencia']).dt.strftime('%m/%Y')
+                            plano_do_bem['Cota (R$)'] = plano_do_bem['valor_cota'].apply(formatar_moeda)
+                            st.dataframe(plano_do_bem[['Mês', 'Cota (R$)', 'status_contabil']], use_container_width=True, hide_index=True)
+
                         dt_simulada = st.date_input("Data para Simulação/Venda", value=hoje_br, key=f"sim_date_{rb['id']}")
+                        
+                        if pd.notnull(rb.get('data_baixa')):
+                            dbx = rb['data_baixa'].date() if isinstance(rb['data_baixa'], datetime) else rb['data_baixa']
+                            if dt_simulada > dbx: st.warning(f"O bem já foi baixado em {dbx.strftime('%d/%m/%Y')}.")
+                        
                         if dt_simulada < dt_base: st.error("Data de simulação não pode ser anterior à data base.")
                         else:
-                            if metodo_calc == "Mês Comercial (30 Dias)":
-                                dia_base = min(30, dt_base.day)
-                                dia_sim = min(30, dt_simulada.day)
-                                dias_simulados = max(0, (dt_simulada.year - dt_base.year) * 360 + (dt_simulada.month - dt_base.month) * 30 + (dia_sim - dia_base))
-                                dep_simulada = min(base_calc, (base_calc * taxa_anual / 360.0) * dias_simulados)
-                                texto_metodo = "Mês Comercial - 30 Dias"
+                            if not plano_do_bem.empty:
+                                dep_simulada = plano_do_bem[plano_do_bem['mes_referencia'] <= dt_simulada]['valor_cota'].sum()
+                                texto_metodo = "Plano Fixo (Continuidade)"
                             else:
-                                dias_simulados = max(0, (dt_simulada - dt_base).days)
-                                dep_simulada = min(base_calc, (base_calc * taxa_anual / 365.0) * dias_simulados)
-                                texto_metodo = "Pro Rata Die"
+                                if metodo_calc == "Mês Comercial (30 Dias)":
+                                    dia_base = min(30, dt_base.day)
+                                    dia_sim = min(30, dt_simulada.day)
+                                    dias_simulados = max(0, (dt_simulada.year - dt_base.year) * 360 + (dt_simulada.month - dt_base.month) * 30 + (dia_sim - dia_base))
+                                    dep_simulada = min(base_calc, (base_calc * taxa_anual / 360.0) * dias_simulados)
+                                    texto_metodo = "Mês Comercial - 30 Dias"
+                                else:
+                                    dias_simulados = max(0, (dt_simulada - dt_base).days)
+                                    dep_simulada = min(base_calc, (base_calc * taxa_anual / 365.0) * dias_simulados)
+                                    texto_metodo = "Pro Rata Die"
 
                             if pd.notnull(rb.get('data_saldo_inicial')): valor_res_simulado = max(0.0, saldo_ini - dep_simulada)
                             else: valor_res_simulado = max(0.0, base_calc - dep_simulada)
@@ -677,7 +763,7 @@ def modulo_imobilizado():
                             pdf.ln(5); pdf.set_font("Arial", 'B', 12); pdf.cell(0, 8, "PROJECAO DE VENDA / GANHO DE CAPITAL", ln=True)
                             pdf.set_font("Arial", '', 10)
                             pdf.cell(0, 6, f"Data da Projecao: {dt_simulada.strftime('%d/%m/%Y')}", ln=True)
-                            pdf.cell(0, 6, f"Depreciacao Acumulada Projetada ({texto_metodo} - {dias_simulados} dias): {formatar_moeda(dep_simulada)}", ln=True)
+                            pdf.cell(0, 6, f"Depreciacao Acumulada Projetada ({texto_metodo}): {formatar_moeda(dep_simulada)}", ln=True)
                             pdf.set_font("Arial", 'B', 11); pdf.cell(0, 8, f"VALOR RESIDUAL (CUSTO DO BEM): {formatar_moeda(valor_res_simulado)}", ln=True)
                             st.download_button("Gerar Ficha de Projeção (PDF)", data=pdf.output(dest='S').encode('latin1'), file_name=f"FICHA_{rb['id']}.pdf", key=f"btn_ficha_{rb['id']}")
 
@@ -713,7 +799,8 @@ def modulo_imobilizado():
                     lista_regras = ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"]
                     m_regra = st.selectbox("Regra de Crédito PIS/COFINS", lista_regras, index=lista_regras.index(bem_row['regra_credito']) if bem_row['regra_credito'] in lista_regras else 0)
                     
-                    st.markdown("##### Saldo de Implantação")
+                    st.markdown("##### Saldo de Implantação e Histórico")
+                    st.info("Atenção: A alteração manual destes campos afeta o cálculo retroativo. Para bens em 'Continuidade', o plano não é recriado automaticamente.")
                     c_m9, c_m10 = st.columns(2)
                     m_dtsi = c_m9.date_input("Data Saldo Inicial", value=bem_row['data_saldo_inicial'] if pd.notnull(bem_row.get('data_saldo_inicial')) else None)
                     m_vri = c_m10.number_input("Valor Residual Inicial (R$)", value=float(bem_row.get('valor_residual_inicial', 0.0)), min_value=0.0, step=100.0)
@@ -721,7 +808,6 @@ def modulo_imobilizado():
                     st.markdown("##### Transferência / Status")
                     c_m11, c_m12 = st.columns(2)
                     
-                    # Identifica o índice da empresa atual para pré-selecionar no dropdown
                     todas_empresas = df_emp.apply(lambda r: f"{r['nome']} - {r['apelido_unidade'] or r['tipo']}", axis=1).tolist()
                     empresa_atual_str = df_emp[df_emp['id'] == emp_id].apply(lambda r: f"{r['nome']} - {r['apelido_unidade'] or r['tipo']}", axis=1).iloc[0]
                     idx_emp = todas_empresas.index(empresa_atual_str) if empresa_atual_str in todas_empresas else 0
@@ -735,9 +821,9 @@ def modulo_imobilizado():
                     if st.form_submit_button("Atualizar Bem", type="primary"):
                         conn_m = get_db_connection(); cursor_m = conn_m.cursor()
                         try:
-                            # Prepara nulos para o banco se a data inicial estiver vazia
                             val_dtsi = m_dtsi if m_dtsi is not None else None
                             cursor_m.execute("""UPDATE bens_imobilizado SET descricao_item=%s, marca_modelo=%s, num_serie_placa=%s, plaqueta=%s, localizacao=%s, numero_nota_fiscal=%s, nome_fornecedor=%s, valor_compra=%s, data_compra=%s, regra_credito=%s, data_saldo_inicial=%s, valor_residual_inicial=%s, tenant_id=%s, status=%s WHERE id=%s""", (m_desc, m_marca, m_serie, m_plaq, m_loc, m_nf, m_forn, float(m_vaq), m_dtc, m_regra, val_dtsi, float(m_vri), novo_emp_id, m_status, bem_id))
+                            if m_status != 'ativo': cursor_m.execute("UPDATE bens_imobilizado SET data_baixa = CURDATE() WHERE id=%s AND data_baixa IS NULL", (bem_id,))
                             conn_m.commit(); st.success("Bem atualizado com sucesso!"); st.rerun()
                         except Exception as e:
                             conn_m.rollback(); st.error(f"Erro ao atualizar: {e}")
@@ -924,7 +1010,6 @@ def modulo_usuarios():
     conn = get_db_connection()
     df_users = pd.read_sql("SELECT id, nome, username, nivel_acesso, status_usuario, data_criacao FROM usuarios ORDER BY nome ASC", conn)
     
-    # Busca as empresas para permitir o vínculo no momento da criação
     df_empresas = pd.read_sql("SELECT id, nome FROM empresas WHERE status_assinatura = 'ATIVO'", conn)
     
     tab_lista, tab_novo = st.tabs(["Utilizadores Registados", "Adicionar Utilizador"])
@@ -948,20 +1033,15 @@ def modulo_usuarios():
                         cursor.execute("UPDATE usuarios SET status_usuario = 'ATIVO' WHERE username = %s", (usr_sel,))
                         st.toast(f"Acesso reativado para {usr_sel}.")
                     elif nova_acao == "Redefinir Palavra-passe":
-                        if len(nova_senha) < 6:
-                            st.error("A senha deve ter pelo menos 6 caracteres.")
+                        if len(nova_senha) < 6: st.error("A senha deve ter pelo menos 6 caracteres.")
                         else:
                             cursor.execute("UPDATE usuarios SET senha_hash = %s WHERE username = %s", (gerar_hash_senha(nova_senha), usr_sel))
                             st.toast("Palavra-passe atualizada com sucesso!")
                     conn.commit()
-                except Exception as e:
-                    conn.rollback()
-                    st.error(f"Erro no banco: {e}")
+                except Exception as e: conn.rollback(); st.error(f"Erro no banco: {e}")
                 finally:
                     conn.close() 
-                    import time
-                    time.sleep(1.2) 
-                    st.rerun()
+                    import time; time.sleep(1.2); st.rerun()
                     
     with tab_novo:
         with st.form("form_novo_usuario"):
@@ -977,35 +1057,22 @@ def modulo_usuarios():
             emp_vinculada = st.selectbox("Vincular a uma Unidade/Empresa", lista_empresas)
             
             if st.form_submit_button("Criar Utilizador"):
-                if not novo_nome or not novo_user or len(nova_pass) < 6:
-                    st.error("Preencha todos os campos corretamente (senha mín. 6 caracteres).")
-                elif novo_user in df_users['username'].tolist():
-                    st.error("Este utilizador já existe.")
+                if not novo_nome or not novo_user or len(nova_pass) < 6: st.error("Preencha todos os campos corretamente (senha mín. 6 caracteres).")
+                elif novo_user in df_users['username'].tolist(): st.error("Este utilizador já existe.")
                 else:
                     cursor = conn.cursor()
                     try:
                         empresa_id_db = None
-                        if emp_vinculada != "Nenhuma (Acesso Global)":
-                            empresa_id_db = int(df_empresas[df_empresas['nome'] == emp_vinculada].iloc[0]['id'])
-
-                        query = """
-                            INSERT INTO usuarios (nome, username, senha_hash, nivel_acesso, status_usuario, data_criacao, empresa_id)
-                            VALUES (%s, %s, %s, %s, 'ATIVO', NOW(), %s)
-                        """
+                        if emp_vinculada != "Nenhuma (Acesso Global)": empresa_id_db = int(df_empresas[df_empresas['nome'] == emp_vinculada].iloc[0]['id'])
+                        query = """INSERT INTO usuarios (nome, username, senha_hash, nivel_acesso, status_usuario, data_criacao, empresa_id) VALUES (%s, %s, %s, %s, 'ATIVO', NOW(), %s)"""
                         cursor.execute(query, (novo_nome, novo_user, gerar_hash_senha(nova_pass), nivel, empresa_id_db))
-                        conn.commit()
-                        st.toast("Utilizador criado com sucesso!", icon="✅")
-                    except Exception as e:
-                        conn.rollback()
-                        st.error(f"Erro ao inserir no banco: {e}")
+                        conn.commit(); st.toast("Utilizador criado com sucesso!", icon="✅")
+                    except Exception as e: conn.rollback(); st.error(f"Erro ao inserir no banco: {e}")
                     finally:
                         conn.close() 
-                        import time
-                        time.sleep(1.2)
-                        st.rerun()
+                        import time; time.sleep(1.2); st.rerun()
                         
-    if conn.is_connected():
-        conn.close()
+    if conn.is_connected(): conn.close()
 
 # --- 10. MENU LATERAL ---
 with st.sidebar:
