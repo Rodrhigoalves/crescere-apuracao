@@ -530,7 +530,7 @@ def modulo_imobilizado():
                     regra_cred = c_r1.selectbox("Regra de Crédito PIS/COFINS", ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"])
                     taxa_custom = c_r2.number_input("Taxa Customizada (% - Opcional)", min_value=0.0, value=0.0, step=1.0, help="Se preenchido, ignora a taxa do grupo.")
 
-                    confirmacao_cad = True # Default para os cenários 1 e 2
+                    confirmacao_cad = True
                     
                     if "1" not in cenario:
                         st.markdown("---")
@@ -550,17 +550,26 @@ def modulo_imobilizado():
                             
                             if cota_sugerida > 0 and v_residual_atual > 0:
                                 st.markdown("##### Grade de Conferência")
-                                primeira_cota_manual = st.number_input("Ajuste da 1ª Parcela (Opcional - R$)", min_value=0.0, max_value=float(v_residual_atual), value=float(cota_sugerida), step=10.0, help="Se o primeiro mês for quebrado ou precisar de ajuste, informe aqui.")
+                                
+                                # Lógica Pro-Rata Automática
+                                ultimo_dia_mes = calendar.monthrange(dt_saldo.year, dt_saldo.month)[1]
+                                if dt_saldo.day < ultimo_dia_mes:
+                                    dias_restantes = ultimo_dia_mes - dt_saldo.day
+                                    primeira_cota_calc = round((cota_sugerida / ultimo_dia_mes) * dias_restantes, 2)
+                                    mes_inicio_plan = dt_saldo.month
+                                    ano_inicio_plan = dt_saldo.year
+                                else:
+                                    primeira_cota_calc = cota_sugerida
+                                    mes_inicio_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
+                                    ano_inicio_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
+                                
+                                primeira_cota_manual = st.number_input("Ajuste da 1ª Parcela (Opcional - R$)", min_value=0.0, max_value=float(v_residual_atual), value=float(primeira_cota_calc), step=10.0, key="cota_cad_manual", help="Calculado automaticamente via pro-rata ou cota cheia. Ajuste se necessário.")
                                 
                                 with st.expander("👀 Ver Prévia Dinâmica do Plano de Voo", expanded=True):
                                     preview_data = []
                                     s_rest = v_residual_atual
+                                    d_plan = date(ano_inicio_plan, mes_inicio_plan, 1)
                                     
-                                    m_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
-                                    a_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
-                                    d_plan = date(a_plan, m_plan, 1)
-                                    
-                                    # Processa Mês 1 com o valor customizado (ou o padrão se não for alterado)
                                     c_at_1 = min(s_rest, float(primeira_cota_manual))
                                     if c_at_1 > 0:
                                         preview_data.append({"Mês": d_plan.strftime('%m/%Y'), "Cota Projetada": formatar_moeda(c_at_1), "Saldo Restante": formatar_moeda(s_rest - c_at_1)})
@@ -569,7 +578,6 @@ def modulo_imobilizado():
                                         a_plan = d_plan.year if d_plan.month < 12 else d_plan.year + 1
                                         d_plan = date(a_plan, m_plan, 1)
                                     
-                                    # Processa os próximos 11 meses para amostragem
                                     while s_rest > 0.009 and len(preview_data) < 12:
                                         c_at = min(s_rest, float(cota_sugerida))
                                         preview_data.append({"Mês": d_plan.strftime('%m/%Y'), "Cota Projetada": formatar_moeda(c_at), "Saldo Restante": formatar_moeda(s_rest - c_at)})
@@ -611,10 +619,15 @@ def modulo_imobilizado():
 
                                 if "3" in cenario and cota_sugerida > 0 and v_s_db > 0:
                                     saldo_restante = v_s_db
-                                    ano_plan = dt_saldo.year
-                                    mes_plan = dt_saldo.month
-                                    if mes_plan == 12: mes_plan = 1; ano_plan += 1
-                                    else: mes_plan += 1
+                                    
+                                    ultimo_dia_mes_db = calendar.monthrange(dt_saldo.year, dt_saldo.month)[1]
+                                    if dt_saldo.day < ultimo_dia_mes_db:
+                                        mes_plan = dt_saldo.month
+                                        ano_plan = dt_saldo.year
+                                    else:
+                                        mes_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
+                                        ano_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
+                                        
                                     data_plan = date(ano_plan, mes_plan, 1)
 
                                     is_first_month = True
@@ -878,7 +891,6 @@ def modulo_imobilizado():
             if df_todos_manut.empty:
                 st.info("Nenhum bem cadastrado ou transferido para esta unidade.")
             else:
-                # --- LÓGICA DE ORDENAÇÃO E CHECKMARK ---
                 lista_formatada_itens = []
                 for _, r in df_todos_manut.iterrows():
                     desc = limpar_texto(r['descricao_item'])
@@ -886,7 +898,6 @@ def modulo_imobilizado():
                     grp = limpar_texto(r.get('nome_grupo'))
                     aviso = "" if grp else " ⚠️ (GRUPO INVÁLIDO)"
                     
-                    # Identifica se já foi processado/reclassificado no Crescere
                     is_reclass = r['id'] in bens_com_plano or pd.notnull(r.get('data_saldo_inicial'))
                     prefix = "✓ " if is_reclass else ""
                     
@@ -897,7 +908,6 @@ def modulo_imobilizado():
                         'is_reclass': 1 if is_reclass else 0
                     })
                 
-                # Ordena: 0 (Não revisado) primeiro, 1 (Revisado com ✓) vai pro final. Depois desempata por nome.
                 lista_formatada_itens.sort(key=lambda x: (x['is_reclass'], x['display']))
                 opcoes_selectbox = [x['display'] for x in lista_formatada_itens]
 
@@ -957,7 +967,7 @@ def modulo_imobilizado():
                         "3. Continuidade (Memória de Cálculo - Cota Fixa Histórica)"
                     ], index=idx_cenario_atual, key="cenario_manut")
 
-                    confirmacao_manut = True # Default
+                    confirmacao_manut = True
                     
                     if "1" not in cenario_manut:
                         c_m9, c_m10 = st.columns(2)
@@ -979,15 +989,25 @@ def modulo_imobilizado():
                             
                             if cota_sugerida_m > 0 and m_vri_calculado > 0:
                                 st.markdown("##### Grade de Conferência")
-                                primeira_cota_manual_m = st.number_input("Ajuste da 1ª Parcela (Opcional - R$)", min_value=0.0, max_value=float(m_vri_calculado), value=float(cota_sugerida_m), step=10.0, key="cota_manut")
+                                
+                                # Lógica Pro-Rata Automática
+                                ultimo_dia_mes_m = calendar.monthrange(m_dtsi.year, m_dtsi.month)[1]
+                                if m_dtsi.day < ultimo_dia_mes_m:
+                                    dias_restantes_m = ultimo_dia_mes_m - m_dtsi.day
+                                    primeira_cota_calc_m = round((cota_sugerida_m / ultimo_dia_mes_m) * dias_restantes_m, 2)
+                                    mes_inicio_plan_m = m_dtsi.month
+                                    ano_inicio_plan_m = m_dtsi.year
+                                else:
+                                    primeira_cota_calc_m = cota_sugerida_m
+                                    mes_inicio_plan_m = m_dtsi.month + 1 if m_dtsi.month < 12 else 1
+                                    ano_inicio_plan_m = m_dtsi.year if m_dtsi.month < 12 else m_dtsi.year + 1
+
+                                primeira_cota_manual_m = st.number_input("Ajuste da 1ª Parcela (Opcional - R$)", min_value=0.0, max_value=float(m_vri_calculado), value=float(primeira_cota_calc_m), step=10.0, key=f"cota_manut_{bem_id}")
                                 
                                 with st.expander("👀 Ver Prévia Dinâmica do Plano de Voo", expanded=True):
                                     preview_data_m = []
                                     s_rest_m = m_vri_calculado
-                                    
-                                    m_plan_m = m_dtsi.month + 1 if m_dtsi.month < 12 else 1
-                                    a_plan_m = m_dtsi.year if m_dtsi.month < 12 else m_dtsi.year + 1
-                                    d_plan_m = date(a_plan_m, m_plan_m, 1)
+                                    d_plan_m = date(ano_inicio_plan_m, mes_inicio_plan_m, 1)
                                     
                                     c_at_1_m = min(s_rest_m, float(primeira_cota_manual_m))
                                     if c_at_1_m > 0:
@@ -1052,10 +1072,14 @@ def modulo_imobilizado():
                                     cursor_m.execute("DELETE FROM plano_depreciacao_itens WHERE bem_id = %s AND status_contabil = 'PENDENTE'", (bem_id,))
                                     
                                     saldo_restante = float(m_vri_calculado)
-                                    ano_plan = val_dtsi.year
-                                    mes_plan = val_dtsi.month
-                                    if mes_plan == 12: mes_plan = 1; ano_plan += 1
-                                    else: mes_plan += 1
+                                    ultimo_dia_db = calendar.monthrange(val_dtsi.year, val_dtsi.month)[1]
+                                    if val_dtsi.day < ultimo_dia_db:
+                                        mes_plan = val_dtsi.month
+                                        ano_plan = val_dtsi.year
+                                    else:
+                                        mes_plan = val_dtsi.month + 1 if val_dtsi.month < 12 else 1
+                                        ano_plan = val_dtsi.year if val_dtsi.month < 12 else val_dtsi.year + 1
+                                        
                                     data_plan = date(ano_plan, mes_plan, 1)
 
                                     is_first_m = True
