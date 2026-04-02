@@ -898,7 +898,7 @@ def modulo_imobilizado():
                     st.markdown("##### Regras Específicas")
                     c_r3, c_r4 = st.columns(2)
                     lista_regras = ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"]
-                    m_regra = c_r3.selectbox("Regra de Crédito PIS/COFINS", lista_regras, index=lista_regras.index(bem_row['regra_credito']) if bem_row['regra_credito'] in lista_regras else 0)
+                    m_regra = c_r3.selectbox("Regra de Crédito PIS/COFINS", lista_regras, index=lista_regras.index(bem_row['regra_credito']) if bem_row['regra_credito'] in lista_regras else 0, key="m_regra_credito_manutencao")
                     m_taxa_cust = c_r4.number_input("Taxa Customizada (% - Opcional) ", value=float(bem_row.get('taxa_customizada', 0.0) or 0.0), min_value=0.0, step=1.0)
                     
                     st.markdown("---")
