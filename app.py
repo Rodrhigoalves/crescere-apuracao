@@ -507,7 +507,6 @@ def modulo_imobilizado():
                     "3. Continuidade (Memória de Cálculo - Cota Fixa Histórica)"
                 ], key="cenario_cad")
                 
-                # Removido o st.form para permitir cálculos dinâmicos de sugestão de parcelas
                 with st.container(border=True):
                     g_sel = st.selectbox("Grupo / Espécie", df_g['nome_grupo'].tolist())
                     g_row = df_g[df_g['nome_grupo'] == g_sel].iloc[0]
@@ -536,21 +535,18 @@ def modulo_imobilizado():
                         st.markdown("##### Saldo de Implantação / Histórico Contábil")
                         c_si, c_da = st.columns(2)
                         dt_saldo = c_si.date_input("Data Base do Balancete (Última Posição)")
-                        # Em vez de Valor Residual, pedimos a Depreciação Acumulada para facilitar
                         v_dep_acumulada = c_da.number_input("Depreciação Acumulada Anterior (R$)", min_value=0.0, max_value=float(v_aq) if float(v_aq)>0 else 10000000.0, value=0.0, step=100.0)
                         
                         v_residual_atual = max(0.0, float(v_aq) - float(v_dep_acumulada))
                         st.markdown(f"<small>Valor Residual Atual (Custo - Acumulada): <b>{formatar_moeda(v_residual_atual)}</b></small>", unsafe_allow_html=True)
 
                         if "3" in cenario:
-                            st.info("O sistema calculou a Cota Padrão sugerida com base no valor de aquisição e alíquota. Ajuste se necessário.")
-                            
                             taxa_usada = float(taxa_custom) if taxa_custom > 0 else float(g_row['taxa_anual_percentual'])
                             cota_sugerida = round((float(v_aq) * (taxa_usada / 100.0)) / 12.0, 2)
                             
-                            v_cota_fixa = st.number_input("Valor da Parcela Mensal Padrão (R$)", min_value=0.0, value=float(cota_sugerida), step=10.0)
+                            st.info(f"Cota Mensal Padrão projetada: **{formatar_moeda(cota_sugerida)}** (Com base no Custo e na Taxa de {taxa_usada}%)")
+                            v_cota_fixa = float(cota_sugerida)
                             
-                            # Prévia Dinâmica do Plano de Voo
                             if v_cota_fixa > 0 and v_residual_atual > 0:
                                 with st.expander("👀 Ver Prévia do Plano de Voo Gerado", expanded=True):
                                     preview_data = []
@@ -570,7 +566,7 @@ def modulo_imobilizado():
                                     
                                     if preview_data:
                                         st.dataframe(pd.DataFrame(preview_data), hide_index=True, use_container_width=True)
-                                        if s_rest > 0.009: st.markdown(f"<small style='color:gray;'>*... e assim sucessivamente por mais meses até zerar o saldo.*</small>", unsafe_allow_html=True)
+                                        if s_rest > 0.009: st.markdown(f"<small style='color:gray;'>*... e assim sucessivamente por mais meses até zerar o saldo de {formatar_moeda(v_residual_atual)}.*</small>", unsafe_allow_html=True)
                         else: v_cota_fixa = 0.0
                     else:
                         dt_saldo = None; v_dep_acumulada = 0.0; v_cota_fixa = 0.0; v_residual_atual = 0.0
@@ -580,7 +576,7 @@ def modulo_imobilizado():
                         if not desc or v_aq <= 0: st.error("Descrição e Valor de Aquisição são obrigatórios e devem ser maiores que zero.")
                         elif dt_c > hoje_br.date(): st.error("A Data de Compra não pode ser no futuro.")
                         elif ("1" not in cenario) and v_residual_atual <= 0: st.error("O Valor Residual calculado zerou ou é negativo. Verifique a Depreciação Acumulada.")
-                        elif "3" in cenario and v_cota_fixa <= 0: st.error("No cenário de Continuidade, o valor da cota é obrigatório.")
+                        elif "3" in cenario and v_cota_fixa <= 0: st.error("No cenário de Continuidade, a cota de projeção não pode ser zero. Verifique a Alíquota ou Taxa.")
                         else:
                             conn = get_db_connection(); cursor = conn.cursor()
                             try:
@@ -690,7 +686,12 @@ def modulo_imobilizado():
                                         linhas.append(criar_linha_erp(r['c_d_use'], r['c_c_use'], r['data_lanc'], r['cota'], "", f"DEPRECIACAO ACUMULADA - {str(r['grupo']).upper()} NO MES", ""))
                             else:
                                 for r in registros_calc:
-                                    linhas.append(criar_linha_erp(r['c_d_use'], r['c_c_use'], r['data_lanc'], r['cota'], "", f"DEPRECIACAO REF {m_proc:02d}/{a_proc} - {r['desc']}", r['nf']))
+                                    if metodo_calc == "Mês Comercial (30 Dias)":
+                                        hist_txt_export = f"Vr. ref. depreciação no mês {m_proc:02d}/{a_proc}"
+                                    else:
+                                        hist_txt_export = f"Vr. ref. depreciação no mês {m_proc:02d}/{a_proc} - {r['desc']}"
+                                    
+                                    linhas.append(criar_linha_erp(r['c_d_use'], r['c_c_use'], r['data_lanc'], r['cota'], "", hist_txt_export, r['nf']))
                         
                         df_xlsx = pd.DataFrame(linhas)
                         buffer = io.BytesIO()
@@ -861,7 +862,6 @@ def modulo_imobilizado():
                 bem_id = int(bem_sel.split("]")[0].replace("[", ""))
                 bem_row = df_todos_manut[df_todos_manut['id'] == bem_id].iloc[0]
                 
-                # Removido st.form para ter dinâmica de atualização de saldo igual ao Cadastro
                 with st.container(border=True):
                     st.markdown("##### Dados do Bem")
                     
@@ -929,12 +929,10 @@ def modulo_imobilizado():
                         m_vri_calculado = max(0.0, float(m_vaq) - float(m_dep_ac))
                         
                         if "3" in cenario_manut:
-                            st.info("Atenção: Salvar este item como Continuidade apagará o Plano de Voo antigo e criará um novo.")
-                            
+                            st.info("Atenção: Salvar este item como Continuidade apagará o Plano de Voo antigo e criará um novo com as informações atualizadas.")
                             taxa_usada_m = float(m_taxa_cust) if m_taxa_cust > 0 else float(df_grupos_locais[df_grupos_locais['id']==m_grupo_id]['taxa_anual_percentual'].iloc[0]) if not df_grupos_locais.empty else 10.0
                             cota_sugerida_m = round((float(m_vaq) * (taxa_usada_m / 100.0)) / 12.0, 2)
-                            
-                            m_cota_fixa = st.number_input("Valor da Parcela Mensal Padrão (R$)", value=float(cota_sugerida_m), min_value=0.0, step=10.0)
+                            m_cota_fixa = float(cota_sugerida_m)
                         else: m_cota_fixa = 0.0
                     else:
                         m_dtsi = None; m_vri_calculado = 0.0; m_cota_fixa = 0.0
@@ -956,7 +954,7 @@ def modulo_imobilizado():
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.button("Atualizar Bem", type="primary", use_container_width=True):
                         if ("1" not in cenario_manut) and m_vri_calculado <= 0: st.error("Você marcou um cenário com saldo. A Depreciação Acumulada zerou o bem.")
-                        elif "3" in cenario_manut and m_cota_fixa <= 0: st.error("No cenário de Continuidade, a Cota Histórica é obrigatória.")
+                        elif "3" in cenario_manut and m_cota_fixa <= 0: st.error("Erro na base de cálculo. O Valor de Aquisição e a Taxa devem ser maiores que zero.")
                         else:
                             conn_m = get_db_connection(); cursor_m = conn_m.cursor()
                             try:
