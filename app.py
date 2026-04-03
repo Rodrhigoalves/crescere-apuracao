@@ -52,7 +52,7 @@ class RelatorioCrescerePDF(FPDF):
         self.cell(0, 8, titulo_relatorio, ln=True, align='C')
         if periodo:
             self.set_font("Arial", '', 10)
-            self.cell(0, 6, f"Periodo de Analise: {periodo}", ln=True, align='C')
+            self.cell(0, 6, periodo, ln=True, align='C')
         self.set_font("Arial", '', 9)
         fuso_br = timezone(timedelta(hours=-3))
         self.cell(0, 6, f"Gerado em: {datetime.now(fuso_br).strftime('%d/%m/%Y')}", ln=True, align='C')
@@ -414,7 +414,7 @@ def modulo_relatorios():
             
             # --- GERAÇÃO DO PDF ---
             pdf = RelatorioCrescerePDF()
-            pdf.add_page(); pdf.add_cabecalho(nome_relatorio_pdf, emp_row['cnpj'], "*** DEMONSTRATIVO DE APURACAO - PIS E COFINS ***", competencia)
+            pdf.add_page(); pdf.add_cabecalho(nome_relatorio_pdf, emp_row['cnpj'], "*** DEMONSTRATIVO DE APURACAO - PIS E COFINS ***", f"Competencia: {competencia}")
             deb_pis = deb_cof = cred_pis = cred_cof = ret_pis = ret_cof = ext_pis = ext_cof = 0
             
             pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "1. BASE DE CALCULO DAS RECEITAS (DEBITOS)", ln=True); pdf.set_font("Arial", 'B', 9); pdf.cell(90, 6, "Operacao", 1); pdf.cell(35, 6, "Base", 1); pdf.cell(30, 6, "PIS", 1); pdf.cell(35, 6, "COFINS", 1, ln=True); pdf.set_font("Arial", '', 9)
@@ -480,648 +480,227 @@ def modulo_imobilizado():
     df_emp = carregar_empresas_ativas()
     if st.session_state.nivel_acesso != "SUPER_ADMIN" and st.session_state.empresa_id: df_emp = df_emp[df_emp['id'] == st.session_state.empresa_id]
     
-    c_emp, c_vazio = st.columns([2, 1])
-    emp_sel = c_emp.selectbox("Unidade", df_emp.apply(formatar_nome_empresa, axis=1), key="imo_emp")
+    emp_sel = st.selectbox("Unidade", df_emp.apply(formatar_nome_empresa, axis=1), key="imo_emp")
     emp_id = int(df_emp.loc[df_emp.apply(formatar_nome_empresa, axis=1) == emp_sel].iloc[0]['id'])
     row_emp_ativa = df_emp[df_emp['id'] == emp_id].iloc[0]
 
     st.divider()
-    
     abas = ["Cadastro e Processamento", "Inventário Dinâmico"]
     if st.session_state.nivel_acesso in ["SUPER_ADMIN", "ADMIN"]: abas.append("Manutenção de Ativos (Admin)")
-    
     tabs = st.tabs(abas)
 
     conn = get_db_connection()
     df_g = pd.read_sql(f"SELECT * FROM grupos_imobilizado WHERE tenant_id = {emp_id}", conn)
     conn.close()
 
-    # --- FUNÇÃO DE FRAGMENTO (MANUTENÇÃO) ---
     if len(tabs) > 2:
         @st.fragment
         def fragmento_manutencao(emp_id_param):
-            st.markdown("#### Manutenção de Ativos (Edição/Transferência/Exclusão)")
+            st.markdown("#### Manutenção de Ativos")
             conn_f = get_db_connection()
             df_todos_manut = pd.read_sql(f"SELECT b.*, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id_param}", conn_f)
             df_grupos_locais = pd.read_sql(f"SELECT * FROM grupos_imobilizado WHERE tenant_id = {emp_id_param}", conn_f)
-            df_plano_existe = pd.read_sql(f"SELECT DISTINCT bem_id FROM plano_depreciacao_itens", conn_f)
             conn_f.close()
             
-            bens_com_plano = df_plano_existe['bem_id'].tolist() if not df_plano_existe.empty else []
-            
-            if df_todos_manut.empty:
-                st.info("Nenhum bem cadastrado ou transferido para esta unidade.")
+            if df_todos_manut.empty: st.info("Nenhum bem cadastrado.")
             else:
-                lista_formatada_itens = []
-                for _, r in df_todos_manut.iterrows():
-                    desc = limpar_texto(r['descricao_item'])
-                    marca = limpar_texto(r.get('marca_modelo', ''))
-                    grp = limpar_texto(r.get('nome_grupo'))
-                    aviso = "" if grp else " ⚠️ (GRUPO INVÁLIDO)"
-                    
-                    is_reclass = r['id'] in bens_com_plano or pd.notnull(r.get('data_saldo_inicial'))
-                    prefix = "✓ " if is_reclass else ""
-                    
-                    # --- FILTRO INTELIGENTE / BUSCA MULTIFUNCIONAL ---
-                    nf_str = f" | NF: {r['numero_nota_fiscal']}" if pd.notnull(r.get('numero_nota_fiscal')) and str(r.get('numero_nota_fiscal')).strip() else ""
-                    plaq_str = f" | Plq: {r['plaqueta']}" if pd.notnull(r.get('plaqueta')) and str(r.get('plaqueta')).strip() else ""
-                    val_str = f" | {formatar_moeda(r['valor_compra'])}" if pd.notnull(r.get('valor_compra')) else ""
-                    
-                    nome_display = f"{prefix}[{r['id']}] {desc} {marca}{nf_str}{plaq_str}{val_str} ({r['status'].upper()}){aviso}"
-                    lista_formatada_itens.append({'id': r['id'], 'display': nome_display, 'is_reclass': 1 if is_reclass else 0})
-                
-                lista_formatada_itens.sort(key=lambda x: (x['is_reclass'], x['display']))
-                opcoes_selectbox = [x['display'] for x in lista_formatada_itens]
-
-                bem_sel = st.selectbox("Busque o Bem (Digite o Nome, Nota Fiscal, Plaqueta ou Valor)", opcoes_selectbox, key="select_manutencao_bem")
-                bem_id = int(bem_sel.split("]")[0].replace("[", "").replace("✓ ", ""))
+                lista_formatada = [f"[{r['id']}] {limpar_texto(r['descricao_item'])} | R$ {r['valor_compra']} ({r['status'].upper()})" for _, r in df_todos_manut.iterrows()]
+                bem_sel = st.selectbox("Busque o Bem:", lista_formatada, key="select_manutencao_bem")
+                bem_id = int(bem_sel.split("]")[0].replace("[", ""))
                 bem_row = df_todos_manut[df_todos_manut['id'] == bem_id].iloc[0]
                 
                 with st.container(border=True):
                     col_fisico, col_estrategia = st.columns([1, 1], gap="large")
-                    
                     with col_fisico:
-                        st.markdown("##### Dados Físicos e Base")
-                        if df_grupos_locais.empty:
-                            st.warning("⚠️ Crie um Grupo em Parâmetros Contábeis primeiro.")
-                            m_grupo_id = bem_row['grupo_id']
-                        else:
-                            lista_grupos_locais = df_grupos_locais['nome_grupo'].tolist()
-                            nome_grupo_atual = limpar_texto(bem_row.get('nome_grupo'))
-                            idx_grp = lista_grupos_locais.index(nome_grupo_atual) if nome_grupo_atual in lista_grupos_locais else 0
-                            if nome_grupo_atual not in lista_grupos_locais:
-                                st.error("⚠️ Este bem foi transferido e está órfão. Selecione um Grupo Local:")
-                            m_grupo_nome = st.selectbox("Vincular ao Grupo Local", lista_grupos_locais, index=idx_grp, key=f"grp_m_{bem_id}")
-                            m_grupo_id = int(df_grupos_locais[df_grupos_locais['nome_grupo'] == m_grupo_nome].iloc[0]['id'])
-                        
+                        m_grupo_nome = st.selectbox("Grupo", df_grupos_locais['nome_grupo'].tolist() if not df_grupos_locais.empty else ["Nenhum"], key=f"grp_m_{bem_id}")
+                        m_grupo_id = int(df_grupos_locais[df_grupos_locais['nome_grupo'] == m_grupo_nome].iloc[0]['id']) if not df_grupos_locais.empty else bem_row['grupo_id']
                         m_desc = st.text_input("Descrição", value=limpar_texto(bem_row['descricao_item']), key=f"desc_m_{bem_id}")
-                        c_f1, c_f2 = st.columns(2)
-                        m_marca = c_f1.text_input("Marca/Modelo", value=limpar_texto(bem_row.get('marca_modelo')), key=f"marca_m_{bem_id}")
-                        m_serie = c_f2.text_input("Nº Série", value=limpar_texto(bem_row.get('num_serie_placa')), key=f"serie_m_{bem_id}")
-                        c_f3, c_f4 = st.columns(2)
-                        m_plaq = c_f3.text_input("Plaqueta", value=limpar_texto(bem_row.get('plaqueta')), key=f"plaq_m_{bem_id}")
-                        m_loc = c_f4.text_input("Localização", value=limpar_texto(bem_row.get('localizacao')), key=f"loc_m_{bem_id}")
-                        c_f5, c_f6 = st.columns(2)
-                        m_nf = c_f5.text_input("Nota Fiscal", value=limpar_texto(bem_row.get('numero_nota_fiscal')), key=f"nf_m_{bem_id}")
-                        m_forn = c_f6.text_input("Fornecedor", value=limpar_texto(bem_row.get('nome_fornecedor')), key=f"forn_m_{bem_id}")
-                        c_f7, c_f8 = st.columns(2)
-                        m_vaq = c_f7.number_input("Valor Aquisição Base (R$)", value=float(bem_row['valor_compra']), min_value=0.0, step=100.0, key=f"vaq_m_{bem_id}")
-                        m_dtc = c_f8.date_input("Data Compra", value=bem_row['data_compra'], key=f"dtc_m_{bem_id}")
+                        m_vaq = st.number_input("Valor Aquisição (R$)", value=float(bem_row['valor_compra']), step=100.0, key=f"vaq_m_{bem_id}")
 
                     with col_estrategia:
-                        st.markdown("##### Estratégia Contábil")
-                        c_e1, c_e2 = st.columns(2)
-                        lista_regras = ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"]
+                        m_regra = st.selectbox("Regra de Crédito PIS/COFINS", ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"], key=f"regra_m_{bem_id}")
+                        m_taxa_cust = st.number_input("Taxa Custom (%)", value=float(bem_row.get('taxa_customizada', 0.0) or 0.0), key=f"taxa_m_{bem_id}")
                         
-                        m_regra = c_e1.selectbox("Regra de Crédito PIS/COFINS", lista_regras, index=lista_regras.index(bem_row['regra_credito']) if bem_row['regra_credito'] in lista_regras else 0, key=f"regra_m_{bem_id}")
+                        cenario_manut = st.selectbox("Cenário", ["1. Bem Novo", "2. Cliente Novo", "3. Continuidade"], index=1, key=f"cenario_m_{bem_id}")
                         
-                        m_taxa_cust = c_e2.number_input("Taxa Custom (%) ", value=float(bem_row.get('taxa_customizada', 0.0) or 0.0), min_value=0.0, step=1.0, key=f"taxa_m_{bem_id}")
-                        
-                        idx_cenario_atual = 0
-                        if pd.notnull(bem_row.get('data_saldo_inicial')):
-                            idx_cenario_atual = 2 if bem_id in bens_com_plano else 1
-                        
-                        cenario_manut = st.selectbox("Cenário de Depreciação", [
-                            "1. Bem Novo (Cálculo Automático)", 
-                            "2. Cliente Novo (Sem Histórico Mensal)", 
-                            "3. Continuidade (Memória Cota Fixa)"
-                        ], index=idx_cenario_atual, key=f"cenario_m_{bem_id}")
-
-                        confirmacao_manut = True
-                        
+                        m_dtsi = None; m_vri_calculado = 0.0
                         if "1" not in cenario_manut:
-                            c_e3, c_e4 = st.columns(2)
-                            data_padrao_saldo = date(hoje_br.year - 1, 12, 31)
-                            valor_dtsi_atual = bem_row['data_saldo_inicial'] if pd.notnull(bem_row.get('data_saldo_inicial')) else data_padrao_saldo
-                            m_dtsi = c_e3.date_input("Data Saldo Inicial", value=valor_dtsi_atual, key=f"dtsi_m_{bem_id}")
-                            
-                            v_res_inicial_db = float(bem_row.get('valor_residual_inicial', 0.0))
-                            dep_ac_calc = float(m_vaq) - v_res_inicial_db if pd.notnull(bem_row.get('data_saldo_inicial')) else 0.0
-                            
-                            m_dep_ac = c_e4.number_input("Deprec. Acumulada Anterior (R$)", value=float(max(0, dep_ac_calc)), min_value=0.0, step=100.0, key=f"depac_m_{bem_id}")
+                            m_dtsi = st.date_input("Data Saldo Inicial", value=bem_row['data_saldo_inicial'] if pd.notnull(bem_row.get('data_saldo_inicial')) else date(2025,12,31), key=f"dtsi_m_{bem_id}")
+                            v_res_db = float(bem_row.get('valor_residual_inicial', 0.0))
+                            dep_ac_calc = float(m_vaq) - v_res_db if pd.notnull(bem_row.get('data_saldo_inicial')) else 0.0
+                            m_dep_ac = st.number_input("Deprec. Acumulada", value=float(max(0, dep_ac_calc)), step=100.0, key=f"depac_m_{bem_id}")
                             m_vri_calculado = max(0.0, float(m_vaq) - float(m_dep_ac))
-                            
                             st.markdown(f"<small>Valor Residual Atual: <b>{formatar_moeda(m_vri_calculado)}</b></small>", unsafe_allow_html=True)
                             
-                            if m_vri_calculado <= 0:
-                                st.info("ℹ️ Este item atingiu a depreciação máxima (Valor Zero) e será salvo apenas para controle de Inventário Físico.")
-                                cota_sugerida_m = 0.0
-                            elif "3" in cenario_manut:
-                                taxa_usada_m = float(m_taxa_cust) if m_taxa_cust > 0 else float(df_grupos_locais[df_grupos_locais['id']==m_grupo_id]['taxa_anual_percentual'].iloc[0]) if not df_grupos_locais.empty else 10.0
-                                cota_sugerida_m = round((float(m_vaq) * (taxa_usada_m / 100.0)) / 12.0, 2)
-                                st.info(f"Cota Mensal Padrão projetada: **{formatar_moeda(cota_sugerida_m)}**")
-                            else: cota_sugerida_m = 0.0
-                        else:
-                            m_dtsi = None; m_vri_calculado = 0.0; cota_sugerida_m = 0.0
-                            st.info("Campos de saldo ocultos. Utilizará Data/Valor de Compra para calcular.")
-                    
-                    if "3" in cenario_manut and cota_sugerida_m > 0 and m_vri_calculado > 0:
-                        st.markdown("##### Grade de Conferência")
-                        primeira_cota_calc_m = cota_sugerida_m
-                        mes_inicio_plan_m = m_dtsi.month + 1 if m_dtsi.month < 12 else 1
-                        ano_inicio_plan_m = m_dtsi.year if m_dtsi.month < 12 else m_dtsi.year + 1
+                            if m_vri_calculado <= 0: st.info("Item totalmente depreciado (Valor Zero).")
 
-                        primeira_cota_manual_m = st.number_input("Ajuste da 1ª Parcela (Opcional - R$)", min_value=0.0, max_value=float(m_vri_calculado), value=float(primeira_cota_calc_m), step=10.0, key=f"cota_manut_{bem_id}")
-                        
-                        with st.expander("👀 Ver Prévia Dinâmica do Plano de Voo (Resumido)", expanded=True):
-                            preview_data_m = []
-                            s_rest_m = m_vri_calculado
-                            d_plan_m = date(ano_inicio_plan_m, mes_inicio_plan_m, 1)
-                            
-                            c_at_1_m = min(s_rest_m, float(primeira_cota_manual_m))
-                            if c_at_1_m > 0:
-                                preview_data_m.append({"Mês": d_plan_m.strftime('%m/%Y'), "Cota Projetada": formatar_moeda(c_at_1_m), "Saldo Restante": formatar_moeda(s_rest_m - c_at_1_m)})
-                                s_rest_m -= c_at_1_m
-                                m_plan_m = d_plan_m.month + 1 if d_plan_m.month < 12 else 1
-                                a_plan_m = d_plan_m.year if d_plan_m.month < 12 else d_plan_m.year + 1
-                                d_plan_m = date(a_plan_m, m_plan_m, 1)
-                            
-                            while s_rest_m > 0.009 and len(preview_data_m) < 6:
-                                c_at_m = min(s_rest_m, float(cota_sugerida_m))
-                                preview_data_m.append({"Mês": d_plan_m.strftime('%m/%Y'), "Cota Projetada": formatar_moeda(c_at_m), "Saldo Restante": formatar_moeda(s_rest_m - c_at_m)})
-                                s_rest_m -= c_at_m
-                                m_plan_m = d_plan_m.month + 1 if d_plan_m.month < 12 else 1
-                                a_plan_m = d_plan_m.year if d_plan_m.month < 12 else d_plan_m.year + 1
-                                d_plan_m = date(a_plan_m, m_plan_m, 1)
-                            
-                            if preview_data_m:
-                                st.dataframe(pd.DataFrame(preview_data_m), hide_index=True, use_container_width=True)
-                                if s_rest_m > 0.009: 
-                                    st.markdown(f"<small style='color:gray;'>*... e assim sucessivamente até zerar.*</small>", unsafe_allow_html=True)
-
-                        confirmacao_manut = st.checkbox("Confirmo que a memória de cálculo acima está correta.", key=f"conf_manut_{bem_id}")
-                    else:
-                        primeira_cota_manual_m = 0.0
-                        if "3" in cenario_manut and m_vri_calculado > 0: confirmacao_manut = False
-                    
-                    st.markdown("---")
-                    
-                    with st.expander("⚙️ Gestão Administrativa e Exclusão (Área de Risco)", expanded=False):
-                        st.warning("⚠️ **Aviso:** Alterar a unidade, o status, ou excluir um bem impacta diretamente os relatórios gerenciais e balancetes.")
-                        c_a1, c_a2 = st.columns(2)
-                        
+                    with st.expander("⚙️ Gestão Administrativa"):
                         todas_empresas = df_emp.apply(formatar_nome_empresa, axis=1).tolist()
-                        empresa_atual_str = df_emp[df_emp['id'] == emp_id_param].apply(formatar_nome_empresa, axis=1).iloc[0]
-                        idx_emp = todas_empresas.index(empresa_atual_str) if empresa_atual_str in todas_empresas else 0
+                        emp_atual_str = df_emp[df_emp['id'] == emp_id_param].apply(formatar_nome_empresa, axis=1).iloc[0]
+                        nova_empresa = st.selectbox("Transferir", todas_empresas, index=todas_empresas.index(emp_atual_str), key=f"emp_m_{bem_id}")
                         
-                        nova_empresa = c_a1.selectbox("Transferir para Unidade", todas_empresas, index=idx_emp, key=f"emp_m_{bem_id}")
                         novo_emp_id = int(df_emp.loc[df_emp.apply(formatar_nome_empresa, axis=1) == nova_empresa].iloc[0]['id'])
-                        
-                        lista_status = ["ativo", "inativo", "baixado"]
-                        m_status = c_a2.selectbox("Status Físico", lista_status, index=lista_status.index(bem_row['status']) if bem_row['status'] in lista_status else 0, key=f"status_m_{bem_id}")
-                        
-                        st.markdown("---")
-                        st.error("🔴 **ZONA CRÍTICA: Exclusão Definitiva**")
-                        confirm_excluir = st.checkbox("Desejo excluir este ativo e todo o seu histórico do banco de dados permanentemente.", key=f"chk_del_m_{bem_id}")
-                        texto_confirma = st.text_input("Para salvar alterações administrativas ou Excluir o bem, digite **CONFIRMO** em maiúsculo:", placeholder="Digite CONFIRMO", key=f"conf_admin_{bem_id}")
+                        m_status = st.selectbox("Status", ["ativo", "inativo", "baixado"], index=["ativo", "inativo", "baixado"].index(bem_row['status']), key=f"status_m_{bem_id}")
+                        texto_confirma = st.text_input("Para salvar admin, digite CONFIRMO:", key=f"conf_admin_{bem_id}")
 
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    
-                    btn_disabled_m = ("3" in cenario_manut and m_vri_calculado > 0 and not confirmacao_manut)
-                    if btn_disabled_m: st.warning("⚠️ Confirme a memória de cálculo para habilitar os botões de ação.")
-                    
-                    c_bt_update, c_bt_delete = st.columns([3, 1])
-                    
-                    with c_bt_update:
-                        if st.button("Atualizar Bem", type="primary", use_container_width=True, disabled=btn_disabled_m):
-                            mudou_admin = (novo_emp_id != emp_id_param) or (m_status != bem_row['status'])
-                            
-                            if mudou_admin and texto_confirma.strip().upper() != "CONFIRMO":
-                                st.error("🔒 ERRO: Para transferir ou alterar status, você deve digitar CONFIRMO na aba de Gestão Administrativa.")
-                            elif ("1" not in cenario_manut) and m_vri_calculado <= 0 and "3" in cenario_manut: 
-                                st.error("O Valor Residual é zero. Não é possível usar 'Continuidade' para bens totalmente depreciados. Use o 'Cenário 2'.")
-                            elif "3" in cenario_manut and cota_sugerida_m <= 0 and m_vri_calculado > 0: 
-                                st.error("Erro na base de cálculo. O Valor de Aquisição e a Taxa devem ser maiores que zero.")
-                            else:
-                                conn_upd = get_db_connection(); cursor_upd = conn_upd.cursor()
-                                try:
-                                    val_dtsi = m_dtsi if ("1" not in cenario_manut) else None
-                                    val_tx_cust = m_taxa_cust if m_taxa_cust > 0 else None
-                                    
-                                    cursor_upd.execute("""UPDATE bens_imobilizado SET grupo_id=%s, descricao_item=%s, marca_modelo=%s, num_serie_placa=%s, plaqueta=%s, localizacao=%s, numero_nota_fiscal=%s, nome_fornecedor=%s, valor_compra=%s, data_compra=%s, regra_credito=%s, data_saldo_inicial=%s, valor_residual_inicial=%s, taxa_customizada=%s, tenant_id=%s, status=%s WHERE id=%s""", (m_grupo_id, m_desc, m_marca, m_serie, m_plaq, m_loc, m_nf, m_forn, float(m_vaq), m_dtc, m_regra, val_dtsi, float(m_vri_calculado), val_tx_cust, novo_emp_id, m_status, bem_id))
-                                    
-                                    if m_status != 'ativo' and bem_row['status'] == 'ativo': 
-                                        cursor_upd.execute("UPDATE bens_imobilizado SET data_baixa = CURDATE() WHERE id=%s AND data_baixa IS NULL", (bem_id,))
-                                    
-                                    cursor_upd.execute("DELETE FROM plano_depreciacao_itens WHERE bem_id = %s AND status_contabil = 'PENDENTE'", (bem_id,))
-                                    
-                                    if "3" in cenario_manut and cota_sugerida_m > 0 and float(m_vri_calculado) > 0:
-                                        saldo_restante = float(m_vri_calculado)
-                                        mes_plan = val_dtsi.month + 1 if val_dtsi.month < 12 else 1
-                                        ano_plan = val_dtsi.year if val_dtsi.month < 12 else val_dtsi.year + 1
-                                        data_plan = date(ano_plan, mes_plan, 1)
-
-                                        is_first_m = True
-                                        while saldo_restante > 0.009:
-                                            cota_atual = min(saldo_restante, float(primeira_cota_manual_m) if is_first_m else float(cota_sugerida_m))
-                                            cursor_upd.execute("INSERT INTO plano_depreciacao_itens (bem_id, mes_referencia, valor_cota, tipo_registro, status_contabil) VALUES (%s, %s, %s, 'PROJETADO', 'PENDENTE')", (bem_id, data_plan.strftime('%Y-%m-%d'), cota_atual))
-                                            saldo_restante -= cota_atual
-                                            is_first_m = False
-                                            if data_plan.month == 12: data_plan = date(data_plan.year + 1, 1, 1)
-                                            else: data_plan = date(data_plan.year, data_plan.month + 1, 1)
-
-                                    conn_upd.commit(); st.success("Bem atualizado com sucesso!"); st.rerun()
-                                except Exception as e:
-                                    conn_upd.rollback(); st.error(f"Erro ao atualizar: {e}")
-                                finally: conn_upd.close()
-
-                    with c_bt_delete:
-                        st.markdown('<div class="btn-excluir">', unsafe_allow_html=True)
-                        if st.button("Excluir Ativo", use_container_width=True, disabled=not confirm_excluir):
-                            if texto_confirma.strip().upper() == "CONFIRMO":
-                                conn_del = get_db_connection(); cursor_del = conn_del.cursor()
-                                try:
-                                    cursor_del.execute("DELETE FROM plano_depreciacao_itens WHERE bem_id = %s", (bem_id,))
-                                    cursor_del.execute("DELETE FROM bens_imobilizado WHERE id = %s", (bem_id,))
-                                    conn_del.commit(); st.success("Ativo e plano de depreciação excluídos com sucesso!"); st.rerun()
-                                except Exception as e:
-                                    conn_del.rollback(); st.error(f"Erro ao excluir: {e}")
-                                finally: conn_del.close()
-                            else:
-                                st.error("🔒 Digite CONFIRMO para validar a exclusão.")
-                        st.markdown('</div>', unsafe_allow_html=True)
+                    if st.button("Atualizar Bem", type="primary", use_container_width=True):
+                        mudou_admin = (novo_emp_id != emp_id_param) or (m_status != bem_row['status'])
+                        if mudou_admin and texto_confirma.strip().upper() != "CONFIRMO":
+                            st.error("Digite CONFIRMO para transferir ou alterar status.")
+                        else:
+                            conn_upd = get_db_connection(); cursor_upd = conn_upd.cursor()
+                            cursor_upd.execute("""UPDATE bens_imobilizado SET grupo_id=%s, descricao_item=%s, valor_compra=%s, regra_credito=%s, data_saldo_inicial=%s, valor_residual_inicial=%s, taxa_customizada=%s, tenant_id=%s, status=%s WHERE id=%s""", (m_grupo_id, m_desc, float(m_vaq), m_regra, m_dtsi, float(m_vri_calculado), m_taxa_cust if m_taxa_cust>0 else None, novo_emp_id, m_status, bem_id))
+                            conn_upd.commit(); conn_upd.close(); st.success("Atualizado!"); st.rerun()
 
     with tabs[0]:
         col_in, col_ras = st.columns([1, 1], gap="large")
         with col_in:
             st.markdown("#### Cadastro do Bem")
-            if df_g.empty: 
-                st.warning("Cadastre os Grupos em Parâmetros Contábeis primeiro nesta empresa para realizar novos registros.")
+            if df_g.empty: st.warning("Cadastre Grupos em Parâmetros primeiro.")
             else:
-                cenario = st.selectbox("Cenário de Implantação (Estratégia de Depreciação)", [
-                    "1. Bem Novo (Folha em Branco - Cálculo Automático)", 
-                    "2. Cliente Novo (Saldo de Partida - Sem Histórico Mensal)", 
-                    "3. Continuidade (Memória de Cálculo - Cota Fixa Histórica)"
-                ], key="cenario_cad")
-                
+                cenario = st.selectbox("Estratégia", ["1. Bem Novo", "2. Cliente Novo", "3. Continuidade"], key="cenario_cad")
                 with st.container(border=True):
-                    g_sel = st.selectbox("Grupo / Espécie", df_g['nome_grupo'].tolist())
+                    g_sel = st.selectbox("Grupo", df_g['nome_grupo'].tolist())
                     g_row = df_g[df_g['nome_grupo'] == g_sel].iloc[0]
-                    desc = st.text_input("Descrição Básica do Bem")
-                    c_m, c_p = st.columns(2)
-                    marca = c_m.text_input("Marca / Modelo (Opcional)")
-                    num_serie = c_p.text_input("Nº Série / Placa (Opcional)")
-                    c_pl, c_loc = st.columns(2)
-                    plaqueta = c_pl.text_input("Plaqueta / Patrimônio (Opcional)")
-                    localizacao = c_loc.text_input("Localização / Depto (Opcional)")
-                    c_n, c_f = st.columns(2)
-                    nf = c_n.text_input("Nº da Nota Fiscal (Opcional)")
-                    forn = c_f.text_input("Fornecedor (Opcional)")
-                    c_v, c_d = st.columns(2)
+                    desc = st.text_input("Descrição")
+                    v_aq = st.number_input("Valor de Aquisição (R$)", min_value=0.0, step=100.0)
+                    dt_c = st.date_input("Data Compra")
+                    regra_cred = st.selectbox("Regra de Crédito", ["NENHUM", "MENSAL", "INTEGRAL"])
                     
-                    v_aq = c_v.number_input("Valor de Aquisição Base (R$)", min_value=0.0, value=0.0, step=100.0)
-                    dt_c = c_d.date_input("Data da Compra Original")
-                    
-                    st.markdown("##### Regras Específicas")
-                    c_r1, c_r2 = st.columns(2)
-                    regra_cred = c_r1.selectbox("Regra de Crédito PIS/COFINS", ["NENHUM (Sem Crédito)", "MENSAL (Pela Depreciação)", "INTEGRAL (Mês de Aquisição)"])
-                    taxa_custom = c_r2.number_input("Taxa Customizada (% - Opcional)", min_value=0.0, value=0.0, step=1.0, help="Se preenchido, ignora a taxa do grupo.")
-
-                    confirmacao_cad = True
-                    
+                    dt_s_db = None; v_s_db = 0.0
                     if "1" not in cenario:
-                        st.markdown("---")
-                        st.markdown("##### Saldo de Implantação / Histórico Contábil")
-                        c_si, c_da = st.columns(2)
-                        
-                        data_padrao_saldo = date(hoje_br.year - 1, 12, 31)
-                        dt_saldo = c_si.date_input("Data Base do Balancete (Última Posição)", value=data_padrao_saldo)
-                        v_dep_acumulada = c_da.number_input("Depreciação Acumulada Anterior (R$)", min_value=0.0, max_value=float(v_aq) if float(v_aq)>0 else 10000000.0, value=0.0, step=100.0)
-                        
-                        v_residual_atual = max(0.0, float(v_aq) - float(v_dep_acumulada))
-                        st.markdown(f"<small>Valor Residual Atual (Custo - Acumulada): <b>{formatar_moeda(v_residual_atual)}</b></small>", unsafe_allow_html=True)
+                        dt_s_db = st.date_input("Data Saldo Inicial", value=date(2025,12,31))
+                        v_dep_ac = st.number_input("Depreciação Acumulada", min_value=0.0)
+                        v_s_db = max(0.0, float(v_aq) - float(v_dep_ac))
+                        st.write(f"Valor Residual: **{formatar_moeda(v_s_db)}**")
 
-                        if "3" in cenario:
-                            taxa_usada = float(taxa_custom) if taxa_custom > 0 else float(g_row['taxa_anual_percentual'])
-                            cota_sugerida = round((float(v_aq) * (taxa_usada / 100.0)) / 12.0, 2)
-                            
-                            st.info(f"Cota Mensal Padrão projetada: **{formatar_moeda(cota_sugerida)}**")
-                            
-                            if cota_sugerida > 0 and v_residual_atual > 0:
-                                st.markdown("##### Grade de Conferência")
-                                
-                                primeira_cota_calc = cota_sugerida
-                                mes_inicio_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
-                                ano_inicio_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
-                                
-                                primeira_cota_manual = st.number_input("Ajuste da 1ª Parcela (Opcional - R$)", min_value=0.0, max_value=float(v_residual_atual), value=float(primeira_cota_calc), step=10.0, key="cota_cad_manual")
-                                
-                                with st.expander("👀 Ver Prévia Dinâmica do Plano de Voo", expanded=True):
-                                    preview_data = []
-                                    s_rest = v_residual_atual
-                                    d_plan = date(ano_inicio_plan, mes_inicio_plan, 1)
-                                    
-                                    c_at_1 = min(s_rest, float(primeira_cota_manual))
-                                    if c_at_1 > 0:
-                                        preview_data.append({"Mês": d_plan.strftime('%m/%Y'), "Cota Projetada": formatar_moeda(c_at_1), "Saldo Restante": formatar_moeda(s_rest - c_at_1)})
-                                        s_rest -= c_at_1
-                                        m_plan = d_plan.month + 1 if d_plan.month < 12 else 1
-                                        a_plan = d_plan.year if d_plan.month < 12 else d_plan.year + 1
-                                        d_plan = date(a_plan, m_plan, 1)
-                                    
-                                    while s_rest > 0.009 and len(preview_data) < 12:
-                                        c_at = min(s_rest, float(cota_sugerida))
-                                        preview_data.append({"Mês": d_plan.strftime('%m/%Y'), "Cota Projetada": formatar_moeda(c_at), "Saldo Restante": formatar_moeda(s_rest - c_at)})
-                                        s_rest -= c_at
-                                        m_plan = d_plan.month + 1 if d_plan.month < 12 else 1
-                                        a_plan = d_plan.year if d_plan.month < 12 else d_plan.year + 1
-                                        d_plan = date(a_plan, m_plan, 1)
-                                    
-                                    if preview_data:
-                                        st.dataframe(pd.DataFrame(preview_data), hide_index=True, use_container_width=True)
-                                        if s_rest > 0.009: 
-                                            st.markdown(f"<small style='color:gray;'>*... e assim sucessivamente por mais meses até zerar.*</small>", unsafe_allow_html=True)
-
-                                confirmacao_cad = st.checkbox("Confirmo que a memória de cálculo acima está correta e pronta para ser gravada.", key="conf_cad")
-                            else: confirmacao_cad = False
-                        else: primeira_cota_manual = 0.0; cota_sugerida = 0.0
-                    else:
-                        dt_saldo = None; v_dep_acumulada = 0.0; primeira_cota_manual = 0.0; cota_sugerida = 0.0; v_residual_atual = 0.0
-
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    
-                    btn_disabled = ("3" in cenario and not confirmacao_cad)
-                    if btn_disabled: st.warning("⚠️ Confirme a memória de cálculo para habilitar a gravação.")
-                    
-                    if st.button("Registar no Inventário", type="primary", use_container_width=True, disabled=btn_disabled):
-                        if not desc or v_aq <= 0: st.error("Descrição e Valor de Aquisição são obrigatórios e devem ser maiores que zero.")
-                        elif dt_c > hoje_br.date(): st.error("A Data de Compra não pode ser no futuro.")
-                        elif ("1" not in cenario) and v_residual_atual <= 0 and "3" in cenario: st.error("O Valor Residual calculado zerou. Não utilize Continuidade para itens 100% depreciados.")
-                        elif "3" in cenario and cota_sugerida <= 0: st.error("A cota de projeção não pode ser zero. Verifique a Alíquota ou Taxa.")
-                        else:
-                            conn_c = get_db_connection(); cursor_c = conn_c.cursor()
-                            try:
-                                dt_s_db = dt_saldo if ("1" not in cenario) else None
-                                v_s_db = float(v_residual_atual) if ("1" not in cenario) else 0.0
-                                tx_cust_db = float(taxa_custom) if taxa_custom > 0 else None
-                                
-                                cursor_c.execute("""INSERT INTO bens_imobilizado (tenant_id, grupo_id, descricao_item, marca_modelo, num_serie_placa, plaqueta, localizacao, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, regra_credito, data_saldo_inicial, valor_residual_inicial, taxa_customizada) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (int(emp_id), int(g_row['id']), desc, marca, num_serie, plaqueta, localizacao, nf, forn, dt_c, float(v_aq), regra_cred, dt_s_db, v_s_db, tx_cust_db))
-                                bem_id = cursor_c.lastrowid
-
-                                if "3" in cenario and cota_sugerida > 0 and v_s_db > 0:
-                                    saldo_restante = v_s_db
-                                    mes_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
-                                    ano_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
-                                    data_plan = date(ano_plan, mes_plan, 1)
-
-                                    is_first_month = True
-                                    while saldo_restante > 0.009:
-                                        cota_atual = min(saldo_restante, float(primeira_cota_manual) if is_first_month else float(cota_sugerida))
-                                        cursor_c.execute("INSERT INTO plano_depreciacao_itens (bem_id, mes_referencia, valor_cota, tipo_registro, status_contabil) VALUES (%s, %s, %s, 'PROJETADO', 'PENDENTE')", (bem_id, data_plan.strftime('%Y-%m-%d'), cota_atual))
-                                        saldo_restante -= cota_atual
-                                        is_first_month = False
-                                        if data_plan.month == 12: data_plan = date(data_plan.year + 1, 1, 1)
-                                        else: data_plan = date(data_plan.year, data_plan.month + 1, 1)
-
-                                conn_c.commit(); st.success("Bem registado com sucesso!"); st.rerun()
-                            except Exception as e: conn_c.rollback(); st.error(f"Erro ao salvar: {e}")
-                            finally: conn_c.close()
+                    if st.button("Registar", type="primary", use_container_width=True):
+                        conn_c = get_db_connection(); cursor_c = conn_c.cursor()
+                        cursor_c.execute("""INSERT INTO bens_imobilizado (tenant_id, grupo_id, descricao_item, data_compra, valor_compra, regra_credito, data_saldo_inicial, valor_residual_inicial, status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'ativo')""", (emp_id, int(g_row['id']), desc, dt_c, v_aq, regra_cred, dt_s_db, v_s_db))
+                        conn_c.commit(); conn_c.close(); st.success("Gravado!"); st.rerun()
 
         with col_ras:
-            st.markdown("#### Processamento em Lote (Exportação ERP)")
+            st.markdown("#### Exportação ERP (Lote)")
             with st.container(height=380, border=True):
-                c_a, c_m = st.columns([1, 2])
-                a_proc = c_a.number_input("Ano Base", value=hoje_br.year)
-                meses_opcoes = {1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr", 5: "Mai", 6: "Jun", 7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez"}
-                meses_selecionados = c_m.multiselect("Meses para Processar", options=list(meses_opcoes.keys()), format_func=lambda x: meses_opcoes[x], default=[hoje_br.month])
-                
-                st.markdown("---")
-                metodo_calc = st.selectbox("Método de Cálculo (Para itens sem Plano Fixo)", ["Pro Rata Die (Dias Exatos)", "Mês Comercial (30 Dias)"])
-                tipo_export = st.radio("Tipo de Exportação", ["Analítica (Item a Item)", "Sintética (Agrupada por Grupo)"])
-                
-                meses_futuros = [m for m in meses_selecionados if a_proc > hoje_br.year or (a_proc == hoje_br.year and m > hoje_br.month)]
-                
-                if meses_futuros: st.error("ERRO: O processamento bloqueou a apropriação de despesas de meses futuros (CPC 27).")
-                elif st.button("Gerar Exportação de Lançamentos (XLSX)", type="primary"):
+                a_proc = st.number_input("Ano Base", value=hoje_br.year)
+                m_sel = st.multiselect("Meses", list(range(1,13)), default=[hoje_br.month])
+                if st.button("Gerar Lançamentos (XLSX)", type="primary"):
                     conn_p = get_db_connection()
-                    df_bens = pd.read_sql(f"SELECT b.*, g.taxa_anual_percentual, g.conta_contabil_despesa, g.conta_contabil_dep_acumulada, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id} AND b.status = 'ativo'", conn_p)
-                    df_planos = pd.read_sql(f"SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = {emp_id}", conn_p)
-                    if not df_planos.empty: df_planos['mes_referencia'] = pd.to_datetime(df_planos['mes_referencia']).dt.date
+                    
+                    # FILTRO CRÍTICO APLICADO: Ignora itens totalmente depreciados (Valor Residual <= 0)
+                    query_bens = f"""
+                        SELECT b.*, g.taxa_anual_percentual, g.conta_contabil_despesa, g.conta_contabil_dep_acumulada 
+                        FROM bens_imobilizado b 
+                        LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id 
+                        WHERE b.tenant_id = {emp_id} AND b.status = 'ativo' 
+                        AND (b.valor_residual_inicial > 0 OR b.data_saldo_inicial IS NULL)
+                    """
+                    df_bens = pd.read_sql(query_bens, conn_p)
                     conn_p.close()
-
+                    
                     if not df_bens.empty:
                         linhas = []
-                        for m_proc in sorted(meses_selecionados):
-                            last_day = calendar.monthrange(a_proc, m_proc)[1]
-                            dia_final_calculo = hoje_br.day if (a_proc == hoje_br.year and m_proc == hoje_br.month) else last_day
-                            data_lancamento_str = f"{dia_final_calculo:02d}/{m_proc:02d}/{a_proc}"
-                            data_ref_plano = date(a_proc, m_proc, 1)
-                            
-                            registros_calc = []
+                        for m in m_sel:
                             for _, b in df_bens.iterrows():
-                                dt_base = b['data_saldo_inicial'] if pd.notnull(b.get('data_saldo_inicial')) else b['data_compra']
-                                if a_proc < dt_base.year or (a_proc == dt_base.year and m_proc < dt_base.month): continue
+                                # Verificação dupla de resíduo
+                                if pd.notnull(b.get('data_saldo_inicial')) and float(b.get('valor_residual_inicial', 0)) <= 0: continue
                                 
-                                cota = 0.0
-                                usou_plano = False
-                                
-                                if not df_planos.empty:
-                                    plano_item = df_planos[(df_planos['bem_id'] == b['id']) & (df_planos['mes_referencia'] == data_ref_plano)]
-                                    if not plano_item.empty:
-                                        cota = float(plano_item.iloc[0]['valor_cota'])
-                                        usou_plano = True
-                                
-                                if not usou_plano:
-                                    dia_inicial = dt_base.day if (a_proc == dt_base.year and m_proc == dt_base.month) else 1
-                                    base_calc = float(b['valor_compra'])
-                                    
-                                    if pd.notnull(b.get('taxa_customizada')) and float(b['taxa_customizada']) > 0:
-                                        taxa_anual = float(b['taxa_customizada']) / 100.0
-                                    elif pd.notnull(b.get('taxa_anual_percentual')):
-                                        taxa_anual = float(b['taxa_anual_percentual']) / 100.0
-                                    else:
-                                        taxa_anual = 0.0 
-                                    
-                                    if metodo_calc == "Mês Comercial (30 Dias)":
-                                        dias_comerciais = 30 - dia_inicial + 1 if dia_inicial > 1 else 30
-                                        cota = (base_calc * taxa_anual / 360.0) * dias_comerciais
-                                    else:
-                                        dias_uso = max(0, dia_final_calculo - dia_inicial + 1)
-                                        cota = (base_calc * taxa_anual / 365.0) * dias_uso
-                                
+                                taxa = (b.get('taxa_customizada') or b.get('taxa_anual_percentual', 0)) / 100
+                                cota = (b['valor_compra'] * taxa) / 12
                                 if cota > 0:
-                                    c_d_use = b.get('conta_despesa') or b.get('conta_contabil_despesa', '')
-                                    c_c_use = b.get('conta_dep_acumulada') or b.get('conta_contabil_dep_acumulada', '')
-                                    nome_g_limpo = limpar_texto(b.get('nome_grupo'))
-                                    
-                                    registros_calc.append({
-                                        'c_d_use': c_d_use, 'c_c_use': c_c_use, 'data_lanc': data_lancamento_str, 'cota': cota,
-                                        'desc': limpar_texto(b['descricao_item']), 'nf': limpar_texto(b['numero_nota_fiscal']) or b['id'], 'grupo': nome_g_limpo
-                                    })
-                            
-                            if tipo_export == "Sintética (Agrupada por Grupo)":
-                                df_calc = pd.DataFrame(registros_calc)
-                                if not df_calc.empty:
-                                    df_grp = df_calc.groupby(['c_d_use', 'c_c_use', 'grupo', 'data_lanc'])['cota'].sum().reset_index()
-                                    for _, r in df_grp.iterrows():
-                                        linhas.append(criar_linha_erp(r['c_d_use'], r['c_c_use'], r['data_lanc'], r['cota'], "", f"DEPRECIACAO ACUMULADA - {str(r['grupo']).upper()} NO MES", ""))
-                            else:
-                                for r in registros_calc:
-                                    if metodo_calc == "Mês Comercial (30 Dias)":
-                                        hist_txt_export = f"Vr. ref. depreciação no mês {m_proc:02d}/{a_proc}"
-                                    else:
-                                        hist_txt_export = f"Vr. ref. depreciação no mês {m_proc:02d}/{a_proc} - {r['desc']}"
-                                    
-                                    linhas.append(criar_linha_erp(r['c_d_use'], r['c_c_use'], r['data_lanc'], r['cota'], "", hist_txt_export, r['nf']))
+                                    linhas.append(criar_linha_erp(b.get('conta_contabil_despesa'), b.get('conta_contabil_dep_acumulada'), f"01/{m:02d}/{a_proc}", cota, "", f"Deprec. {b['descricao_item']}", ""))
                         
                         df_xlsx = pd.DataFrame(linhas)
-                        buffer = io.BytesIO()
-                        colunas_erp = ["Lancto Aut.", "Debito", "Credito", "Data", "Valor", "Cod. Historico", "Historico", "Ccusto Debito", "Ccusto Credito", "Nr.Documento", "Complemento"]
-                        if df_xlsx.empty: df_xlsx = pd.DataFrame(columns=colunas_erp)
-                        else: df_xlsx = df_xlsx[colunas_erp]
-                        
-                        with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_xlsx.to_excel(writer, index=False, sheet_name='Depreciacao')
-                        st.download_button("Baixar Planilha ERP (XLSX)", data=buffer.getvalue(), file_name=f"DEPREC_{a_proc}.xlsx")
+                        buf = io.BytesIO()
+                        with pd.ExcelWriter(buf, engine='openpyxl') as w: df_xlsx.to_excel(w, index=False)
+                        st.download_button("Baixar XLSX", buf.getvalue(), f"Deprec_{a_proc}.xlsx")
 
     with tabs[1]:
-        st.markdown("#### Consultar Inventário Dinâmico")
-        mostrar_inativos = st.checkbox("Exibir bens inativos (baixados nos últimos 5 anos)")
-        limite_anos = hoje_br.year - 5
-        filtro_status = "1=1" if mostrar_inativos else "b.status = 'ativo'"
-        if mostrar_inativos: filtro_status += f" AND (b.data_baixa IS NULL OR YEAR(b.data_baixa) >= {limite_anos})"
-
+        st.markdown("#### Inventário Dinâmico")
         conn_inv = get_db_connection()
-        df_todos = pd.read_sql(f"SELECT b.*, g.taxa_anual_percentual, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id} AND {filtro_status}", conn_inv)
+        df_inv = pd.read_sql(f"SELECT b.*, g.nome_grupo, g.taxa_anual_percentual FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id}", conn_inv)
         df_planos_inv = pd.read_sql(f"SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = {emp_id}", conn_inv)
         if not df_planos_inv.empty: df_planos_inv['mes_referencia'] = pd.to_datetime(df_planos_inv['mes_referencia']).dt.date
         conn_inv.close()
 
-        if not df_todos.empty:
+        if not df_inv.empty:
             dados_visao = []
-            for _, rb in df_todos.iterrows():
-                dt_base = rb['data_saldo_inicial'] if pd.notnull(rb.get('data_saldo_inicial')) else rb['data_compra']
-                if rb['status'] == 'ativo': dt_ref = hoje_br.date()
-                else:
-                    dt_ref = rb['data_baixa'] if pd.notnull(rb.get('data_baixa')) else dt_base
-                    if isinstance(dt_ref, datetime) or isinstance(dt_ref, pd.Timestamp): dt_ref = dt_ref.date()
-
-                base_calc = float(rb['valor_compra'])
-                if pd.notnull(rb.get('taxa_customizada')) and float(rb['taxa_customizada']) > 0:
-                    taxa_anual = float(rb['taxa_customizada']) / 100.0; taxa_display = f"{rb['taxa_customizada']}% (Custom)"
-                elif pd.notnull(rb.get('taxa_anual_percentual')):
-                    taxa_anual = float(rb['taxa_anual_percentual']) / 100.0; taxa_display = f"{rb['taxa_anual_percentual']}%"
-                else:
-                    taxa_anual = 0.0; taxa_display = "S/ Grupo"
-
-                saldo_ini = float(rb.get('valor_residual_inicial', 0.0)); dep_acumulada = 0.0
-                plano_do_bem = df_planos_inv[df_planos_inv['bem_id'] == rb['id']] if not df_planos_inv.empty else pd.DataFrame()
-                
-                if not plano_do_bem.empty: dep_acumulada = plano_do_bem[plano_do_bem['mes_referencia'] <= dt_ref]['valor_cota'].sum()
-                else:
-                    dias_totais = max(0, (dt_ref - dt_base).days)
-                    dep_acumulada = min(base_calc, (base_calc * taxa_anual / 365.0) * dias_totais)
-                
-                if pd.notnull(rb.get('data_saldo_inicial')): valor_residual = max(0.0, saldo_ini - dep_acumulada)
-                else: valor_residual = max(0.0, base_calc - dep_acumulada)
-                
-                desc_limpa = limpar_texto(rb.get('descricao_item')); marca_limpa = limpar_texto(rb.get('marca_modelo'))
-                dados_visao.append({"Descrição": f"{desc_limpa} {marca_limpa}".strip(), "Data Ref.": dt_base.strftime('%d/%m/%Y'), "Valor Base": formatar_moeda(rb['valor_compra']), "Taxa (%)": taxa_display, "Valor Residual": formatar_moeda(valor_residual), "Situação": rb['status'].upper()})
-            
-            if dados_visao: st.dataframe(pd.DataFrame(dados_visao), use_container_width=True, hide_index=True)
+            for _, rb in df_inv.iterrows():
+                base = float(rb['valor_compra'])
+                saldo_ini = float(rb.get('valor_residual_inicial', 0.0))
+                dep = float(base) - saldo_ini if pd.notnull(rb.get('data_saldo_inicial')) else 0.0
+                dados_visao.append({"Descrição": limpar_texto(rb['descricao_item']), "Valor Base": formatar_moeda(base), "Deprec. Acum.": formatar_moeda(dep), "Residual": formatar_moeda(saldo_ini if pd.notnull(rb.get('data_saldo_inicial')) else base), "Status": rb['status'].upper()})
+            st.dataframe(pd.DataFrame(dados_visao), use_container_width=True, hide_index=True)
 
         st.markdown("---")
         with st.expander("🖨️ Central de Relatórios de Inventário", expanded=False):
-            st.info("Gere o relatório completo em PDF para a contabilidade ou auditoria, com opção de retroagir saldos exatos até 31/12/2025.")
+            st.info("Gere o relatório em PDF. Escolha datas retroativas (limite 31/12/2025) ou datas futuras para projeção.")
             
             c_filtro, c_data, c_btn = st.columns([2, 1, 1])
-            opcoes_grupos = ["Todos os Grupos"] + df_g['nome_grupo'].tolist() if not df_g.empty else ["Todos os Grupos"]
-            grupo_filtro = c_filtro.selectbox("Filtrar por Grupo", opcoes_grupos, key="filtro_grupo_pdf")
+            grupo_filtro = c_filtro.selectbox("Filtrar por Grupo", ["Todos os Grupos"] + df_g['nome_grupo'].tolist() if not df_g.empty else ["Todos os Grupos"])
             
-            data_minima = date(2025, 12, 31)
-            data_posicao = c_data.date_input("Data Base (Posição)", value=hoje_br.date(), min_value=data_minima, max_value=hoje_br.date(), key="dt_pos_pdf")
+            dt_pos = c_data.date_input("Data Base", value=hoje_br.date(), min_value=date(2025, 12, 31))
             
-            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            if c_btn.button("Gerar PDF do Inventário", type="primary", use_container_width=True):
-                conn_pdf = get_db_connection()
-                df_pdf = pd.read_sql(f"SELECT b.*, g.taxa_anual_percentual, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = {emp_id}", conn_pdf)
-                df_planos_pdf = pd.read_sql(f"SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = {emp_id}", conn_pdf)
-                if not df_planos_pdf.empty: df_planos_pdf['mes_referencia'] = pd.to_datetime(df_planos_pdf['mes_referencia']).dt.date
-                conn_pdf.close()
+            # SINALIZADOR VISUAL
+            natureza = "PROJETADO (Estimativa)" if dt_pos > hoje_br.date() else "REAL (Auditado)"
+            cor = "#d97706" if "PROJETADO" in natureza else "#0284c7"
+            st.markdown(f"Natureza do Saldo Selecionado: <b style='color:{cor};'>[{natureza}]</b>", unsafe_allow_html=True)
+            if "PROJETADO" in natureza: st.warning("⚠️ **Atenção:** Você está visualizando uma Simulação Futura.")
+            
+            st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+            if c_btn.button("Gerar PDF", type="primary", use_container_width=True):
+                pdf = RelatorioCrescerePDF()
+                pdf.add_page()
+                pdf.add_cabecalho(row_emp_ativa['nome'], row_emp_ativa['cnpj'], f"*** INVENTARIO - SALDO {natureza} ***", f"Posicao em: {dt_pos.strftime('%d/%m/%Y')} | Grupo: {grupo_filtro}")
                 
-                if df_pdf.empty:
-                    st.warning("Nenhum bem encontrado para esta unidade.")
-                else:
-                    pdf_inv = RelatorioCrescerePDF()
-                    pdf_inv.add_page()
-                    pdf_inv.add_cabecalho(row_emp_ativa['nome'], row_emp_ativa['cnpj'], "INVENTARIO DE ATIVO IMOBILIZADO", f"Posicao em: {data_posicao.strftime('%d/%m/%Y')} | Grupo: {grupo_filtro}")
-                    
-                    pdf_inv.set_font("Arial", 'B', 8)
-                    pdf_inv.cell(10, 6, "ID", 1); pdf_inv.cell(65, 6, "Descricao", 1); pdf_inv.cell(20, 6, "Aquisicao", 1); pdf_inv.cell(25, 6, "Vlr. Base", 1); pdf_inv.cell(30, 6, "Dep. Acumul.", 1); pdf_inv.cell(40, 6, "Saldo Residual", 1, ln=True)
-                    pdf_inv.set_font("Arial", '', 8)
-                    
-                    t_base = 0.0; t_dep = 0.0; t_res = 0.0
-                    
-                    for _, r in df_pdf.iterrows():
-                        if grupo_filtro != "Todos os Grupos" and r.get('nome_grupo') != grupo_filtro: continue
-                        
-                        dt_base = r['data_saldo_inicial'] if pd.notnull(r.get('data_saldo_inicial')) else r['data_compra']
-                        if isinstance(dt_base, datetime) or isinstance(dt_base, pd.Timestamp): dt_base = dt_base.date()
-                        
-                        dt_compra_orig = r['data_compra']
-                        if isinstance(dt_compra_orig, datetime) or isinstance(dt_compra_orig, pd.Timestamp): dt_compra_orig = dt_compra_orig.date()
+                pdf.set_font("Arial", 'B', 8)
+                pdf.cell(10, 6, "ID", 1); pdf.cell(65, 6, "Descricao", 1); pdf.cell(20, 6, "Aquisicao", 1); pdf.cell(25, 6, "Vlr. Base", 1); pdf.cell(30, 6, "Dep. Acumul.", 1); pdf.cell(25, 6, "Residual", 1); pdf.cell(15, 6, "Tipo", 1, ln=True)
+                pdf.set_font("Arial", '', 8)
+                
+                t_base = t_dep = t_res = 0.0
+                sigla_tipo = "[P]" if "PROJETADO" in natureza else "[R]"
 
-                        if dt_compra_orig > data_posicao: continue
-                        
-                        if r['status'] != 'ativo' and pd.notnull(r.get('data_baixa')):
-                            dt_baixa = r['data_baixa']
-                            if isinstance(dt_baixa, datetime) or isinstance(dt_baixa, pd.Timestamp): dt_baixa = dt_baixa.date()
-                            if dt_baixa <= data_posicao: continue
+                for _, r in df_inv.iterrows():
+                    if grupo_filtro != "Todos os Grupos" and r.get('nome_grupo') != grupo_filtro: continue
+                    dt_compra = r['data_compra']
+                    if isinstance(dt_compra, datetime) or isinstance(dt_compra, pd.Timestamp): dt_compra = dt_compra.date()
+                    if dt_compra > dt_pos: continue
+                    if r['status'] != 'ativo' and pd.notnull(r.get('data_baixa')):
+                        dt_bx = r['data_baixa']
+                        if isinstance(dt_bx, datetime) or isinstance(dt_bx, pd.Timestamp): dt_bx = dt_bx.date()
+                        if dt_bx <= dt_pos: continue
 
-                        base_calc = float(r['valor_compra'])
-                        if pd.notnull(r.get('taxa_customizada')) and float(r['taxa_customizada']) > 0: taxa_anual = float(r['taxa_customizada']) / 100.0
-                        elif pd.notnull(r.get('taxa_anual_percentual')): taxa_anual = float(r['taxa_anual_percentual']) / 100.0
-                        else: taxa_anual = 0.0
-                        
-                        saldo_ini = float(r.get('valor_residual_inicial', 0.0))
-                        dep_acumulada = 0.0
-                        plano_do_bem = df_planos_pdf[df_planos_pdf['bem_id'] == r['id']] if not df_planos_pdf.empty else pd.DataFrame()
-                        
-                        if not plano_do_bem.empty:
-                            dep_acumulada = plano_do_bem[plano_do_bem['mes_referencia'] <= data_posicao]['valor_cota'].sum()
-                        else:
-                            if dt_base > data_posicao: dep_acumulada = 0.0
-                            else:
-                                dias_totais = max(0, (data_posicao - dt_base).days)
-                                dep_acumulada = min(base_calc, (base_calc * taxa_anual / 365.0) * dias_totais)
-                        
-                        if pd.notnull(r.get('data_saldo_inicial')):
-                            if data_posicao < dt_base:
-                                valor_residual = base_calc
-                                dep_acumulada = 0.0
-                            else: valor_residual = max(0.0, saldo_ini - dep_acumulada)
-                        else: 
-                            valor_residual = max(0.0, base_calc - dep_acumulada)
-                            
-                        if dep_acumulada > base_calc: dep_acumulada = base_calc
-
-                        desc_limpa = limpar_texto(r.get('descricao_item'))[:35]
-                        
-                        pdf_inv.cell(10, 6, str(r['id']), 1)
-                        pdf_inv.cell(65, 6, desc_limpa, 1)
-                        pdf_inv.cell(20, 6, dt_compra_orig.strftime('%d/%m/%Y'), 1)
-                        pdf_inv.cell(25, 6, formatar_moeda(base_calc), 1)
-                        pdf_inv.cell(30, 6, formatar_moeda(dep_acumulada), 1)
-                        pdf_inv.cell(40, 6, formatar_moeda(valor_residual), 1, ln=True)
-                        
-                        t_base += base_calc; t_dep += dep_acumulada; t_res += valor_residual
-                        
-                    pdf_inv.set_font("Arial", 'B', 9)
-                    pdf_inv.cell(95, 8, "TOTAIS DA POSICAO", 1)
-                    pdf_inv.cell(25, 8, formatar_moeda(t_base), 1)
-                    pdf_inv.cell(30, 8, formatar_moeda(t_dep), 1)
-                    pdf_inv.cell(40, 8, formatar_moeda(t_res), 1, ln=True)
+                    base_calc = float(r['valor_compra'])
+                    taxa = (r.get('taxa_customizada') or r.get('taxa_anual_percentual', 0)) / 100.0
                     
-                    pdf_bytes_inv = pdf_inv.output(dest='S').encode('latin1')
-                    st.session_state['pdf_inv_b64'] = pdf_bytes_inv
-                    st.session_state['pdf_inv_nome'] = f"Inventario_{row_emp_ativa['apelido_unidade'] or row_emp_ativa['id']}_{data_posicao.strftime('%m%Y')}.pdf"
+                    # Lógica do Tempo
+                    dt_base_calc = r['data_saldo_inicial'] if pd.notnull(r.get('data_saldo_inicial')) else dt_compra
+                    if isinstance(dt_base_calc, datetime) or isinstance(dt_base_calc, pd.Timestamp): dt_base_calc = dt_base_calc.date()
+                    
+                    dep_acumulada = 0.0
+                    if dt_base_calc <= dt_pos:
+                        dias = max(0, (dt_pos - dt_base_calc).days)
+                        dep_acumulada = min(base_calc, (base_calc * taxa / 365.0) * dias)
+                    
+                    if pd.notnull(r.get('data_saldo_inicial')):
+                        dep_acumulada += (base_calc - float(r.get('valor_residual_inicial', 0)))
+                    
+                    dep_acumulada = min(base_calc, dep_acumulada)
+                    valor_residual = max(0.0, base_calc - dep_acumulada)
 
-            if 'pdf_inv_b64' in st.session_state:
-                st.success("Relatório processado e pronto para download!")
-                st.download_button("⬇️ Baixar Arquivo PDF", data=st.session_state['pdf_inv_b64'], file_name=st.session_state['pdf_inv_nome'], mime="application/pdf", use_container_width=True)
+                    pdf.cell(10, 6, str(r['id']), 1); pdf.cell(65, 6, limpar_texto(r['descricao_item'])[:35], 1)
+                    pdf.cell(20, 6, dt_compra.strftime('%d/%m/%Y'), 1); pdf.cell(25, 6, formatar_moeda(base_calc), 1)
+                    pdf.cell(30, 6, formatar_moeda(dep_acumulada), 1); pdf.cell(25, 6, formatar_moeda(valor_residual), 1); pdf.cell(15, 6, sigla_tipo, 1, ln=True)
+                    
+                    t_base += base_calc; t_dep += dep_acumulada; t_res += valor_residual
+                    
+                pdf.set_font("Arial", 'B', 9)
+                pdf.cell(95, 8, "TOTAIS DA POSICAO", 1); pdf.cell(25, 8, formatar_moeda(t_base), 1); pdf.cell(30, 8, formatar_moeda(t_dep), 1); pdf.cell(40, 8, formatar_moeda(t_res), 1, ln=True)
+                
+                st.download_button("⬇️ Baixar Relatório PDF", pdf.output(dest='S').encode('latin1'), "Inventario.pdf", mime="application/pdf")
 
     if len(tabs) > 2:
-        with tabs[2]:
-            fragmento_manutencao(emp_id)
+        with tabs[2]: fragmento_manutencao(emp_id)
 
 # --- 8. MÓDULO PARÂMETROS CONTÁBEIS ---
 def modulo_parametros():
@@ -1319,7 +898,6 @@ def modulo_usuarios():
     st.markdown("### Gestão de Utilizadores")
     conn = get_db_connection()
     df_users = pd.read_sql("SELECT id, nome, username, nivel_acesso, status_usuario, data_criacao FROM usuarios ORDER BY nome ASC", conn)
-    
     df_empresas = pd.read_sql("SELECT id, nome FROM empresas WHERE status_assinatura = 'ATIVO'", conn)
     
     tab_lista, tab_novo = st.tabs(["Utilizadores Registados", "Adicionar Utilizador"])
