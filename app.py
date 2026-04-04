@@ -20,11 +20,8 @@ st.markdown("""
     .stApp { background-color: #f4f6f9; }
     .stButton>button, .stDownloadButton>button { background-color: #004b87; color: white; border-radius: 4px; border: none; font-weight: 500; height: 45px; width: 100%; transition: all 0.2s; }
     .stButton>button:hover, .stDownloadButton>button:hover { background-color: #003366; color: white; transform: translateY(-1px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-    
-    /* Botão de Excluir Vermelho */
     .btn-excluir button { background-color: #dc2626 !important; color: white !important; }
     .btn-excluir button:hover { background-color: #b91c1c !important; }
-    
     div[data-testid="stForm"], .css-1d391kg, .stExpander, div[data-testid="stVerticalBlock"] > div > div[data-testid="stVerticalBlock"] { background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }
     h1, h2, h3, h4 { color: #0f172a; font-weight: 600; font-family: 'Segoe UI', sans-serif; }
     .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] { background-color: #f8fafc; border: 1px solid #cbd5e1; }
@@ -49,6 +46,10 @@ def validar_competencia(comp):
         return None
     m, a = comp.split('/')
     return f"{a}-{m.zfill(2)}"
+
+def formatar_historico_erp(texto_base, competencia):
+    base = limpar_texto(texto_base)
+    return f"{base} - {competencia}" if base else f"LANCAMENTO CONTABIL - {competencia}"
 
 # --- CLASSE DE PDF PADRONIZADA ---
 class RelatorioCrescerePDF(FPDF):
@@ -160,7 +161,6 @@ def carregar_empresas_visiveis():
         """
         df = pd.read_sql(query, conn, params=(int(st.session_state.contabilidade_id), int(st.session_state.usuario_id)))
         
-        # Fallback obrigatório (Modelo Antigo)
         if df.empty and st.session_state.empresa_id_legacy:
             query_fallback = "SELECT * FROM empresas WHERE id = %s AND status_assinatura = 'ATIVO'"
             df = pd.read_sql(query_fallback, conn, params=(int(st.session_state.empresa_id_legacy),))
@@ -218,11 +218,9 @@ if not st.session_state.autenticado:
                     st.session_state.autenticado = True
                     st.session_state.usuario_logado = user_data['nome']
                     st.session_state.username = user_data['username']
-                    
                     st.session_state.usuario_id = user_data.get('id')
                     st.session_state.contabilidade_id = user_data.get('contabilidade_id')
                     st.session_state.empresa_id_legacy = user_data.get('empresa_id')
-                    
                     st.session_state.nivel_acesso = "SUPER_ADMIN" if user_data['username'].lower() == "rodrhigo" else user_data['nivel_acesso']
                     st.rerun()
                 else: st.error("Credenciais inválidas.")
@@ -285,7 +283,7 @@ def modulo_empresas():
 
 # --- 6. MÓDULO APURAÇÃO ---
 def modulo_apuracao():
-    st.markdown("### Apuração de Impostos e Custos")
+    st.markdown("### Apuração de Impostos e Apropriação de Custo")
     df_emp = carregar_empresas_visiveis()
     
     if df_emp.empty:
@@ -309,90 +307,95 @@ def modulo_apuracao():
     col_in, col_ras = st.columns([1, 1], gap="large")
 
     with col_in:
-        st.markdown("#### Novo Lançamento")
         fk = st.session_state.form_key
-        
-        op_sel = st.selectbox("Operação", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
-        op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
-        
-        v_base = st.number_input("Valor Total da Fatura / Base (R$)", min_value=0.00, step=100.0, key=f"base_{fk}")
-        v_pis_ret = v_cof_ret = 0.0
-        teve_retencao = False
-        
-        c_retro, c_origem = st.columns([1, 1])
-        retro = c_retro.checkbox("Lançamento Extemporâneo", key=f"retro_{fk}")
-        comp_origem = c_origem.text_input("Mês de Origem (MM/AAAA)", disabled=not retro, key=f"origem_{fk}")
+        tab_fiscal, tab_custo = st.tabs(["1. Notas Fiscais (PDF / Impostos)", "2. Custo Avulso (CMV / CSV)"])
 
-        if op_row['tipo'] == 'RECEITA' and not retro:
-            teve_retencao = st.checkbox("Houve Retenção na Fonte nesta fatura?", key=f"check_ret_{fk}")
-            if teve_retencao:
-                st.info("Informe os valores retidos para dedução direta.")
-                c_p, c_c = st.columns(2)
-                v_pis_ret = c_p.number_input("Valor PIS Retido (R$)", min_value=0.00, step=10.0, key=f"p_ret_{fk}")
-                v_cof_ret = c_c.number_input("Valor COFINS Retido (R$)", min_value=0.00, step=10.0, key=f"c_ret_{fk}")
-
-        # --- LÓGICA DE DESTINO DE CUSTO (CMV/CSV) ---
-        gerar_custo_liq = False
-        destino_sel = None
-        vp_calc, vc_calc = calcular_impostos(regime, op_row['nome'], v_base)
-        
-        if op_row['tipo'] == 'DESPESA':
-            gerar_custo_liq = st.checkbox("Vincular a um Custo Líquido (Estoque/Serviço)?", key=f"chk_custo_{fk}", help="O sistema calculará (Valor Bruto - PIS - COFINS) e jogará na conta contábil especificada.")
-            if gerar_custo_liq:
-                if df_destinos_custo.empty:
-                    st.error("Nenhum Destino de Custo configurado para esta unidade. Vá na aba 'Parâmetros Contábeis' > 'Destinos de Custo'.")
-                else:
-                    destino_sel = st.selectbox("Selecione o Destino do Custo", df_destinos_custo['nome_destino'].tolist(), key=f"dest_sel_{fk}")
-                    custo_liquido_projecao = v_base - vp_calc - vc_calc
-                    st.info(f"Custo Líquido a Contabilizar: **{formatar_moeda(custo_liquido_projecao)}**")
-        
-        hist = st.text_input("Histórico / Observação (Obrigatório para Extemporâneo)", key=f"hist_{fk}")
-        
-        exige_doc = retro or teve_retencao
-        if exige_doc:
-            c_nota, c_forn = st.columns([1, 2])
-            num_nota = c_nota.text_input("Nº do Documento", key=f"nota_{fk}")
-            fornecedor = c_forn.text_input("Tomador / Fornecedor", key=f"forn_{fk}")
-        else: num_nota = fornecedor = None
-        
-        st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
-        if st.button("Adicionar ao Rascunho", use_container_width=True):
-            comp_valida = validar_competencia(competencia)
-            origem_valida = validar_competencia(comp_origem) if retro else True
+        with tab_fiscal:
+            op_sel = st.selectbox("Operação Fiscal", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
+            op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
             
-            if not comp_valida: st.error("O formato da Competência deve ser MM/AAAA válido.")
-            elif retro and not origem_valida: st.error("O formato do Mês de Origem deve ser MM/AAAA válido.")
-            elif v_base <= 0: st.warning("A base de cálculo deve ser maior que zero.")
-            elif teve_retencao and v_pis_ret == 0 and v_cof_ret == 0: st.warning("Informe os valores retidos.")
-            elif exige_doc and (not num_nota or not fornecedor or (retro and not comp_origem) or (retro and not hist)):
-                st.error("Para Retenções e Extemporâneos, o Nº do Documento, Fornecedor, Mês Origem e Histórico são obrigatórios.")
-            elif gerar_custo_liq and df_destinos_custo.empty:
-                st.error("Configure um Destino de Custo antes de usar esta opção.")
-            else:
-                dest_row = df_destinos_custo[df_destinos_custo['nome_destino'] == destino_sel].iloc[0] if (gerar_custo_liq and destino_sel) else None
+            v_base = st.number_input("Valor Total da Fatura / Base (R$)", min_value=0.00, step=100.0, key=f"base_{fk}")
+            v_pis_ret = v_cof_ret = 0.0
+            teve_retencao = False
+            
+            c_retro, c_origem = st.columns([1, 1])
+            retro = c_retro.checkbox("Lançamento Extemporâneo", key=f"retro_{fk}")
+            comp_origem = c_origem.text_input("Mês de Origem (MM/AAAA)", disabled=not retro, key=f"origem_{fk}")
+
+            if op_row['tipo'] == 'RECEITA' and not retro:
+                teve_retencao = st.checkbox("Houve Retenção na Fonte nesta fatura?", key=f"check_ret_{fk}")
+                if teve_retencao:
+                    st.info("Informe os valores retidos para dedução direta.")
+                    c_p, c_c = st.columns(2)
+                    v_pis_ret = c_p.number_input("Valor PIS Retido (R$)", min_value=0.00, step=10.0, key=f"p_ret_{fk}")
+                    v_cof_ret = c_c.number_input("Valor COFINS Retido (R$)", min_value=0.00, step=10.0, key=f"c_ret_{fk}")
+
+            hist = st.text_input("Histórico / Observação (Obrigatório para Extemporâneo)", key=f"hist_{fk}")
+            
+            exige_doc = retro or teve_retencao
+            if exige_doc:
+                c_nota, c_forn = st.columns([1, 2])
+                num_nota = c_nota.text_input("Nº do Documento", key=f"nota_{fk}")
+                fornecedor = c_forn.text_input("Tomador / Fornecedor", key=f"forn_{fk}")
+            else: num_nota = fornecedor = None
+            
+            st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+            if st.button("Adicionar Lançamento Fiscal", use_container_width=True, type="primary"):
+                comp_valida = validar_competencia(competencia)
+                origem_valida = validar_competencia(comp_origem) if retro else True
                 
-                st.session_state.rascunho_lancamentos.append({
-                    "id_unico": uuid.uuid4().hex,
-                    "emp_id": int(emp_id),
-                    "op_id": int(op_row['id']),
-                    "op_nome": op_sel,
-                    "v_base": float(v_base),
-                    "v_pis": float(vp_calc),
-                    "v_cofins": float(vc_calc),
-                    "v_pis_ret": float(v_pis_ret),
-                    "v_cof_ret": float(v_cof_ret),
-                    "hist": hist,
-                    "retro": int(retro),
-                    "origem": comp_origem if retro else None,
-                    "nota": num_nota,
-                    "fornecedor": fornecedor,
-                    "custo_liq": float(v_base - vp_calc - vc_calc) if dest_row is not None else 0.0,
-                    "c_deb": dest_row['conta_debito'] if dest_row is not None else None,
-                    "c_cred": dest_row['conta_credito'] if dest_row is not None else None,
-                    "c_cod": dest_row['hist_codigo'] if dest_row is not None else None,
-                    "c_txt": dest_row['hist_texto'] if dest_row is not None else None
-                })
-                st.session_state.form_key += 1; st.rerun()
+                if not comp_valida: st.error("O formato da Competência deve ser MM/AAAA válido.")
+                elif retro and not origem_valida: st.error("O formato do Mês de Origem deve ser MM/AAAA válido.")
+                elif v_base <= 0: st.warning("A base de cálculo deve ser maior que zero.")
+                elif exige_doc and (not num_nota or not fornecedor or (retro and not comp_origem) or (retro and not hist)):
+                    st.error("Para Retenções e Extemporâneos, o Nº do Documento, Fornecedor, Mês Origem e Histórico são obrigatórios.")
+                else:
+                    vp_calc, vc_calc = calcular_impostos(regime, op_row['nome'], v_base)
+                    st.session_state.rascunho_lancamentos.append({
+                        "id_unico": uuid.uuid4().hex, "emp_id": int(emp_id), "op_id": int(op_row['id']),
+                        "op_nome": op_sel, "v_base": float(v_base), "v_pis": float(vp_calc), "v_cofins": float(vc_calc),
+                        "v_pis_ret": float(v_pis_ret), "v_cof_ret": float(v_cof_ret), "hist": hist, "retro": int(retro),
+                        "origem": comp_origem if retro else None, "nota": num_nota, "fornecedor": fornecedor,
+                        "is_custo_avulso": 0, "custo_liq": 0.0, "c_deb": None, "c_cred": None, "c_cod": None, "c_txt": None
+                    })
+                    st.session_state.form_key += 1; st.rerun()
+
+        with tab_custo:
+            st.info("Utilize esta aba para apropriar o custo cheio do estoque ou serviço consumido no mês. O sistema extrairá os impostos recuperáveis para gerar a linha contábil ERP, sem afetar o PDF de apuração.")
+            if df_destinos_custo.empty:
+                st.error("Nenhum Destino de Custo configurado para esta unidade. Vá na aba 'Parâmetros Contábeis' > 'Destinos de Custo'.")
+            else:
+                destino_sel = st.selectbox("Selecione o Destino Contábil", df_destinos_custo['nome_destino'].tolist(), key=f"dest_sel_{fk}")
+                v_consumido = st.number_input("Valor Bruto Consumido (R$)", min_value=0.00, step=100.0, key=f"v_cons_{fk}")
+                
+                vp_c, vc_c = calcular_impostos(regime, "Despesa", v_consumido)
+                custo_liquido_projecao = v_consumido - vp_c - vc_c
+                
+                if v_consumido > 0:
+                    st.markdown(f"<small>Impostos Extraídos: PIS ({formatar_moeda(vp_c)}) | COFINS ({formatar_moeda(vc_c)})</small><br><b>Custo Líquido a Contabilizar: {formatar_moeda(custo_liquido_projecao)}</b>", unsafe_allow_html=True)
+
+                hist_c = st.text_input("Observação Opcional (Será anexada ao histórico)", key=f"hist_c_{fk}")
+                nota_c = st.text_input("Documento/Requisição (Opcional)", key=f"nota_c_{fk}")
+
+                st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+                if st.button("Adicionar Custo Avulso", use_container_width=True, type="secondary"):
+                    comp_valida = validar_competencia(competencia)
+                    if not comp_valida: st.error("O formato da Competência deve ser MM/AAAA válido.")
+                    elif v_consumido <= 0: st.warning("O valor consumido deve ser maior que zero.")
+                    else:
+                        dest_row = df_destinos_custo[df_destinos_custo['nome_destino'] == destino_sel].iloc[0]
+                        dummy_op_id = int(df_op.iloc[0]['id']) # DB requirement fallback
+                        
+                        st.session_state.rascunho_lancamentos.append({
+                            "id_unico": uuid.uuid4().hex, "emp_id": int(emp_id), "op_id": dummy_op_id,
+                            "op_nome": f"[CUSTO AVULSO] {destino_sel}", "v_base": float(v_consumido),
+                            "v_pis": 0.0, "v_cofins": 0.0, "v_pis_ret": 0.0, "v_cof_ret": 0.0,
+                            "hist": hist_c, "retro": 0, "origem": None, "nota": nota_c, "fornecedor": "",
+                            "is_custo_avulso": 1, "custo_liq": float(custo_liquido_projecao),
+                            "c_deb": dest_row['conta_debito'], "c_cred": dest_row['conta_credito'],
+                            "c_cod": dest_row['hist_codigo'], "c_txt": dest_row['hist_texto']
+                        })
+                        st.session_state.form_key += 1; st.rerun()
 
     with col_ras:
         st.markdown("#### Rascunho")
@@ -400,21 +403,21 @@ def modulo_apuracao():
         def remover_do_rascunho(idx):
             st.session_state.rascunho_lancamentos.pop(idx)
 
-        with st.container(height=390, border=True):
+        with st.container(height=420, border=True):
             if not st.session_state.rascunho_lancamentos:
                 st.markdown("<p style='text-align:center;color:#94a3b8;margin-top:50px;'>Vazio.</p>", unsafe_allow_html=True)
             else:
                 for i, it in enumerate(st.session_state.rascunho_lancamentos):
                     c_txt, c_val, c_del = st.columns([5, 3, 1])
-                    retro_badge = f" <span style='color:red;font-size:10px;'>(EXTEMP: {it['origem']})</span>" if it['retro'] == 1 else ""
-                    ret_badge = f" <span style='color:orange;font-size:10px;'>(RETENÇÃO)</span>" if float(it.get('v_pis_ret', 0)) > 0 or float(it.get('v_cof_ret', 0)) > 0 else ""
-                    custo_badge = f" <span style='color:green;font-size:10px;'>(CUSTO: {formatar_moeda(it['custo_liq']).replace('$', '&#36;')})</span>" if float(it.get('custo_liq', 0)) > 0 else ""
-                    doc_str = f" | Doc: {it['nota']}" if it.get('nota') else ""
-                    forn_str = f" | Forn: {it['fornecedor']}" if it.get('fornecedor') else ""
-                    hist_str = f"<br>Histórico: {it['hist']}" if it.get('hist') else ""
                     
-                    c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}{custo_badge}<br>PIS: {formatar_moeda(it['v_pis']).replace('$', '&#36;')} | COF: {formatar_moeda(it['v_cofins']).replace('$', '&#36;')}<br><span style='color:#64748b;'>{doc_str}{forn_str}{hist_str}</span></small>", unsafe_allow_html=True)
-                    c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
+                    if it['is_custo_avulso'] == 1:
+                        c_txt.markdown(f"<small style='line-height: 1.2; color: #16a34a;'><b>{it['op_nome']}</b><br>Custo Líquido p/ ERP: {formatar_moeda(it['custo_liq']).replace('$', '&#36;')}<br><span style='color:#64748b;'>Doc: {it['nota'] or 'N/A'}</span></small>", unsafe_allow_html=True)
+                        c_val.markdown(f"<span style='font-size: 14px; font-weight: 600; color: #16a34a;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
+                    else:
+                        retro_badge = f" <span style='color:red;font-size:10px;'>(EXTEMP)</span>" if it['retro'] == 1 else ""
+                        ret_badge = f" <span style='color:orange;font-size:10px;'>(RETENÇÃO)</span>" if float(it.get('v_pis_ret', 0)) > 0 or float(it.get('v_cof_ret', 0)) > 0 else ""
+                        c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}<br>PIS: {formatar_moeda(it['v_pis']).replace('$', '&#36;')} | COF: {formatar_moeda(it['v_cofins']).replace('$', '&#36;')}</small>", unsafe_allow_html=True)
+                        c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
                     
                     c_del.button("×", key=f"del_{it['id_unico']}", on_click=remover_do_rascunho, args=(i,))
                     st.markdown("<hr style='margin: 5px 0;'>", unsafe_allow_html=True)
@@ -426,10 +429,10 @@ def modulo_apuracao():
                 try:
                     with get_db_cursor(commit=True) as cursor:
                         for it in st.session_state.rascunho_lancamentos:
-                            query = """INSERT INTO lancamentos (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, valor_pis_retido, valor_cofins_retido, historico, usuario_registro, status_auditoria, origem_retroativa, competencia_origem, num_nota, fornecedor, valor_custo_liquido, custo_conta_deb, custo_conta_cred, custo_hist_cod, custo_hist_texto) VALUES (%s,%s,%s,CURDATE(),%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+                            query = """INSERT INTO lancamentos (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, valor_pis_retido, valor_cofins_retido, historico, usuario_registro, status_auditoria, origem_retroativa, competencia_origem, num_nota, fornecedor, valor_custo_liquido, custo_conta_deb, custo_conta_cred, custo_hist_cod, custo_hist_texto, is_custo_avulso) VALUES (%s,%s,%s,CURDATE(),%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
                             c_origem_db = validar_competencia(it['origem']) if it['origem'] else None
-                            cursor.execute(query, (int(it['emp_id']), int(it['op_id']), comp_db, float(it['v_base']), float(it['v_pis']), float(it['v_cofins']), float(it.get('v_pis_ret', 0)), float(it.get('v_cof_ret', 0)), it['hist'], st.session_state.username, int(it['retro']), c_origem_db, it['nota'], it['fornecedor'], float(it.get('custo_liq', 0.0)), it.get('c_deb'), it.get('c_cred'), it.get('c_cod'), it.get('c_txt')))
-                    st.session_state.rascunho_lancamentos = []; st.success("Gravado com sucesso no banco de dados!"); st.rerun()
+                            cursor.execute(query, (int(it['emp_id']), int(it['op_id']), comp_db, float(it['v_base']), float(it['v_pis']), float(it['v_cofins']), float(it.get('v_pis_ret', 0)), float(it.get('v_cof_ret', 0)), it['hist'], st.session_state.username, int(it['retro']), c_origem_db, it['nota'], it['fornecedor'], float(it.get('custo_liq', 0.0)), it.get('c_deb'), it.get('c_cred'), it.get('c_cod'), it.get('c_txt'), int(it.get('is_custo_avulso', 0))))
+                    st.session_state.rascunho_lancamentos = []; st.success("Gravado com sucesso!"); st.rerun()
                 except Exception as e: st.error(f"Erro no banco: {e}")
 
     st.markdown("---")
@@ -438,31 +441,27 @@ def modulo_apuracao():
     if comp_db:
         try:
             with get_db_connection() as conn:
-                query_gravados = "SELECT l.id, o.nome as operacao, l.valor_base, l.valor_pis, l.valor_cofins, l.historico, l.usuario_registro FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE l.empresa_id = %s AND l.competencia = %s AND l.status_auditoria = 'ATIVO'"
+                query_gravados = "SELECT l.id, IF(l.is_custo_avulso=1, '[CUSTO AVULSO]', o.nome) as operacao, l.valor_base, l.valor_pis, l.valor_cofins, l.valor_custo_liquido, l.historico, l.usuario_registro FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE l.empresa_id = %s AND l.competencia = %s AND l.status_auditoria = 'ATIVO'"
                 df_gravados = pd.read_sql(query_gravados, conn, params=(emp_id, comp_db))
             
             if df_gravados.empty:
                 st.info("Nenhum lançamento ativo salvo na base de dados para esta competência.")
             else:
                 st.dataframe(df_gravados, use_container_width=True, hide_index=True)
-                with st.expander("Estornar / Inativar Lançamento com Histórico"):
-                    st.warning("Boas práticas proíbem a exclusão silenciosa. Informe o ID para inativar o lançamento.")
+                with st.expander("Estornar / Inativar Lançamento"):
                     with st.form("form_edicao_lancamento"):
                         c_id, c_motivo = st.columns([1, 3])
                         id_alvo = c_id.selectbox("ID do Lançamento", df_gravados['id'].tolist())
-                        motivo = c_motivo.text_input("Motivo do Estorno/Cancelamento (Obrigatório)")
-                        
+                        motivo = c_motivo.text_input("Motivo do Estorno (Obrigatório)")
                         if st.form_submit_button("Confirmar Estorno"):
-                            if not motivo or len(motivo.strip()) < 5: st.error("É obrigatório informar um motivo válido para a auditoria.")
+                            if not motivo or len(motivo.strip()) < 5: st.error("Informe um motivo válido.")
                             else:
                                 with get_db_cursor(commit=True) as cursor:
-                                    historico_add = f" | [ESTORNADO por {st.session_state.username}]: {motivo}"
+                                    historico_add = f" | [ESTORNADO]: {motivo}"
                                     cursor.execute("UPDATE lancamentos SET status_auditoria = 'INATIVO', historico = CONCAT(IFNULL(historico,''), %s) WHERE id = %s", (historico_add, int(id_alvo)))
-                                st.success("Lançamento inativado e auditado com sucesso!"); st.rerun()
+                                st.success("Lançamento inativado."); st.rerun()
         except Exception as e:
             st.error(f"Erro ao consultar: {e}")
-    else:
-        st.warning("Insira uma competência válida no formato MM/AAAA para ver os registros.")
 
 # --- 7. MÓDULO RELATÓRIOS E INTEGRAÇÃO ---
 def modulo_relatorios():
@@ -489,9 +488,8 @@ def modulo_relatorios():
                     raiz_cnpj = emp_row['cnpj'][:10]
                     df_ids = pd.read_sql("SELECT id FROM empresas WHERE cnpj LIKE %s", conn, params=(f"{raiz_cnpj}%",))
                     lista_ids = tuple(df_ids['id'].tolist())
-                    if len(lista_ids) == 1: filtro_empresa = f"l.empresa_id = {lista_ids[0]}"
-                    else: filtro_empresa = f"l.empresa_id IN {lista_ids}"
-                    nome_relatorio_pdf = f"{emp_row['nome']} (CONSOLIDADO MATRIZ E FILIAIS)"
+                    filtro_empresa = f"l.empresa_id = {lista_ids[0]}" if len(lista_ids) == 1 else f"l.empresa_id IN {lista_ids}"
+                    nome_relatorio_pdf = f"{emp_row['nome']} (CONSOLIDADO)"
                 else:
                     filtro_empresa = f"l.empresa_id = {emp_id}"
                     nome_relatorio_pdf = f"{emp_row['nome']}"
@@ -499,7 +497,7 @@ def modulo_relatorios():
                 query = f"SELECT l.*, o.nome as op_nome, o.tipo as op_tipo, e.apelido_unidade, e.tipo as emp_tipo, o.conta_deb_pis, o.conta_cred_pis, o.pis_h_codigo, o.pis_h_texto, o.conta_deb_cof, o.conta_cred_cof, o.cofins_h_codigo, o.cofins_h_texto FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id JOIN empresas e ON l.empresa_id = e.id WHERE {filtro_empresa} AND l.competencia = %s AND l.status_auditoria = 'ATIVO'"
                 df_export = pd.read_sql(query, conn, params=(comp_db,))
 
-                query_hist = f"SELECT o.tipo as op_tipo, SUM(l.valor_pis) as t_pis, SUM(l.valor_cofins) as t_cof, SUM(l.valor_pis_retido) as t_pis_ret, SUM(l.valor_cofins_retido) as t_cof_ret FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE {filtro_empresa} AND l.competencia < %s AND l.status_auditoria = 'ATIVO' GROUP BY o.tipo"
+                query_hist = f"SELECT o.tipo as op_tipo, SUM(l.valor_pis) as t_pis, SUM(l.valor_cofins) as t_cof, SUM(l.valor_pis_retido) as t_pis_ret, SUM(l.valor_cofins_retido) as t_cof_ret FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE {filtro_empresa} AND l.competencia < %s AND l.status_auditoria = 'ATIVO' AND l.is_custo_avulso = 0 GROUP BY o.tipo"
                 df_hist = pd.read_sql(query_hist, conn, params=(comp_db,))
             
             saldo_ant_pis = 0.0; saldo_ant_cof = 0.0
@@ -511,25 +509,23 @@ def modulo_relatorios():
                 if res_hist_pis < 0: saldo_ant_pis = abs(res_hist_pis)
                 if res_hist_cof < 0: saldo_ant_cof = abs(res_hist_cof)
 
-            # --- EXPORTAÇÃO EXCEL ---
+            # --- EXPORTAÇÃO EXCEL (TODOS) ---
             linhas_excel = []
             if not df_export.empty:
-                def p_txt(txt, op_nome): return txt.replace("{operacao}", op_nome).replace("{competencia}", competencia) if txt else f"VLR REF {op_nome} COMP {competencia}"
                 for _, r in df_export.iterrows():
                     d_str = r['data_lancamento'].strftime('%d/%m/%Y') if pd.notnull(r['data_lancamento']) else ''
                     doc = r['num_nota'] or r['id']
                     
-                    # Linha PIS
-                    if pd.notnull(r['conta_deb_pis']) and pd.notnull(r['conta_cred_pis']):
-                        linhas_excel.append(criar_linha_erp(r['conta_deb_pis'], r['conta_cred_pis'], d_str, r['valor_pis'], r.get('pis_h_codigo'), f"PIS - {p_txt(r.get('pis_h_texto'), r['op_nome'])}", doc))
+                    if r.get('is_custo_avulso') == 0:
+                        if pd.notnull(r['conta_deb_pis']) and pd.notnull(r['conta_cred_pis']):
+                            linhas_excel.append(criar_linha_erp(r['conta_deb_pis'], r['conta_cred_pis'], d_str, r['valor_pis'], r.get('pis_h_codigo'), formatar_historico_erp(r.get('pis_h_texto'), competencia), doc))
+                        if pd.notnull(r['conta_deb_cof']) and pd.notnull(r['conta_cred_cof']):
+                            linhas_excel.append(criar_linha_erp(r['conta_deb_cof'], r['conta_cred_cof'], d_str, r['valor_cofins'], r.get('cofins_h_codigo'), formatar_historico_erp(r.get('cofins_h_texto'), competencia), doc))
                     
-                    # Linha COFINS
-                    if pd.notnull(r['conta_deb_cof']) and pd.notnull(r['conta_cred_cof']):
-                        linhas_excel.append(criar_linha_erp(r['conta_deb_cof'], r['conta_cred_cof'], d_str, r['valor_cofins'], r.get('cofins_h_codigo'), f"COF - {p_txt(r.get('cofins_h_texto'), r['op_nome'])}", doc))
-                    
-                    # Linha Custo Líquido (CMV/CSV/CSP)
-                    if pd.notnull(r.get('custo_conta_deb')) and float(r.get('valor_custo_liquido', 0)) > 0:
-                        linhas_excel.append(criar_linha_erp(r['custo_conta_deb'], r['custo_conta_cred'], d_str, r['valor_custo_liquido'], r.get('custo_hist_cod'), f"CUSTO LIQ - {p_txt(r.get('custo_hist_texto'), r['op_nome'])}", doc))
+                    if r.get('is_custo_avulso') == 1 and float(r.get('valor_custo_liquido', 0)) > 0:
+                        h_complementar = f" - {r['historico']}" if r.get('historico') else ""
+                        texto_final_custo = formatar_historico_erp(r.get('custo_hist_texto'), competencia) + h_complementar
+                        linhas_excel.append(criar_linha_erp(r['custo_conta_deb'], r['custo_conta_cred'], d_str, r['valor_custo_liquido'], r.get('custo_hist_cod'), texto_final_custo, doc))
             
             df_xlsx = pd.DataFrame(linhas_excel)
             buffer = io.BytesIO()
@@ -539,14 +535,16 @@ def modulo_relatorios():
             
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_xlsx.to_excel(writer, index=False, sheet_name='Lancamentos_Contabeis')
             
-            # --- GERAÇÃO DO PDF ---
+            # --- GERAÇÃO DO PDF (SOMENTE FISCAL) ---
+            df_pdf = df_export[df_export['is_custo_avulso'] == 0]
+            
             pdf = RelatorioCrescerePDF()
             pdf.add_page(); pdf.add_cabecalho(nome_relatorio_pdf, emp_row['cnpj'], "*** DEMONSTRATIVO DE APURACAO - PIS E COFINS ***", competencia)
             deb_pis = deb_cof = cred_pis = cred_cof = ret_pis = ret_cof = ext_pis = ext_cof = 0
             
             pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "1. BASE DE CALCULO DAS RECEITAS (DEBITOS)", ln=True); pdf.set_font("Arial", 'B', 9); pdf.cell(90, 6, "Operacao", 1); pdf.cell(35, 6, "Base", 1); pdf.cell(30, 6, "PIS", 1); pdf.cell(35, 6, "COFINS", 1, ln=True); pdf.set_font("Arial", '', 9)
-            if not df_export.empty:
-                for _, r in df_export[(df_export['op_tipo'] == 'RECEITA') & (df_export['origem_retroativa'] == 0)].iterrows():
+            if not df_pdf.empty:
+                for _, r in df_pdf[(df_pdf['op_tipo'] == 'RECEITA') & (df_pdf['origem_retroativa'] == 0)].iterrows():
                     desc_op = r['op_nome']
                     apelido_clean = limpar_texto(r.get('apelido_unidade', ''))
                     if consolidar and r['emp_tipo'] == 'Filial': desc_op += f" ({apelido_clean or 'Filial'})"
@@ -554,8 +552,8 @@ def modulo_relatorios():
                     deb_pis += r['valor_pis']; deb_cof += r['valor_cofins']; ret_pis += r['valor_pis_retido']; ret_cof += r['valor_cofins_retido']
             
             pdf.ln(5); pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "2. INSUMOS, CREDITOS E EXTEMPORANEOS", ln=True); pdf.set_font("Arial", 'B', 9); pdf.cell(90, 6, "Operacao", 1); pdf.cell(35, 6, "Base", 1); pdf.cell(30, 6, "PIS", 1); pdf.cell(35, 6, "COFINS", 1, ln=True); pdf.set_font("Arial", '', 9)
-            if not df_export.empty:
-                for _, r in df_export[df_export['op_tipo'] == 'DESPESA'].iterrows():
+            if not df_pdf.empty:
+                for _, r in df_pdf[df_pdf['op_tipo'] == 'DESPESA'].iterrows():
                     desc_op = r['op_nome']
                     apelido_clean = limpar_texto(r.get('apelido_unidade', ''))
                     if consolidar and r['emp_tipo'] == 'Filial': desc_op += f" ({apelido_clean or 'Filial'})"
@@ -580,21 +578,21 @@ def modulo_relatorios():
 
             # --- ANEXO DE AUDITORIA ---
             pdf.add_page(); pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "ANEXO I - DETALHAMENTO E NOTAS DE AUDITORIA FISCAL", ln=True)
-            df_ext = df_export[df_export['origem_retroativa'] == 1]
+            df_ext = df_pdf[df_pdf['origem_retroativa'] == 1]
             if not df_ext.empty:
                 pdf.ln(5); pdf.set_font("Arial", 'B', 9); pdf.cell(0, 6, "NOTA DE AUDITORIA - APROVEITAMENTO DE CREDITO EXTEMPORANEO:", ln=True); pdf.set_font("Arial", '', 8)
                 pdf.multi_cell(0, 4, "Esta apuracao inclui a apropriacao de credito tributario originado em competencia anterior, lancado tempestivamente neste periodo."); pdf.ln(2)
                 for _, r in df_ext.iterrows(): pdf.multi_cell(0, 4, f"- Origem: {r['competencia_origem']} | Doc: {r['num_nota']} - {r['fornecedor']} | PIS: {formatar_moeda(r['valor_pis'])} | COF: {formatar_moeda(r['valor_cofins'])}\n  Justificativa: {r['historico']}")
             
             with get_db_connection() as conn:
-                df_fut = pd.read_sql(f"SELECT * FROM lancamentos l WHERE {filtro_empresa} AND l.competencia_origem = %s AND l.competencia != %s AND l.status_auditoria = 'ATIVO'", conn, params=(comp_db, comp_db))
+                df_fut = pd.read_sql(f"SELECT * FROM lancamentos l WHERE {filtro_empresa} AND l.competencia_origem = %s AND l.competencia != %s AND l.status_auditoria = 'ATIVO' AND l.is_custo_avulso = 0", conn, params=(comp_db, comp_db))
             
             if not df_fut.empty:
                 pdf.ln(5); pdf.set_font("Arial", 'B', 9); pdf.cell(0, 6, "NOTA DE AUDITORIA - CREDITO APROPRIADO EXTEMPORANEAMENTE (NO FUTURO):", ln=True); pdf.set_font("Arial", '', 8)
                 for _, r in df_fut.iterrows(): pdf.multi_cell(0, 4, f"Registra-se que o documento fiscal {r['num_nota']}, emitido por {r['fornecedor']} nesta competencia ({comp_db}), nao compos a base de calculo original deste demonstrativo. O respectivo credito foi apropriado extemporaneamente na competencia {r['competencia']}.\nMotivo: {r['historico']}"); pdf.ln(2)
 
             pdf_bytes = pdf.output(dest='S').encode('latin1')
-            st.success("Ficheiros processados e saldos auditados com sucesso!")
+            st.success("Ficheiros processados com sucesso!")
             c_btn1, c_btn2, _ = st.columns([1, 1, 2])
             c_btn1.download_button("Baixar XLSX (Exportação ERP)", data=buffer.getvalue(), file_name=f"LCTOS_{comp_db}.xlsx")
             c_btn2.download_button("Baixar PDF (Demonstrativo Fiscal)", data=pdf_bytes, file_name=f"RESUMO_{comp_db}.pdf")
@@ -1139,7 +1137,6 @@ def modulo_imobilizado():
         with st.expander("🖨️ Central de Relatórios de Inventário (Auditoria e Projeção)", expanded=False):
             st.info("Gere relatórios de saldos exatos a partir da data de aquisição do ativo mais antigo ou verifique o valor residual em datas futuras para projeção de desinvestimento.")
             
-            # Lógica para descobrir a data mínima do banco
             with get_db_connection() as conn_min_dt:
                 cursor_min = conn_min_dt.cursor(dictionary=True)
                 cursor_min.execute("SELECT MIN(data_compra) as min_c, MIN(data_saldo_inicial) as min_s FROM bens_imobilizado WHERE tenant_id = %s", (int(emp_id),))
@@ -1161,7 +1158,6 @@ def modulo_imobilizado():
             opcoes_grupos = ["Todos os Grupos"] + df_g['nome_grupo'].tolist() if not df_g.empty else ["Todos os Grupos"]
             grupo_filtro = c_filtro.selectbox("Filtrar por Grupo", opcoes_grupos, key="filtro_grupo_pdf")
             
-            # Cascata de Filtro de Itens Específicos com Formatação Idêntica
             with get_db_connection() as conn_inv_pdf:
                 if grupo_filtro != "Todos os Grupos":
                     grp_id = int(df_g[df_g['nome_grupo'] == grupo_filtro].iloc[0]['id'])
@@ -1179,7 +1175,6 @@ def modulo_imobilizado():
                     lista_itens.append(f"[{r_bem['id']}] {desc_bem}{nf_bem}{val_bem}{status_bem}")
             
             item_filtro = c_item.selectbox("Ativo Específico", lista_itens, key="filtro_item_pdf")
-            
             data_posicao = c_data.date_input("Data Base (Posição ou Projeção)", value=hoje_br.date(), min_value=data_minima, key="dt_pos_pdf")
             
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
@@ -1212,7 +1207,6 @@ def modulo_imobilizado():
                     
                     for _, r in df_pdf.iterrows():
                         if grupo_filtro != "Todos os Grupos" and r.get('nome_grupo') != grupo_filtro: continue
-                        
                         if item_filtro != "Todos os Itens do Grupo/Empresa":
                             item_selecionado_id = int(item_filtro.split("]")[0].replace("[", ""))
                             if r['id'] != item_selecionado_id: continue
@@ -1249,8 +1243,7 @@ def modulo_imobilizado():
                         
                         if pd.notnull(r.get('data_saldo_inicial')):
                             if data_posicao < dt_base:
-                                valor_residual = base_calc
-                                dep_acumulada = 0.0
+                                valor_residual = base_calc; dep_acumulada = 0.0
                             else: valor_residual = max(0.0, saldo_ini - dep_acumulada)
                         else: 
                             valor_residual = max(0.0, base_calc - dep_acumulada)
@@ -1259,12 +1252,7 @@ def modulo_imobilizado():
 
                         desc_limpa = limpar_texto(r.get('descricao_item'))[:35]
                         
-                        pdf_inv.cell(10, 6, str(r['id']), 1)
-                        pdf_inv.cell(65, 6, desc_limpa, 1)
-                        pdf_inv.cell(20, 6, dt_compra_orig.strftime('%d/%m/%Y'), 1)
-                        pdf_inv.cell(25, 6, formatar_moeda(base_calc), 1)
-                        pdf_inv.cell(30, 6, formatar_moeda(dep_acumulada), 1)
-                        pdf_inv.cell(40, 6, formatar_moeda(valor_residual), 1, ln=True)
+                        pdf_inv.cell(10, 6, str(r['id']), 1); pdf_inv.cell(65, 6, desc_limpa, 1); pdf_inv.cell(20, 6, dt_compra_orig.strftime('%d/%m/%Y'), 1); pdf_inv.cell(25, 6, formatar_moeda(base_calc), 1); pdf_inv.cell(30, 6, formatar_moeda(dep_acumulada), 1); pdf_inv.cell(40, 6, formatar_moeda(valor_residual), 1, ln=True)
                         
                         t_base += base_calc; t_dep += dep_acumulada; t_res += valor_residual
                         
@@ -1363,7 +1351,7 @@ def modulo_parametros():
 
     with tab_custo:
         st.markdown("##### Destinos de Custo Líquido por Empresa")
-        st.info("Crie as opções de destino contábil (como CMV, CSV ou CSP) para cada empresa. Estas opções aparecerão na tela de Apuração ao registrar uma despesa.")
+        st.info("Crie as opções de destino contábil (como CMV, CSV ou CSP) para cada empresa. Estas opções aparecerão na aba de Custo Avulso.")
         df_emp_c = carregar_empresas_visiveis()
         if not df_emp_c.empty:
             emp_sel_c = st.selectbox("Selecione a Empresa", df_emp_c.apply(formatar_nome_empresa, axis=1), key="sel_emp_custos")
@@ -1405,7 +1393,6 @@ def modulo_parametros():
 
     with tab_limpeza:
         st.markdown("#### Verificação de Integridade de Operações")
-        st.info("Utilize esta ferramenta para identificar operações duplicadas ou sem utilização.")
         if st.button("Executar Auditoria de Operações"):
             with get_db_cursor(dictionary=True) as cursor:
                 cursor.execute("SELECT o.id, o.nome, o.tipo, (SELECT COUNT(*) FROM lancamentos l WHERE l.operacao_id = o.id) as total_usado FROM operacoes o ORDER BY o.nome")
@@ -1416,7 +1403,7 @@ def modulo_parametros():
                 n = o['nome'].strip().lower()
                 if n in vistos: duplicados.append((o, vistos[n]))
                 else: vistos[n] = o
-            if not duplicados: st.success("Nenhuma duplicidade de nome encontrada.")
+            if not duplicados: st.success("Nenhuma duplicidade encontrada.")
             else:
                 for d, original in duplicados:
                     c1, c2 = st.columns([4, 1])
