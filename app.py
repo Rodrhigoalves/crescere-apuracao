@@ -607,7 +607,7 @@ def modulo_parametros():
 
     st.markdown("### Parâmetros Contábeis e Exportação ERP")
     st.info("⚠️ Cole aqui o seu módulo de parâmetros original (sem mudanças).")
-``
+    
 # ==========================================================
 # ========================= PART 3 ==========================
 # ==========================================================
