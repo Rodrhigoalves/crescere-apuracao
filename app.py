@@ -285,7 +285,7 @@ def modulo_empresas():
 
 # --- 6. MÓDULO APURAÇÃO ---
 def modulo_apuracao():
-    st.markdown("### Apuração de Impostos (PIS/COFINS)")
+    st.markdown("### Apuração de Impostos e Custos")
     df_emp = carregar_empresas_visiveis()
     
     if df_emp.empty:
@@ -301,6 +301,9 @@ def modulo_apuracao():
     regime = df_emp.loc[df_emp['id'] == emp_id].iloc[0]['regime']
     competencia = c_comp.text_input("Competência (MM/AAAA)", value=competencia_padrao)
     c_user.text_input("Operador", value=st.session_state.usuario_logado, disabled=True)
+
+    with get_db_connection() as conn_dest:
+        df_destinos_custo = pd.read_sql("SELECT * FROM destinos_custo WHERE empresa_id = %s", conn_dest, params=(emp_id,))
 
     st.divider()
     col_in, col_ras = st.columns([1, 1], gap="large")
@@ -328,6 +331,21 @@ def modulo_apuracao():
                 v_pis_ret = c_p.number_input("Valor PIS Retido (R$)", min_value=0.00, step=10.0, key=f"p_ret_{fk}")
                 v_cof_ret = c_c.number_input("Valor COFINS Retido (R$)", min_value=0.00, step=10.0, key=f"c_ret_{fk}")
 
+        # --- LÓGICA DE DESTINO DE CUSTO (CMV/CSV) ---
+        gerar_custo_liq = False
+        destino_sel = None
+        vp_calc, vc_calc = calcular_impostos(regime, op_row['nome'], v_base)
+        
+        if op_row['tipo'] == 'DESPESA':
+            gerar_custo_liq = st.checkbox("Vincular a um Custo Líquido (Estoque/Serviço)?", key=f"chk_custo_{fk}", help="O sistema calculará (Valor Bruto - PIS - COFINS) e jogará na conta contábil especificada.")
+            if gerar_custo_liq:
+                if df_destinos_custo.empty:
+                    st.error("Nenhum Destino de Custo configurado para esta unidade. Vá na aba 'Parâmetros Contábeis' > 'Destinos de Custo'.")
+                else:
+                    destino_sel = st.selectbox("Selecione o Destino do Custo", df_destinos_custo['nome_destino'].tolist(), key=f"dest_sel_{fk}")
+                    custo_liquido_projecao = v_base - vp_calc - vc_calc
+                    st.info(f"Custo Líquido a Contabilizar: **{formatar_moeda(custo_liquido_projecao)}**")
+        
         hist = st.text_input("Histórico / Observação (Obrigatório para Extemporâneo)", key=f"hist_{fk}")
         
         exige_doc = retro or teve_retencao
@@ -348,23 +366,31 @@ def modulo_apuracao():
             elif teve_retencao and v_pis_ret == 0 and v_cof_ret == 0: st.warning("Informe os valores retidos.")
             elif exige_doc and (not num_nota or not fornecedor or (retro and not comp_origem) or (retro and not hist)):
                 st.error("Para Retenções e Extemporâneos, o Nº do Documento, Fornecedor, Mês Origem e Histórico são obrigatórios.")
+            elif gerar_custo_liq and df_destinos_custo.empty:
+                st.error("Configure um Destino de Custo antes de usar esta opção.")
             else:
-                vp, vc = calcular_impostos(regime, op_row['nome'], v_base)
+                dest_row = df_destinos_custo[df_destinos_custo['nome_destino'] == destino_sel].iloc[0] if (gerar_custo_liq and destino_sel) else None
+                
                 st.session_state.rascunho_lancamentos.append({
                     "id_unico": uuid.uuid4().hex,
                     "emp_id": int(emp_id),
                     "op_id": int(op_row['id']),
                     "op_nome": op_sel,
                     "v_base": float(v_base),
-                    "v_pis": float(vp),
-                    "v_cofins": float(vc),
+                    "v_pis": float(vp_calc),
+                    "v_cofins": float(vc_calc),
                     "v_pis_ret": float(v_pis_ret),
                     "v_cof_ret": float(v_cof_ret),
                     "hist": hist,
                     "retro": int(retro),
                     "origem": comp_origem if retro else None,
                     "nota": num_nota,
-                    "fornecedor": fornecedor
+                    "fornecedor": fornecedor,
+                    "custo_liq": float(v_base - vp_calc - vc_calc) if dest_row is not None else 0.0,
+                    "c_deb": dest_row['conta_debito'] if dest_row is not None else None,
+                    "c_cred": dest_row['conta_credito'] if dest_row is not None else None,
+                    "c_cod": dest_row['hist_codigo'] if dest_row is not None else None,
+                    "c_txt": dest_row['hist_texto'] if dest_row is not None else None
                 })
                 st.session_state.form_key += 1; st.rerun()
 
@@ -382,11 +408,12 @@ def modulo_apuracao():
                     c_txt, c_val, c_del = st.columns([5, 3, 1])
                     retro_badge = f" <span style='color:red;font-size:10px;'>(EXTEMP: {it['origem']})</span>" if it['retro'] == 1 else ""
                     ret_badge = f" <span style='color:orange;font-size:10px;'>(RETENÇÃO)</span>" if float(it.get('v_pis_ret', 0)) > 0 or float(it.get('v_cof_ret', 0)) > 0 else ""
+                    custo_badge = f" <span style='color:green;font-size:10px;'>(CUSTO: {formatar_moeda(it['custo_liq']).replace('$', '&#36;')})</span>" if float(it.get('custo_liq', 0)) > 0 else ""
                     doc_str = f" | Doc: {it['nota']}" if it.get('nota') else ""
                     forn_str = f" | Forn: {it['fornecedor']}" if it.get('fornecedor') else ""
                     hist_str = f"<br>Histórico: {it['hist']}" if it.get('hist') else ""
                     
-                    c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}<br>PIS: {formatar_moeda(it['v_pis']).replace('$', '&#36;')} | COF: {formatar_moeda(it['v_cofins']).replace('$', '&#36;')}<br><span style='color:#64748b;'>{doc_str}{forn_str}{hist_str}</span></small>", unsafe_allow_html=True)
+                    c_txt.markdown(f"<small style='line-height: 1.2;'><b>{it['op_nome']}</b>{retro_badge}{ret_badge}{custo_badge}<br>PIS: {formatar_moeda(it['v_pis']).replace('$', '&#36;')} | COF: {formatar_moeda(it['v_cofins']).replace('$', '&#36;')}<br><span style='color:#64748b;'>{doc_str}{forn_str}{hist_str}</span></small>", unsafe_allow_html=True)
                     c_val.markdown(f"<span style='font-size: 14px; font-weight: 600;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
                     
                     c_del.button("×", key=f"del_{it['id_unico']}", on_click=remover_do_rascunho, args=(i,))
@@ -399,9 +426,9 @@ def modulo_apuracao():
                 try:
                     with get_db_cursor(commit=True) as cursor:
                         for it in st.session_state.rascunho_lancamentos:
-                            query = """INSERT INTO lancamentos (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, valor_pis_retido, valor_cofins_retido, historico, usuario_registro, status_auditoria, origem_retroativa, competencia_origem, num_nota, fornecedor) VALUES (%s,%s,%s,CURDATE(),%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s,%s,%s,%s)"""
+                            query = """INSERT INTO lancamentos (empresa_id, operacao_id, competencia, data_lancamento, valor_base, valor_pis, valor_cofins, valor_pis_retido, valor_cofins_retido, historico, usuario_registro, status_auditoria, origem_retroativa, competencia_origem, num_nota, fornecedor, valor_custo_liquido, custo_conta_deb, custo_conta_cred, custo_hist_cod, custo_hist_texto) VALUES (%s,%s,%s,CURDATE(),%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
                             c_origem_db = validar_competencia(it['origem']) if it['origem'] else None
-                            cursor.execute(query, (int(it['emp_id']), int(it['op_id']), comp_db, float(it['v_base']), float(it['v_pis']), float(it['v_cofins']), float(it.get('v_pis_ret', 0)), float(it.get('v_cof_ret', 0)), it['hist'], st.session_state.username, int(it['retro']), c_origem_db, it['nota'], it['fornecedor']))
+                            cursor.execute(query, (int(it['emp_id']), int(it['op_id']), comp_db, float(it['v_base']), float(it['v_pis']), float(it['v_cofins']), float(it.get('v_pis_ret', 0)), float(it.get('v_cof_ret', 0)), it['hist'], st.session_state.username, int(it['retro']), c_origem_db, it['nota'], it['fornecedor'], float(it.get('custo_liq', 0.0)), it.get('c_deb'), it.get('c_cred'), it.get('c_cod'), it.get('c_txt')))
                     st.session_state.rascunho_lancamentos = []; st.success("Gravado com sucesso no banco de dados!"); st.rerun()
                 except Exception as e: st.error(f"Erro no banco: {e}")
 
@@ -469,7 +496,7 @@ def modulo_relatorios():
                     filtro_empresa = f"l.empresa_id = {emp_id}"
                     nome_relatorio_pdf = f"{emp_row['nome']}"
 
-                query = f"SELECT l.*, o.nome as op_nome, o.tipo as op_tipo, e.apelido_unidade, e.tipo as emp_tipo, o.conta_deb_pis, o.conta_cred_pis, o.pis_h_codigo, o.pis_h_texto, o.conta_deb_cof, o.conta_cred_cof, o.cofins_h_codigo, o.cofins_h_texto, o.conta_deb_custo, o.conta_cred_custo, o.custo_h_codigo, o.custo_h_texto FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id JOIN empresas e ON l.empresa_id = e.id WHERE {filtro_empresa} AND l.competencia = %s AND l.status_auditoria = 'ATIVO'"
+                query = f"SELECT l.*, o.nome as op_nome, o.tipo as op_tipo, e.apelido_unidade, e.tipo as emp_tipo, o.conta_deb_pis, o.conta_cred_pis, o.pis_h_codigo, o.pis_h_texto, o.conta_deb_cof, o.conta_cred_cof, o.cofins_h_codigo, o.cofins_h_texto FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id JOIN empresas e ON l.empresa_id = e.id WHERE {filtro_empresa} AND l.competencia = %s AND l.status_auditoria = 'ATIVO'"
                 df_export = pd.read_sql(query, conn, params=(comp_db,))
 
                 query_hist = f"SELECT o.tipo as op_tipo, SUM(l.valor_pis) as t_pis, SUM(l.valor_cofins) as t_cof, SUM(l.valor_pis_retido) as t_pis_ret, SUM(l.valor_cofins_retido) as t_cof_ret FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE {filtro_empresa} AND l.competencia < %s AND l.status_auditoria = 'ATIVO' GROUP BY o.tipo"
@@ -491,16 +518,18 @@ def modulo_relatorios():
                 for _, r in df_export.iterrows():
                     d_str = r['data_lancamento'].strftime('%d/%m/%Y') if pd.notnull(r['data_lancamento']) else ''
                     doc = r['num_nota'] or r['id']
+                    
+                    # Linha PIS
                     if pd.notnull(r['conta_deb_pis']) and pd.notnull(r['conta_cred_pis']):
                         linhas_excel.append(criar_linha_erp(r['conta_deb_pis'], r['conta_cred_pis'], d_str, r['valor_pis'], r.get('pis_h_codigo'), f"PIS - {p_txt(r.get('pis_h_texto'), r['op_nome'])}", doc))
+                    
+                    # Linha COFINS
                     if pd.notnull(r['conta_deb_cof']) and pd.notnull(r['conta_cred_cof']):
                         linhas_excel.append(criar_linha_erp(r['conta_deb_cof'], r['conta_cred_cof'], d_str, r['valor_cofins'], r.get('cofins_h_codigo'), f"COF - {p_txt(r.get('cofins_h_texto'), r['op_nome'])}", doc))
                     
-                    # --- LÓGICA DE CUSTO LÍQUIDO (CMV/CSV/CSP) PARA ERP ---
-                    if pd.notnull(r.get('conta_deb_custo')) and pd.notnull(r.get('conta_cred_custo')) and str(r.get('conta_deb_custo')).strip() != '':
-                        v_custo_liquido = float(r['valor_base']) - float(r['valor_pis']) - float(r['valor_cofins'])
-                        if v_custo_liquido > 0:
-                            linhas_excel.append(criar_linha_erp(r['conta_deb_custo'], r['conta_cred_custo'], d_str, v_custo_liquido, r.get('custo_h_codigo'), f"CUSTO LIQ - {p_txt(r.get('custo_h_texto'), r['op_nome'])}", doc))
+                    # Linha Custo Líquido (CMV/CSV/CSP)
+                    if pd.notnull(r.get('custo_conta_deb')) and float(r.get('valor_custo_liquido', 0)) > 0:
+                        linhas_excel.append(criar_linha_erp(r['custo_conta_deb'], r['custo_conta_cred'], d_str, r['valor_custo_liquido'], r.get('custo_hist_cod'), f"CUSTO LIQ - {p_txt(r.get('custo_hist_texto'), r['op_nome'])}", doc))
             
             df_xlsx = pd.DataFrame(linhas_excel)
             buffer = io.BytesIO()
@@ -1264,7 +1293,7 @@ def modulo_parametros():
     df_op = carregar_operacoes()
     op_nomes = df_op['nome'].tolist()
     
-    tab_edit, tab_novo, tab_fecho, tab_limpeza, tab_imob = st.tabs(["Editar Existente", "Nova Operação", "Fecho por Empresa", "Auditoria/Limpeza", "Grupos Imobilizado"])
+    tab_edit, tab_novo, tab_custo, tab_fecho, tab_limpeza, tab_imob = st.tabs(["Editar Existente", "Nova Operação", "Destinos de Custo (CMV/CSV)", "Fecho por Empresa", "Auditoria/Limpeza", "Grupos Imobilizado"])
     
     with tab_edit:
         sel_op = st.selectbox("Selecione a Operação:", op_nomes)
@@ -1285,13 +1314,6 @@ def modulo_parametros():
             c_cred = c6.text_input("Crédito COFINS", value=limpar_texto(row_op.get('conta_cred_cof')), key=f"cc_{oid}")
             c_cod = c7.text_input("Cód ERP COFINS", value=limpar_texto(row_op.get('cofins_h_codigo')), key=f"ccd_{oid}")
             c_txt = c8.text_input("Texto Padrão COF", value=limpar_texto(row_op.get('cofins_h_texto')), key=f"ctx_{oid}")
-            
-            st.markdown("##### Configuração de CUSTO (CMV / CSV / CSP)")
-            c_cus_d, c_cus_c, c_cus_cod, c_cus_txt = st.columns([1, 1, 1, 2])
-            cus_deb = c_cus_d.text_input("Débito Custo", value=limpar_texto(row_op.get('conta_deb_custo')), key=f"cusd_{oid}")
-            cus_cred = c_cus_c.text_input("Crédito Custo", value=limpar_texto(row_op.get('conta_cred_custo')), key=f"cusc_{oid}")
-            cus_cod = c_cus_cod.text_input("Cód ERP Custo", value=limpar_texto(row_op.get('custo_h_codigo')), key=f"cuscd_{oid}")
-            cus_txt = c_cus_txt.text_input("Texto Padrão Custo", value=limpar_texto(row_op.get('custo_h_texto')), key=f"custx_{oid}")
 
             if row_op['tipo'] == 'RECEITA':
                 with st.expander("Configuração de Retenção na Fonte", expanded=False):
@@ -1310,7 +1332,7 @@ def modulo_parametros():
             if st.form_submit_button("Atualizar Operação"):
                 try:
                     with get_db_cursor(commit=True) as cursor:
-                        cursor.execute("""UPDATE operacoes SET conta_deb_pis=%s, conta_cred_pis=%s, pis_h_codigo=%s, pis_h_texto=%s, conta_deb_cof=%s, conta_cred_cof=%s, cofins_h_codigo=%s, cofins_h_texto=%s, conta_deb_custo=%s, conta_cred_custo=%s, custo_h_codigo=%s, custo_h_texto=%s, ret_pis_conta_deb=%s, ret_pis_conta_cred=%s, ret_pis_h_codigo=%s, ret_pis_h_texto=%s, ret_cofins_conta_deb=%s, ret_cofins_conta_cred=%s, ret_cofins_h_codigo=%s, ret_cofins_h_texto=%s WHERE id=%s""", (p_deb, p_cred, p_cod, p_txt, c_deb, c_cred, c_cod, c_txt, cus_deb, cus_cred, cus_cod, cus_txt, r_p_deb, r_p_cred, r_p_cod, r_p_txt, r_c_deb, r_c_cred, r_c_cod, r_c_txt, int(oid)))
+                        cursor.execute("""UPDATE operacoes SET conta_deb_pis=%s, conta_cred_pis=%s, pis_h_codigo=%s, pis_h_texto=%s, conta_deb_cof=%s, conta_cred_cof=%s, cofins_h_codigo=%s, cofins_h_texto=%s, ret_pis_conta_deb=%s, ret_pis_conta_cred=%s, ret_pis_h_codigo=%s, ret_pis_h_texto=%s, ret_cofins_conta_deb=%s, ret_cofins_conta_cred=%s, ret_cofins_h_codigo=%s, ret_cofins_h_texto=%s WHERE id=%s""", (p_deb, p_cred, p_cod, p_txt, c_deb, c_cred, c_cod, c_txt, r_p_deb, r_p_cred, r_p_cod, r_p_txt, r_c_deb, r_c_cred, r_c_cod, r_c_txt, int(oid)))
                     carregar_operacoes.clear(); st.success("Atualizado!"); st.rerun()
                 except Exception as e: st.error(f"Erro: {e}")
 
@@ -1323,8 +1345,6 @@ def modulo_parametros():
             c1, c2, c3, c4 = st.columns([1, 1, 1, 2]); n_p_deb = c1.text_input("Débito PIS", key="n_pd"); n_p_cred = c2.text_input("Crédito PIS", key="n_pc"); n_p_cod = c3.text_input("Cód ERP PIS", key="n_pcd"); n_p_txt = c4.text_input("Texto Padrão PIS", key="n_ptx")
             st.markdown("##### Configuração COFINS")
             c5, c6, c7, c8 = st.columns([1, 1, 1, 2]); n_c_deb = c5.text_input("Débito COFINS", key="n_cd"); n_c_cred = c6.text_input("Crédito COFINS", key="n_cc"); n_c_cod = c7.text_input("Cód ERP COFINS", key="n_ccd"); n_c_txt = c8.text_input("Texto Padrão COF", key="n_ctx")
-            st.markdown("##### Configuração de CUSTO (CMV / CSV / CSP)")
-            c9, c10, c11, c12 = st.columns([1, 1, 1, 2]); n_cus_deb = c9.text_input("Débito Custo", key="n_cusd"); n_cus_cred = c10.text_input("Crédito Custo", key="n_cusc"); n_cus_cod = c11.text_input("Cód ERP Custo", key="n_cuscd"); n_cus_txt = c12.text_input("Texto Padrão Custo", key="n_custx")
             st.divider()
             
             if st.form_submit_button("Registar Nova Operação"):
@@ -1335,10 +1355,52 @@ def modulo_parametros():
                     else:
                         try:
                             with get_db_cursor(commit=True) as cursor:
-                                query_insert = """INSERT INTO operacoes (nome, tipo, conta_deb_pis, conta_cred_pis, pis_h_codigo, pis_h_texto, conta_deb_cof, conta_cred_cof, cofins_h_codigo, cofins_h_texto, conta_deb_custo, conta_cred_custo, custo_h_codigo, custo_h_texto, ret_pis_conta_deb, ret_pis_conta_cred, ret_pis_h_codigo, ret_pis_h_texto, ret_cofins_conta_deb, ret_cofins_conta_cred, ret_cofins_h_codigo, ret_cofins_h_texto) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"""
-                                valores = (novo_nome, novo_tipo, n_p_deb, n_p_cred, n_p_cod, n_p_txt, n_c_deb, n_c_cred, n_c_cod, n_c_txt, n_cus_deb, n_cus_cred, n_cus_cod, n_cus_txt)
+                                query_insert = """INSERT INTO operacoes (nome, tipo, conta_deb_pis, conta_cred_pis, pis_h_codigo, pis_h_texto, conta_deb_cof, conta_cred_cof, cofins_h_codigo, cofins_h_texto, ret_pis_conta_deb, ret_pis_conta_cred, ret_pis_h_codigo, ret_pis_h_texto, ret_cofins_conta_deb, ret_cofins_conta_cred, ret_cofins_h_codigo, ret_cofins_h_texto) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"""
+                                valores = (novo_nome, novo_tipo, n_p_deb, n_p_cred, n_p_cod, n_p_txt, n_c_deb, n_c_cred, n_c_cod, n_c_txt)
                                 cursor.execute(query_insert, valores)
                             carregar_operacoes.clear(); st.success("Nova operação registada com sucesso!"); st.rerun()
+                        except Exception as e: st.error(f"Erro ao salvar: {e}")
+
+    with tab_custo:
+        st.markdown("##### Destinos de Custo Líquido por Empresa")
+        st.info("Crie as opções de destino contábil (como CMV, CSV ou CSP) para cada empresa. Estas opções aparecerão na tela de Apuração ao registrar uma despesa.")
+        df_emp_c = carregar_empresas_visiveis()
+        if not df_emp_c.empty:
+            emp_sel_c = st.selectbox("Selecione a Empresa", df_emp_c.apply(formatar_nome_empresa, axis=1), key="sel_emp_custos")
+            emp_id_c = int(df_emp_c.loc[df_emp_c.apply(formatar_nome_empresa, axis=1) == emp_sel_c].iloc[0]['id'])
+            
+            with get_db_connection() as conn_c:
+                df_destinos = pd.read_sql("SELECT * FROM destinos_custo WHERE empresa_id = %s", conn_c, params=(emp_id_c,))
+            
+            if df_destinos.empty:
+                st.warning("Nenhum destino de custo configurado para esta empresa.")
+            else:
+                for _, r_dest in df_destinos.iterrows():
+                    col_d1, col_d2 = st.columns([5, 1])
+                    col_d1.markdown(f"**{r_dest['nome_destino']}** | Débito: {r_dest['conta_debito']} | Crédito: {r_dest['conta_credito']} | Histórico: {r_dest['hist_texto']}")
+                    if col_d2.button("Excluir", key=f"del_dest_{r_dest['id']}"):
+                        with get_db_cursor(commit=True) as cur_del:
+                            cur_del.execute("DELETE FROM destinos_custo WHERE id = %s", (r_dest['id'],))
+                        st.rerun()
+                st.divider()
+
+            st.markdown("###### Adicionar Novo Destino de Custo")
+            with st.form("form_novo_destino_custo", clear_on_submit=True):
+                n_destino = st.text_input("Nome/Identificação (Ex: CMV - Mercadorias, CSV - Serviços de Concreto)")
+                c_d1, c_d2, c_d3, c_d4 = st.columns([1, 1, 1, 2])
+                n_cd = c_d1.text_input("Conta Débito Custo")
+                n_cc = c_d2.text_input("Conta Crédito Custo")
+                n_hc = c_d3.text_input("Cód ERP Histórico")
+                n_ht = c_d4.text_input("Texto Padrão Custo")
+                
+                if st.form_submit_button("Salvar Destino de Custo"):
+                    if not n_destino or not n_cd or not n_cc:
+                        st.error("Nome, Conta Débito e Conta Crédito são obrigatórios.")
+                    else:
+                        try:
+                            with get_db_cursor(commit=True) as cur_ins:
+                                cur_ins.execute("INSERT INTO destinos_custo (empresa_id, nome_destino, conta_debito, conta_credito, hist_codigo, hist_texto) VALUES (%s,%s,%s,%s,%s,%s)", (emp_id_c, n_destino, n_cd, n_cc, n_hc, n_ht))
+                            st.success("Destino de custo criado com sucesso!"); st.rerun()
                         except Exception as e: st.error(f"Erro ao salvar: {e}")
 
     with tab_limpeza:
