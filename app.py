@@ -139,7 +139,10 @@ def carregar_operacoes():
 @st.cache_data(ttl=300)
 def carregar_empresas_ativas():
     with get_db_connection() as conn:
-        return pd.read_sql("SELECT * FROM empresas WHERE status_assinatura = 'ATIVO'", conn)
+        df = pd.read_sql("SELECT * FROM empresas WHERE status_assinatura = 'ATIVO'", conn)
+        if not df.empty:
+            df['id'] = df['id'].astype(int)
+        return df
 
 @st.cache_data(ttl=120)
 def carregar_empresas_visiveis():
@@ -155,13 +158,15 @@ def carregar_empresas_visiveis():
               AND ue.status = 'ATIVO'
               AND e.status_assinatura = 'ATIVO'
         """
-        df = pd.read_sql(query, conn, params=(st.session_state.contabilidade_id, st.session_state.usuario_id))
+        df = pd.read_sql(query, conn, params=(int(st.session_state.contabilidade_id), int(st.session_state.usuario_id)))
         
         # Fallback obrigatório (Modelo Antigo)
         if df.empty and st.session_state.empresa_id_legacy:
             query_fallback = "SELECT * FROM empresas WHERE id = %s AND status_assinatura = 'ATIVO'"
-            df = pd.read_sql(query_fallback, conn, params=(st.session_state.empresa_id_legacy,))
+            df = pd.read_sql(query_fallback, conn, params=(int(st.session_state.empresa_id_legacy),))
             
+        if not df.empty:
+            df['id'] = df['id'].astype(int)
         return df
 
 def verificar_senha(senha_plana, hash_banco): return bcrypt.checkpw(senha_plana.encode('utf-8'), hash_banco.encode('utf-8'))
@@ -214,7 +219,6 @@ if not st.session_state.autenticado:
                     st.session_state.usuario_logado = user_data['nome']
                     st.session_state.username = user_data['username']
                     
-                    # Carga Multiempresa na Sessão
                     st.session_state.usuario_id = user_data.get('id')
                     st.session_state.contabilidade_id = user_data.get('contabilidade_id')
                     st.session_state.empresa_id_legacy = user_data.get('empresa_id')
@@ -593,8 +597,8 @@ def modulo_imobilizado():
         def fragmento_manutencao(emp_id_param):
             st.markdown("#### Manutenção de Ativos (Edição/Transferência/Exclusão)")
             with get_db_connection() as conn_f:
-                df_todos_manut = pd.read_sql("SELECT b.*, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = %s", conn_f, params=(emp_id_param,))
-                df_grupos_locais = pd.read_sql("SELECT * FROM grupos_imobilizado WHERE tenant_id = %s", conn_f, params=(emp_id_param,))
+                df_todos_manut = pd.read_sql("SELECT b.*, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = %s", conn_f, params=(int(emp_id_param),))
+                df_grupos_locais = pd.read_sql("SELECT * FROM grupos_imobilizado WHERE tenant_id = %s", conn_f, params=(int(emp_id_param),))
                 df_plano_existe = pd.read_sql("SELECT DISTINCT bem_id FROM plano_depreciacao_itens", conn_f)
             
             bens_com_plano = df_plano_existe['bem_id'].tolist() if not df_plano_existe.empty else []
@@ -706,7 +710,7 @@ def modulo_imobilizado():
 
                         primeira_cota_manual_m = st.number_input("Ajuste da 1ª Parcela (Opcional - R$)", min_value=0.0, max_value=float(m_vri_calculado), value=float(primeira_cota_calc_m), step=10.0, key=f"cota_manut_{bem_id}")
                         
-                        with st.expander("👀 Ver Prévia Dinâmica do Plano de Voo (Resumido)", expanded=True):
+                        with st.expander("Ver Prévia Dinâmica do Plano de Voo (Resumido)", expanded=True):
                             preview_data_m = []
                             s_rest_m = m_vri_calculado
                             d_plan_m = date(ano_inicio_plan_m, mes_inicio_plan_m, 1)
@@ -780,7 +784,7 @@ def modulo_imobilizado():
                                         val_dtsi = m_dtsi if ("1" not in cenario_manut) else None
                                         val_tx_cust = m_taxa_cust if m_taxa_cust > 0 else None
                                         
-                                        cursor_upd.execute("""UPDATE bens_imobilizado SET grupo_id=%s, descricao_item=%s, marca_modelo=%s, num_serie_placa=%s, plaqueta=%s, localizacao=%s, numero_nota_fiscal=%s, nome_fornecedor=%s, valor_compra=%s, data_compra=%s, regra_credito=%s, data_saldo_inicial=%s, valor_residual_inicial=%s, taxa_customizada=%s, tenant_id=%s, status=%s WHERE id=%s""", (m_grupo_id, m_desc, m_marca, m_serie, m_plaq, m_loc, m_nf, m_forn, float(m_vaq), m_dtc, m_regra, val_dtsi, float(m_vri_calculado), val_tx_cust, novo_emp_id, m_status, bem_id))
+                                        cursor_upd.execute("""UPDATE bens_imobilizado SET grupo_id=%s, descricao_item=%s, marca_modelo=%s, num_serie_placa=%s, plaqueta=%s, localizacao=%s, numero_nota_fiscal=%s, nome_fornecedor=%s, valor_compra=%s, data_compra=%s, regra_credito=%s, data_saldo_inicial=%s, valor_residual_inicial=%s, taxa_customizada=%s, tenant_id=%s, status=%s WHERE id=%s""", (int(m_grupo_id), m_desc, m_marca, m_serie, m_plaq, m_loc, m_nf, m_forn, float(m_vaq), m_dtc, m_regra, val_dtsi, float(m_vri_calculado), val_tx_cust, int(novo_emp_id), m_status, bem_id))
                                         
                                         if m_status != 'ativo' and bem_row['status'] == 'ativo': 
                                             cursor_upd.execute("UPDATE bens_imobilizado SET data_baixa = CURDATE() WHERE id=%s AND data_baixa IS NULL", (bem_id,))
@@ -880,7 +884,7 @@ def modulo_imobilizado():
                                 ano_inicio_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
                                 primeira_cota_manual = st.number_input("Ajuste da 1ª Parcela (Opcional - R$)", min_value=0.0, max_value=float(v_residual_atual), value=float(primeira_cota_calc), step=10.0, key="cota_cad_manual")
                                 
-                                with st.expander("👀 Ver Prévia Dinâmica do Plano de Voo", expanded=True):
+                                with st.expander("Ver Prévia Dinâmica do Plano de Voo", expanded=True):
                                     preview_data = []
                                     s_rest = v_residual_atual
                                     d_plan = date(ano_inicio_plan, mes_inicio_plan, 1)
@@ -965,8 +969,8 @@ def modulo_imobilizado():
                 if meses_futuros: st.error("ERRO: O processamento bloqueou a apropriação de despesas de meses futuros (CPC 27).")
                 elif st.button("Gerar Exportação de Lançamentos (XLSX)", type="primary"):
                     with get_db_connection() as conn_p:
-                        df_bens = pd.read_sql("SELECT b.*, g.taxa_anual_percentual, g.conta_contabil_despesa, g.conta_contabil_dep_acumulada, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = %s AND b.status = 'ativo'", conn_p, params=(emp_id,))
-                        df_planos = pd.read_sql("SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = %s", conn_p, params=(emp_id,))
+                        df_bens = pd.read_sql("SELECT b.*, g.taxa_anual_percentual, g.conta_contabil_despesa, g.conta_contabil_dep_acumulada, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = %s AND b.status = 'ativo'", conn_p, params=(int(emp_id),))
+                        df_planos = pd.read_sql("SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = %s", conn_p, params=(int(emp_id),))
                         if not df_planos.empty: df_planos['mes_referencia'] = pd.to_datetime(df_planos['mes_referencia']).dt.date
 
                     if not df_bens.empty:
@@ -1062,8 +1066,8 @@ def modulo_imobilizado():
         if mostrar_inativos: filtro_status += f" AND (b.data_baixa IS NULL OR YEAR(b.data_baixa) >= {limite_anos})"
 
         with get_db_connection() as conn_inv:
-            df_todos = pd.read_sql(f"SELECT b.*, g.taxa_anual_percentual, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = %s AND {filtro_status}", conn_inv, params=(emp_id,))
-            df_planos_inv = pd.read_sql("SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = %s", conn_inv, params=(emp_id,))
+            df_todos = pd.read_sql(f"SELECT b.*, g.taxa_anual_percentual, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = %s AND {filtro_status}", conn_inv, params=(int(emp_id),))
+            df_planos_inv = pd.read_sql("SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = %s", conn_inv, params=(int(emp_id),))
             if not df_planos_inv.empty: df_planos_inv['mes_referencia'] = pd.to_datetime(df_planos_inv['mes_referencia']).dt.date
 
         if not df_todos.empty:
@@ -1103,9 +1107,26 @@ def modulo_imobilizado():
         with st.expander("🖨️ Central de Relatórios de Inventário (Auditoria e Projeção)", expanded=False):
             st.info("Gere relatórios de saldos exatos até 31/12/2025 ou verifique o valor residual em datas futuras para projeção de desinvestimento.")
             
-            c_filtro, c_data, c_btn = st.columns([2, 1, 1])
+            c_filtro, c_item, c_data, c_btn = st.columns([1.5, 2, 1, 1])
             opcoes_grupos = ["Todos os Grupos"] + df_g['nome_grupo'].tolist() if not df_g.empty else ["Todos os Grupos"]
             grupo_filtro = c_filtro.selectbox("Filtrar por Grupo", opcoes_grupos, key="filtro_grupo_pdf")
+            
+            # Cascata de Filtro de Itens Específicos
+            with get_db_connection() as conn_inv_pdf:
+                if grupo_filtro != "Todos os Grupos":
+                    grp_id = int(df_g[df_g['nome_grupo'] == grupo_filtro].iloc[0]['id'])
+                    df_bens_filtro = pd.read_sql("SELECT id, descricao_item, marca_modelo, plaqueta FROM bens_imobilizado WHERE tenant_id = %s AND grupo_id = %s", conn_inv_pdf, params=(int(emp_id), grp_id))
+                else:
+                    df_bens_filtro = pd.read_sql("SELECT id, descricao_item, marca_modelo, plaqueta FROM bens_imobilizado WHERE tenant_id = %s", conn_inv_pdf, params=(int(emp_id),))
+            
+            lista_itens = ["Todos os Itens do Grupo/Empresa"]
+            if not df_bens_filtro.empty:
+                for _, r_bem in df_bens_filtro.iterrows():
+                    desc_bem = limpar_texto(r_bem['descricao_item'])[:30]
+                    plaq_bem = f" [Plq: {r_bem['plaqueta']}]" if pd.notnull(r_bem.get('plaqueta')) and str(r_bem.get('plaqueta')).strip() else ""
+                    lista_itens.append(f"[{r_bem['id']}] {desc_bem}{plaq_bem}")
+            
+            item_filtro = c_item.selectbox("Ativo Específico", lista_itens, key="filtro_item_pdf")
             
             data_minima = date(2025, 12, 31)
             data_posicao = c_data.date_input("Data Base (Posição ou Projeção)", value=hoje_br.date(), min_value=data_minima, key="dt_pos_pdf")
@@ -1113,8 +1134,8 @@ def modulo_imobilizado():
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
             if c_btn.button("Gerar PDF do Inventário", type="primary", use_container_width=True):
                 with get_db_connection() as conn_pdf:
-                    df_pdf = pd.read_sql("SELECT b.*, g.taxa_anual_percentual, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = %s", conn_pdf, params=(emp_id,))
-                    df_planos_pdf = pd.read_sql("SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = %s", conn_pdf, params=(emp_id,))
+                    df_pdf = pd.read_sql("SELECT b.*, g.taxa_anual_percentual, g.nome_grupo FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = %s", conn_pdf, params=(int(emp_id),))
+                    df_planos_pdf = pd.read_sql("SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = %s", conn_pdf, params=(int(emp_id),))
                     if not df_planos_pdf.empty: df_planos_pdf['mes_referencia'] = pd.to_datetime(df_planos_pdf['mes_referencia']).dt.date
                 
                 if df_pdf.empty:
@@ -1128,7 +1149,9 @@ def modulo_imobilizado():
 
                     pdf_inv = RelatorioCrescerePDF()
                     pdf_inv.add_page()
-                    pdf_inv.add_cabecalho(row_emp_ativa['nome'], row_emp_ativa['cnpj'], titulo_final, f"Posicao base em: {data_posicao.strftime('%d/%m/%Y')} | Grupo: {grupo_filtro}")
+                    filtro_pdf_str = grupo_filtro
+                    if item_filtro != "Todos os Itens do Grupo/Empresa": filtro_pdf_str = f"Ativo Específico ID: {item_filtro.split(']')[0].replace('[','')}"
+                    pdf_inv.add_cabecalho(row_emp_ativa['nome'], row_emp_ativa['cnpj'], titulo_final, f"Posicao base em: {data_posicao.strftime('%d/%m/%Y')} | Filtro: {filtro_pdf_str}")
                     
                     pdf_inv.set_font("Arial", 'B', 8)
                     pdf_inv.cell(10, 6, "ID", 1); pdf_inv.cell(65, 6, "Descricao", 1); pdf_inv.cell(20, 6, "Aquisicao", 1); pdf_inv.cell(25, 6, "Vlr. Base", 1); pdf_inv.cell(30, 6, "Dep. Acumul.", 1); pdf_inv.cell(40, 6, "Saldo Residual", 1, ln=True)
@@ -1138,6 +1161,10 @@ def modulo_imobilizado():
                     
                     for _, r in df_pdf.iterrows():
                         if grupo_filtro != "Todos os Grupos" and r.get('nome_grupo') != grupo_filtro: continue
+                        
+                        if item_filtro != "Todos os Itens do Grupo/Empresa":
+                            item_selecionado_id = int(item_filtro.split("]")[0].replace("[", ""))
+                            if r['id'] != item_selecionado_id: continue
                         
                         dt_base = r['data_saldo_inicial'] if pd.notnull(r.get('data_saldo_inicial')) else r['data_compra']
                         if isinstance(dt_base, datetime) or isinstance(dt_base, pd.Timestamp): dt_base = dt_base.date()
@@ -1341,7 +1368,7 @@ def modulo_parametros():
         e_id = int(df_e.loc[df_e.apply(formatar_nome_empresa, axis=1) == e_sel].iloc[0]['id'])
         
         with get_db_connection() as conn:
-            df_g = pd.read_sql("SELECT * FROM grupos_imobilizado WHERE tenant_id = %s", conn, params=(e_id,))
+            df_g = pd.read_sql("SELECT * FROM grupos_imobilizado WHERE tenant_id = %s", conn, params=(int(e_id),))
         
         with st.expander("🔄 Clonar Grupos de Outra Unidade", expanded=False):
             st.info("Utilize esta opção para copiar rapidamente os grupos (e suas contas) de uma empresa já configurada para a empresa atual.")
@@ -1409,7 +1436,7 @@ def modulo_usuarios():
         if st.session_state.nivel_acesso == "SUPER_ADMIN":
             df_users = pd.read_sql("SELECT id, nome, username, nivel_acesso, status_usuario, data_criacao, contabilidade_id FROM usuarios ORDER BY nome ASC", conn)
         else:
-            df_users = pd.read_sql("SELECT id, nome, username, nivel_acesso, status_usuario, data_criacao, contabilidade_id FROM usuarios WHERE contabilidade_id = %s ORDER BY nome ASC", conn, params=(st.session_state.contabilidade_id,))
+            df_users = pd.read_sql("SELECT id, nome, username, nivel_acesso, status_usuario, data_criacao, contabilidade_id FROM usuarios WHERE contabilidade_id = %s ORDER BY nome ASC", conn, params=(int(st.session_state.contabilidade_id),))
         
         df_empresas = carregar_empresas_ativas()
     
@@ -1465,12 +1492,12 @@ def modulo_usuarios():
                                 empresa_id_db = int(df_empresas[df_empresas['nome'] == emp_vinculada].iloc[0]['id'])
                             
                             query_u = """INSERT INTO usuarios (nome, username, senha_hash, nivel_acesso, status_usuario, data_criacao, contabilidade_id, empresa_id) VALUES (%s, %s, %s, %s, 'ATIVO', NOW(), %s, %s)"""
-                            cursor.execute(query_u, (novo_nome, novo_user, gerar_hash_senha(nova_pass), nivel, st.session_state.contabilidade_id, empresa_id_db))
+                            cursor.execute(query_u, (novo_nome, novo_user, gerar_hash_senha(nova_pass), nivel, int(st.session_state.contabilidade_id) if st.session_state.contabilidade_id else None, empresa_id_db))
                             novo_id = cursor.lastrowid
                             
                             if empresa_id_db and st.session_state.contabilidade_id:
                                 query_p = """INSERT INTO usuario_empresas (contabilidade_id, usuario_id, empresa_id, status, concedido_por) VALUES (%s, %s, %s, 'ATIVO', %s)"""
-                                cursor.execute(query_p, (st.session_state.contabilidade_id, novo_id, empresa_id_db, st.session_state.usuario_id))
+                                cursor.execute(query_p, (int(st.session_state.contabilidade_id), novo_id, empresa_id_db, int(st.session_state.usuario_id)))
                                 
                         st.toast("Utilizador criado com sucesso!", icon="✅")
                         carregar_empresas_visiveis.clear()
@@ -1482,13 +1509,15 @@ def modulo_usuarios():
         if not df_users.empty and not df_empresas.empty:
             usr_sel_perm = st.selectbox("Utilizador Alvo", df_users.apply(lambda r: f"{r['nome']} ({r['username']})", axis=1))
             usr_row = df_users.iloc[df_users.apply(lambda r: f"{r['nome']} ({r['username']})", axis=1) == usr_sel_perm].iloc[0]
+            
+            # Cast seguro com int()
             u_id = int(usr_row['id'])
-            u_contab = usr_row['contabilidade_id'] or st.session_state.contabilidade_id
+            u_contab = int(usr_row['contabilidade_id']) if pd.notnull(usr_row.get('contabilidade_id')) else (int(st.session_state.contabilidade_id) if st.session_state.contabilidade_id else None)
             
             with get_db_connection() as conn_perm:
                 df_perms_atuais = pd.read_sql("SELECT empresa_id FROM usuario_empresas WHERE usuario_id = %s AND status = 'ATIVO'", conn_perm, params=(u_id,))
             
-            ids_atuais = df_perms_atuais['empresa_id'].tolist() if not df_perms_atuais.empty else []
+            ids_atuais = [int(i) for i in df_perms_atuais['empresa_id'].tolist()] if not df_perms_atuais.empty else []
             nomes_empresas = df_empresas.apply(formatar_nome_empresa, axis=1).tolist()
             empresas_pre_selecionadas = df_empresas[df_empresas['id'].isin(ids_atuais)].apply(formatar_nome_empresa, axis=1).tolist()
             
@@ -1496,7 +1525,7 @@ def modulo_usuarios():
                 empresas_selecionadas = st.multiselect("Empresas Permitidas", options=nomes_empresas, default=empresas_pre_selecionadas)
                 
                 if st.form_submit_button("Salvar Permissões", type="primary"):
-                    ids_selecionados = df_empresas[df_empresas.apply(formatar_nome_empresa, axis=1).isin(empresas_selecionadas)]['id'].tolist()
+                    ids_selecionados = [int(i) for i in df_empresas[df_empresas.apply(formatar_nome_empresa, axis=1).isin(empresas_selecionadas)]['id'].tolist()]
                     
                     try:
                         with get_db_cursor(commit=True) as cursor_perm:
@@ -1506,13 +1535,13 @@ def modulo_usuarios():
                                     VALUES (%s, %s, %s, 'ATIVO', %s) 
                                     ON DUPLICATE KEY UPDATE status='ATIVO', concedido_por=VALUES(concedido_por)
                                 """
-                                cursor_perm.execute(query_upsert, (u_contab, u_id, eid, st.session_state.usuario_id))
+                                cursor_perm.execute(query_upsert, (u_contab, u_id, eid, int(st.session_state.usuario_id)))
                             
                             ids_revogados = [eid for eid in ids_atuais if eid not in ids_selecionados]
                             if ids_revogados:
                                 format_strings = ','.join(['%s'] * len(ids_revogados))
                                 query_revoke = f"UPDATE usuario_empresas SET status='INATIVO', concedido_por=%s WHERE usuario_id=%s AND empresa_id IN ({format_strings})"
-                                params_revoke = [st.session_state.usuario_id, u_id] + ids_revogados
+                                params_revoke = [int(st.session_state.usuario_id), u_id] + ids_revogados
                                 cursor_perm.execute(query_revoke, params_revoke)
                         
                         carregar_empresas_visiveis.clear()
