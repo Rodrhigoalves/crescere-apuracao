@@ -526,7 +526,22 @@ def modulo_relatorios():
             linhas_excel = []
             if not df_export.empty:
                 for _, r in df_export.iterrows():
-                    d_str = r['data_lancamento'].strftime('%d/%m/%Y') if pd.notnull(r['data_lancamento']) else ''
+                    # Lógica de Data Dinâmica
+                    if r.get('origem_retroativa') == 1 and pd.notnull(r.get('competencia_origem')) and str(r['competencia_origem']).strip():
+                        try:
+                            mes_str, ano_str = r['competencia_origem'].split('/')
+                            ultimo_dia = calendar.monthrange(int(ano_str), int(mes_str))[1]
+                            d_str = f"{ultimo_dia:02d}/{int(mes_str):02d}/{ano_str}"
+                        except:
+                            d_str = r['data_lancamento'].strftime('%d/%m/%Y') if pd.notnull(r['data_lancamento']) else ''
+                    else:
+                        try:
+                            mes_str, ano_str = competencia.split('/')
+                            ultimo_dia = calendar.monthrange(int(ano_str), int(mes_str))[1]
+                            d_str = f"{ultimo_dia:02d}/{int(mes_str):02d}/{ano_str}"
+                        except:
+                            d_str = r['data_lancamento'].strftime('%d/%m/%Y') if pd.notnull(r['data_lancamento']) else ''
+                    
                     doc = r['num_nota'] or r['id']
                     
                     if r.get('is_custo_avulso') == 0:
