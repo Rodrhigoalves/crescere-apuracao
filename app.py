@@ -1105,8 +1105,26 @@ def modulo_imobilizado():
 
         st.markdown("---")
         with st.expander("🖨️ Central de Relatórios de Inventário (Auditoria e Projeção)", expanded=False):
-            st.info("Gere relatórios de saldos exatos até 31/12/2025 ou verifique o valor residual em datas futuras para projeção de desinvestimento.")
+            st.info("Gere relatórios de saldos exatos a partir da data de aquisição do ativo mais antigo ou verifique o valor residual em datas futuras para projeção de desinvestimento.")
             
+            # Lógica para descobrir a data mínima do banco
+            with get_db_connection() as conn_min_dt:
+                cursor_min = conn_min_dt.cursor(dictionary=True)
+                cursor_min.execute("SELECT MIN(data_compra) as min_c, MIN(data_saldo_inicial) as min_s FROM bens_imobilizado WHERE tenant_id = %s", (int(emp_id),))
+                res_min = cursor_min.fetchone()
+                
+                dts = []
+                if res_min:
+                    if res_min['min_c']: dts.append(res_min['min_c'])
+                    if res_min['min_s']: dts.append(res_min['min_s'])
+                
+                if dts:
+                    data_minima = min(dts)
+                    if isinstance(data_minima, pd.Timestamp) or isinstance(data_minima, datetime):
+                        data_minima = data_minima.date()
+                else:
+                    data_minima = date(2024, 12, 31)
+
             c_filtro, c_item, c_data, c_btn = st.columns([1.5, 2, 1, 1])
             opcoes_grupos = ["Todos os Grupos"] + df_g['nome_grupo'].tolist() if not df_g.empty else ["Todos os Grupos"]
             grupo_filtro = c_filtro.selectbox("Filtrar por Grupo", opcoes_grupos, key="filtro_grupo_pdf")
@@ -1115,20 +1133,21 @@ def modulo_imobilizado():
             with get_db_connection() as conn_inv_pdf:
                 if grupo_filtro != "Todos os Grupos":
                     grp_id = int(df_g[df_g['nome_grupo'] == grupo_filtro].iloc[0]['id'])
-                    df_bens_filtro = pd.read_sql("SELECT id, descricao_item, marca_modelo, plaqueta FROM bens_imobilizado WHERE tenant_id = %s AND grupo_id = %s", conn_inv_pdf, params=(int(emp_id), grp_id))
+                    df_bens_filtro = pd.read_sql("SELECT id, descricao_item, numero_nota_fiscal, valor_compra, status FROM bens_imobilizado WHERE tenant_id = %s AND grupo_id = %s", conn_inv_pdf, params=(int(emp_id), grp_id))
                 else:
-                    df_bens_filtro = pd.read_sql("SELECT id, descricao_item, marca_modelo, plaqueta FROM bens_imobilizado WHERE tenant_id = %s", conn_inv_pdf, params=(int(emp_id),))
+                    df_bens_filtro = pd.read_sql("SELECT id, descricao_item, numero_nota_fiscal, valor_compra, status FROM bens_imobilizado WHERE tenant_id = %s", conn_inv_pdf, params=(int(emp_id),))
             
             lista_itens = ["Todos os Itens do Grupo/Empresa"]
             if not df_bens_filtro.empty:
                 for _, r_bem in df_bens_filtro.iterrows():
                     desc_bem = limpar_texto(r_bem['descricao_item'])[:30]
-                    plaq_bem = f" [Plq: {r_bem['plaqueta']}]" if pd.notnull(r_bem.get('plaqueta')) and str(r_bem.get('plaqueta')).strip() else ""
-                    lista_itens.append(f"[{r_bem['id']}] {desc_bem}{plaq_bem}")
+                    nf_bem = f" | NF: {r_bem['numero_nota_fiscal']}" if pd.notnull(r_bem.get('numero_nota_fiscal')) and str(r_bem.get('numero_nota_fiscal')).strip() else ""
+                    val_bem = f" | {formatar_moeda(r_bem['valor_compra'])}"
+                    status_bem = f" ({str(r_bem['status']).upper()})"
+                    lista_itens.append(f"[{r_bem['id']}] {desc_bem}{nf_bem}{val_bem}{status_bem}")
             
             item_filtro = c_item.selectbox("Ativo Específico", lista_itens, key="filtro_item_pdf")
             
-            data_minima = date(2025, 12, 31)
             data_posicao = c_data.date_input("Data Base (Posição ou Projeção)", value=hoje_br.date(), min_value=data_minima, key="dt_pos_pdf")
             
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
