@@ -76,7 +76,7 @@ class RelatorioCrescerePDF(FPDF):
         self.cell(0, 5, 'Desenvolvido por Rodrhigo Alves | Conciliacao e Auditoria Contabil', 0, 1, 'C')
         self.cell(0, 5, f'Pagina {self.page_no()}', 0, 0, 'C')
 
-# --- FUNÇÃO PADRÃO PARA EXPORTAÇÃO ALTERDATA ---
+# --- FUNÇÃO PADRÃO PARA EXPORTAÇÃO ERP ---
 def criar_linha_erp(deb, cred, data, valor, cod_hist, hist, nr_doc):
     return {
         "Lancto Aut.": "",
@@ -439,7 +439,7 @@ def modulo_apuracao():
 
 # --- 7. MÓDULO RELATÓRIOS E INTEGRAÇÃO ---
 def modulo_relatorios():
-    st.markdown("### Exportação para Alterdata e PDF Analítico")
+    st.markdown("### Exportação para ERP e PDF Analítico")
     df_emp = carregar_empresas_visiveis()
     if df_emp.empty:
         st.warning("Nenhuma unidade liberada para este utilizador.")
@@ -495,9 +495,12 @@ def modulo_relatorios():
                         linhas_excel.append(criar_linha_erp(r['conta_deb_pis'], r['conta_cred_pis'], d_str, r['valor_pis'], r.get('pis_h_codigo'), f"PIS - {p_txt(r.get('pis_h_texto'), r['op_nome'])}", doc))
                     if pd.notnull(r['conta_deb_cof']) and pd.notnull(r['conta_cred_cof']):
                         linhas_excel.append(criar_linha_erp(r['conta_deb_cof'], r['conta_cred_cof'], d_str, r['valor_cofins'], r.get('cofins_h_codigo'), f"COF - {p_txt(r.get('cofins_h_texto'), r['op_nome'])}", doc))
-                    if pd.notnull(r['conta_deb_custo']) and pd.notnull(r['conta_cred_custo']):
-                        v_custo = r['valor_base'] - r['valor_pis'] - r['valor_cofins']
-                        linhas_excel.append(criar_linha_erp(r['conta_deb_custo'], r['conta_cred_custo'], d_str, v_custo, r.get('custo_h_codigo'), f"CUSTO LIQ - {p_txt(r.get('custo_h_texto'), r['op_nome'])}", doc))
+                    
+                    # --- LÓGICA DE CUSTO LÍQUIDO (CMV/CSV/CSP) PARA ERP ---
+                    if pd.notnull(r.get('conta_deb_custo')) and pd.notnull(r.get('conta_cred_custo')) and str(r.get('conta_deb_custo')).strip() != '':
+                        v_custo_liquido = float(r['valor_base']) - float(r['valor_pis']) - float(r['valor_cofins'])
+                        if v_custo_liquido > 0:
+                            linhas_excel.append(criar_linha_erp(r['conta_deb_custo'], r['conta_cred_custo'], d_str, v_custo_liquido, r.get('custo_h_codigo'), f"CUSTO LIQ - {p_txt(r.get('custo_h_texto'), r['op_nome'])}", doc))
             
             df_xlsx = pd.DataFrame(linhas_excel)
             buffer = io.BytesIO()
@@ -505,7 +508,7 @@ def modulo_relatorios():
             if df_xlsx.empty: df_xlsx = pd.DataFrame(columns=colunas_erp)
             else: df_xlsx = df_xlsx[colunas_erp]
             
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_xlsx.to_excel(writer, index=False, sheet_name='Lançamentos')
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_xlsx.to_excel(writer, index=False, sheet_name='Lancamentos_Contabeis')
             
             # --- GERAÇÃO DO PDF ---
             pdf = RelatorioCrescerePDF()
@@ -564,7 +567,7 @@ def modulo_relatorios():
             pdf_bytes = pdf.output(dest='S').encode('latin1')
             st.success("Ficheiros processados e saldos auditados com sucesso!")
             c_btn1, c_btn2, _ = st.columns([1, 1, 2])
-            c_btn1.download_button("Baixar XLSX (Exportação Alterdata)", data=buffer.getvalue(), file_name=f"LCTOS_{comp_db}.xlsx")
+            c_btn1.download_button("Baixar XLSX (Exportação ERP)", data=buffer.getvalue(), file_name=f"LCTOS_{comp_db}.xlsx")
             c_btn2.download_button("Baixar PDF (Demonstrativo Fiscal)", data=pdf_bytes, file_name=f"RESUMO_{comp_db}.pdf")
         except Exception as e: st.error(f"Erro na geração: {e}")
 
@@ -953,7 +956,7 @@ def modulo_imobilizado():
                             except Exception as e: st.error(f"Erro ao salvar: {e}")
 
         with col_ras:
-            st.markdown("#### Processamento em Lote (Exportação Alterdata)")
+            st.markdown("#### Processamento em Lote (Exportação ERP)")
             with st.container(height=380, border=True):
                 c_a, c_m = st.columns([1, 2])
                 a_proc = c_a.number_input("Ano Base", value=hoje_br.year)
@@ -1056,7 +1059,7 @@ def modulo_imobilizado():
                         else: df_xlsx = df_xlsx[colunas_erp]
                         
                         with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_xlsx.to_excel(writer, index=False, sheet_name='Depreciacao')
-                        st.download_button("Baixar Planilha Alterdata (XLSX)", data=buffer.getvalue(), file_name=f"DEPREC_{a_proc}.xlsx")
+                        st.download_button("Baixar Planilha ERP (XLSX)", data=buffer.getvalue(), file_name=f"DEPREC_{a_proc}.xlsx")
 
     with tabs[1]:
         st.markdown("#### Consultar Inventário Dinâmico")
@@ -1129,7 +1132,7 @@ def modulo_imobilizado():
             opcoes_grupos = ["Todos os Grupos"] + df_g['nome_grupo'].tolist() if not df_g.empty else ["Todos os Grupos"]
             grupo_filtro = c_filtro.selectbox("Filtrar por Grupo", opcoes_grupos, key="filtro_grupo_pdf")
             
-            # Cascata de Filtro de Itens Específicos
+            # Cascata de Filtro de Itens Específicos com Formatação Idêntica
             with get_db_connection() as conn_inv_pdf:
                 if grupo_filtro != "Todos os Grupos":
                     grp_id = int(df_g[df_g['nome_grupo'] == grupo_filtro].iloc[0]['id'])
@@ -1257,7 +1260,7 @@ def modulo_imobilizado():
 # --- 8. MÓDULO PARÂMETROS CONTÁBEIS ---
 def modulo_parametros():
     if st.session_state.nivel_acesso == "CLIENT_OPERATOR": st.error("Acesso restrito."); return
-    st.markdown("### Parâmetros Contábeis e Exportação Alterdata")
+    st.markdown("### Parâmetros Contábeis e Exportação ERP")
     df_op = carregar_operacoes()
     op_nomes = df_op['nome'].tolist()
     
@@ -1283,12 +1286,12 @@ def modulo_parametros():
             c_cod = c7.text_input("Cód ERP COFINS", value=limpar_texto(row_op.get('cofins_h_codigo')), key=f"ccd_{oid}")
             c_txt = c8.text_input("Texto Padrão COF", value=limpar_texto(row_op.get('cofins_h_texto')), key=f"ctx_{oid}")
             
-            st.markdown("##### Configuração CUSTO/VALOR LÍQUIDO")
-            c9, c10, c11, c12 = st.columns([1, 1, 1, 2])
-            cu_deb = c9.text_input("Débito Custo", value=limpar_texto(row_op.get('conta_deb_custo')), key=f"cud_{oid}")
-            cu_cred = c10.text_input("Crédito Custo", value=limpar_texto(row_op.get('conta_cred_custo')), key=f"cuc_{oid}")
-            cu_cod = c11.text_input("Cód ERP Custo", value=limpar_texto(row_op.get('custo_h_codigo')), key=f"cucd_{oid}")
-            cu_txt = c12.text_input("Texto Padrão Custo", value=limpar_texto(row_op.get('custo_h_texto')), key=f"cutx_{oid}")
+            st.markdown("##### Configuração de CUSTO (CMV / CSV / CSP)")
+            c_cus_d, c_cus_c, c_cus_cod, c_cus_txt = st.columns([1, 1, 1, 2])
+            cus_deb = c_cus_d.text_input("Débito Custo", value=limpar_texto(row_op.get('conta_deb_custo')), key=f"cusd_{oid}")
+            cus_cred = c_cus_c.text_input("Crédito Custo", value=limpar_texto(row_op.get('conta_cred_custo')), key=f"cusc_{oid}")
+            cus_cod = c_cus_cod.text_input("Cód ERP Custo", value=limpar_texto(row_op.get('custo_h_codigo')), key=f"cuscd_{oid}")
+            cus_txt = c_cus_txt.text_input("Texto Padrão Custo", value=limpar_texto(row_op.get('custo_h_texto')), key=f"custx_{oid}")
 
             if row_op['tipo'] == 'RECEITA':
                 with st.expander("Configuração de Retenção na Fonte", expanded=False):
@@ -1307,7 +1310,7 @@ def modulo_parametros():
             if st.form_submit_button("Atualizar Operação"):
                 try:
                     with get_db_cursor(commit=True) as cursor:
-                        cursor.execute("""UPDATE operacoes SET conta_deb_pis=%s, conta_cred_pis=%s, pis_h_codigo=%s, pis_h_texto=%s, conta_deb_cof=%s, conta_cred_cof=%s, cofins_h_codigo=%s, cofins_h_texto=%s, conta_deb_custo=%s, conta_cred_custo=%s, custo_h_codigo=%s, custo_h_texto=%s, ret_pis_conta_deb=%s, ret_pis_conta_cred=%s, ret_pis_h_codigo=%s, ret_pis_h_texto=%s, ret_cofins_conta_deb=%s, ret_cofins_conta_cred=%s, ret_cofins_h_codigo=%s, ret_cofins_h_texto=%s WHERE id=%s""", (p_deb, p_cred, p_cod, p_txt, c_deb, c_cred, c_cod, c_txt, cu_deb, cu_cred, cu_cod, cu_txt, r_p_deb, r_p_cred, r_p_cod, r_p_txt, r_c_deb, r_c_cred, r_c_cod, r_c_txt, int(oid)))
+                        cursor.execute("""UPDATE operacoes SET conta_deb_pis=%s, conta_cred_pis=%s, pis_h_codigo=%s, pis_h_texto=%s, conta_deb_cof=%s, conta_cred_cof=%s, cofins_h_codigo=%s, cofins_h_texto=%s, conta_deb_custo=%s, conta_cred_custo=%s, custo_h_codigo=%s, custo_h_texto=%s, ret_pis_conta_deb=%s, ret_pis_conta_cred=%s, ret_pis_h_codigo=%s, ret_pis_h_texto=%s, ret_cofins_conta_deb=%s, ret_cofins_conta_cred=%s, ret_cofins_h_codigo=%s, ret_cofins_h_texto=%s WHERE id=%s""", (p_deb, p_cred, p_cod, p_txt, c_deb, c_cred, c_cod, c_txt, cus_deb, cus_cred, cus_cod, cus_txt, r_p_deb, r_p_cred, r_p_cod, r_p_txt, r_c_deb, r_c_cred, r_c_cod, r_c_txt, int(oid)))
                     carregar_operacoes.clear(); st.success("Atualizado!"); st.rerun()
                 except Exception as e: st.error(f"Erro: {e}")
 
@@ -1320,8 +1323,8 @@ def modulo_parametros():
             c1, c2, c3, c4 = st.columns([1, 1, 1, 2]); n_p_deb = c1.text_input("Débito PIS", key="n_pd"); n_p_cred = c2.text_input("Crédito PIS", key="n_pc"); n_p_cod = c3.text_input("Cód ERP PIS", key="n_pcd"); n_p_txt = c4.text_input("Texto Padrão PIS", key="n_ptx")
             st.markdown("##### Configuração COFINS")
             c5, c6, c7, c8 = st.columns([1, 1, 1, 2]); n_c_deb = c5.text_input("Débito COFINS", key="n_cd"); n_c_cred = c6.text_input("Crédito COFINS", key="n_cc"); n_c_cod = c7.text_input("Cód ERP COFINS", key="n_ccd"); n_c_txt = c8.text_input("Texto Padrão COF", key="n_ctx")
-            st.markdown("##### Configuração CUSTO/VALOR LÍQUIDO")
-            c9, c10, c11, c12 = st.columns([1, 1, 1, 2]); n_cu_deb = c9.text_input("Débito Custo", key="n_cud"); n_cu_cred = c10.text_input("Crédito Custo", key="n_cuc"); n_cu_cod = c11.text_input("Cód ERP Custo", key="n_cucd"); n_cu_txt = c12.text_input("Texto Padrão Custo", key="n_cutx")
+            st.markdown("##### Configuração de CUSTO (CMV / CSV / CSP)")
+            c9, c10, c11, c12 = st.columns([1, 1, 1, 2]); n_cus_deb = c9.text_input("Débito Custo", key="n_cusd"); n_cus_cred = c10.text_input("Crédito Custo", key="n_cusc"); n_cus_cod = c11.text_input("Cód ERP Custo", key="n_cuscd"); n_cus_txt = c12.text_input("Texto Padrão Custo", key="n_custx")
             st.divider()
             
             if st.form_submit_button("Registar Nova Operação"):
@@ -1333,7 +1336,7 @@ def modulo_parametros():
                         try:
                             with get_db_cursor(commit=True) as cursor:
                                 query_insert = """INSERT INTO operacoes (nome, tipo, conta_deb_pis, conta_cred_pis, pis_h_codigo, pis_h_texto, conta_deb_cof, conta_cred_cof, cofins_h_codigo, cofins_h_texto, conta_deb_custo, conta_cred_custo, custo_h_codigo, custo_h_texto, ret_pis_conta_deb, ret_pis_conta_cred, ret_pis_h_codigo, ret_pis_h_texto, ret_cofins_conta_deb, ret_cofins_conta_cred, ret_cofins_h_codigo, ret_cofins_h_texto) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"""
-                                valores = (novo_nome, novo_tipo, n_p_deb, n_p_cred, n_p_cod, n_p_txt, n_c_deb, n_c_cred, n_c_cod, n_c_txt, n_cu_deb, n_cu_cred, n_cu_cod, n_cu_txt)
+                                valores = (novo_nome, novo_tipo, n_p_deb, n_p_cred, n_p_cod, n_p_txt, n_c_deb, n_c_cred, n_c_cod, n_c_txt, n_cus_deb, n_cus_cred, n_cus_cod, n_cus_txt)
                                 cursor.execute(query_insert, valores)
                             carregar_operacoes.clear(); st.success("Nova operação registada com sucesso!"); st.rerun()
                         except Exception as e: st.error(f"Erro ao salvar: {e}")
@@ -1529,7 +1532,6 @@ def modulo_usuarios():
             usr_sel_perm = st.selectbox("Utilizador Alvo", df_users.apply(lambda r: f"{r['nome']} ({r['username']})", axis=1))
             usr_row = df_users.iloc[df_users.apply(lambda r: f"{r['nome']} ({r['username']})", axis=1) == usr_sel_perm].iloc[0]
             
-            # Cast seguro com int()
             u_id = int(usr_row['id'])
             u_contab = int(usr_row['contabilidade_id']) if pd.notnull(usr_row.get('contabilidade_id')) else (int(st.session_state.contabilidade_id) if st.session_state.contabilidade_id else None)
             
