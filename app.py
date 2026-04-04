@@ -513,6 +513,11 @@ def modulo_relatorios():
                 query_hist = f"SELECT o.tipo as op_tipo, SUM(l.valor_pis) as t_pis, SUM(l.valor_cofins) as t_cof, SUM(l.valor_pis_retido) as t_pis_ret, SUM(l.valor_cofins_retido) as t_cof_ret FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE {filtro_empresa} AND l.competencia < %s AND l.status_auditoria = 'ATIVO' AND l.is_custo_avulso = 0 GROUP BY o.tipo"
                 df_hist = pd.read_sql(query_hist, conn, params=(comp_db,))
             
+            # --- PROTEÇÃO CONTRA BASE VAZIA ---
+            if df_export.empty:
+                st.warning(f"Atenção: Não existem lançamentos para a competência {competencia} na base de dados.")
+                return
+
             saldo_ant_pis = 0.0; saldo_ant_cof = 0.0
             if not df_hist.empty:
                 hist_deb = df_hist[df_hist['op_tipo'] == 'RECEITA']
@@ -521,12 +526,13 @@ def modulo_relatorios():
                 res_hist_cof = (hist_deb['t_cof'].sum() if not hist_deb.empty else 0) - (hist_cred['t_cof'].sum() if not hist_cred.empty else 0) - (hist_deb['t_cof_ret'].sum() if not hist_deb.empty else 0)
                 if res_hist_pis < 0: saldo_ant_pis = abs(res_hist_pis)
                 if res_hist_cof < 0: saldo_ant_cof = abs(res_hist_cof)
-           # --- EXPORTAÇÃO EXCEL (TODOS) ---
+
+            # --- EXPORTAÇÃO EXCEL (TODOS E CONSOLIDAÇÃO) ---
             linhas_excel = []
             if not df_export.empty:
                 for _, r in df_export.iterrows():
                     
-                    # --- LÓGICA DE DATA E HISTÓRICO CORRIGIDA ---
+                    # --- LÓGICA DE DATA E HISTÓRICO ---
                     is_retro = r.get('origem_retroativa') == 1
                     comp_origem = r.get('competencia_origem')
                     
@@ -550,7 +556,7 @@ def modulo_relatorios():
                     
                     doc = r.get('num_nota') or r.get('id')
                     
-                    # Usando .get() para BLINDAR contra KeyError
+                    # --- LANÇAMENTOS INDIVIDUAIS (Com .get() para segurança) ---
                     if r.get('is_custo_avulso') == 0:
                         if pd.notnull(r.get('conta_deb_pis')) and pd.notnull(r.get('conta_cred_pis')):
                             linhas_excel.append(criar_linha_erp(r.get('conta_deb_pis'), r.get('conta_cred_pis'), d_str, r.get('valor_pis', 0), r.get('pis_h_codigo'), formatar_historico_erp(r.get('pis_h_texto'), comp_exibicao), doc))
@@ -569,12 +575,13 @@ def modulo_relatorios():
                 df_notas = df_export[df_export['is_custo_avulso'] == 0].copy()
 
                 if not df_notas.empty:
-                    # Proteção extra para apelido
+                    # Protege a unidade nula
                     if 'apelido_unidade' in df_notas.columns:
                         df_notas['apelido_unidade'] = df_notas['apelido_unidade'].fillna('MATRIZ')
                     else:
                         df_notas['apelido_unidade'] = 'MATRIZ'
                     
+                    # Data final da competência para o Fecho
                     try:
                         m_c, a_c = competencia.split('/')
                         u_dia = calendar.monthrange(int(a_c), int(m_c))[1]
@@ -582,7 +589,7 @@ def modulo_relatorios():
                     except:
                         data_fecho = ""
 
-                    # FECHO PIS
+                    # FECHO PIS (Agrupado por débito/ativo)
                     if c_transf_pis and 'conta_deb_pis' in df_notas.columns:
                         df_pis_valido = df_notas[df_notas['conta_deb_pis'].notnull()]
                         if not df_pis_valido.empty:
@@ -593,7 +600,7 @@ def modulo_relatorios():
                                     hist = f"Vr. transferido para apuracao do PIS n/ mes {competencia} - {apelido}"
                                     linhas_excel.append(criar_linha_erp(c_transf_pis, row['conta_deb_pis'], data_fecho, row['valor_pis'], "", hist, "FECHO"))
 
-                    # FECHO COFINS
+                    # FECHO COFINS (Agrupado por débito/ativo)
                     if c_transf_cof and 'conta_deb_cof' in df_notas.columns:
                         df_cof_valido = df_notas[df_notas['conta_deb_cof'].notnull()]
                         if not df_cof_valido.empty:
@@ -604,80 +611,6 @@ def modulo_relatorios():
                                     hist = f"Vr. transferido para apuracao do COFINS n/ mes {competencia} - {apelido}"
                                     linhas_excel.append(criar_linha_erp(c_transf_cof, row['conta_deb_cof'], data_fecho, row['valor_cofins'], "", hist, "FECHO"))
 
-            df_xlsx = pd.DataFrame(linhas_excel)
-           # --- LÓGICA DE TRANSFERÊNCIA / FECHO MENSAL CONSOLIDADO (PROTEGIDO) ---
-            if not df_export.empty:
-                c_transf_pis = emp_row.get('conta_transf_pis')
-                c_transf_cof = emp_row.get('conta_transf_cofins')
-                
-                # Filtra apenas o que é nota fiscal e tem valor de imposto
-                df_notas = df_export[(df_export['is_custo_avulso'] == 0)].copy()
-
-                if not df_notas.empty:
-                    df_notas['apelido_unidade'] = df_notas['apelido_unidade'].fillna('MATRIZ')
-                    
-                    # Calcula data do último dia
-                    m_c, a_c = competencia.split('/')
-                    u_dia = calendar.monthrange(int(a_c), int(m_c))[1]
-                    data_fecho = f"{u_dia:02d}/{m_c}/{a_c}"
-
-                    # --- PROCESSAMENTO PIS ---
-                    if c_transf_pis and 'conta_deb_pis' in df_notas.columns:
-                        # Remove linhas onde a conta de débito está vazia para não dar erro no groupby
-                        df_pis_valido = df_notas[df_notas['conta_deb_pis'].notnull()]
-                        if not df_pis_valido.empty:
-                            resumo_pis = df_pis_valido.groupby(['conta_deb_pis', 'apelido_unidade'])['valor_pis'].sum().reset_index()
-                            for _, row in resumo_pis.iterrows():
-                                if row['valor_pis'] > 0:
-                                    apelido = str(row['apelido_unidade']).upper()
-                                    hist = f"Vr. transferido para apuracao do PIS n/ mes {competencia} - {apelido}"
-                                    linhas_excel.append(criar_linha_erp(c_transf_pis, row['conta_deb_pis'], data_fecho, row['valor_pis'], "", hist, "FECHO"))
-
-                    # --- PROCESSAMENTO COFINS ---
-                    if c_transf_cof and 'conta_deb_cof' in df_notas.columns:
-                        # Remove linhas onde a conta de débito está vazia
-                        df_cof_valido = df_notas[df_notas['conta_deb_cof'].notnull()]
-                        if not df_cof_valido.empty:
-                            resumo_cof = df_cof_valido.groupby(['conta_deb_cof', 'apelido_unidade'])['valor_cofins'].sum().reset_index()
-                            for _, row in resumo_cof.iterrows():
-                                if row['valor_cofins'] > 0:
-                                    apelido = str(row['apelido_unidade']).upper()
-                                    hist = f"Vr. transferido para apuracao do COFINS n/ mes {competencia} - {apelido}"
-                                    linhas_excel.append(criar_linha_erp(c_transf_cof, row['conta_deb_cof'], data_fecho, row['valor_cofins'], "", hist, "FECHO"))
-                    # 5. Gera a linha consolidada de COFINS
-                    if c_transf_cof:
-                        for _, row in resumo_cof.iterrows():
-                            if row['valor_cofins'] > 0:
-                                apelido = str(row['apelido_unidade']).upper()
-                                hist_unidade = f"Vr. transferido para apuracao do COFINS n/ mes {competencia} - {apelido}"
-                                # DEBITO: Conta de Fecho (4326) | CREDITO: Conta de COFINS a Recuperar (ex: 2513)
-                                linhas_excel.append(criar_linha_erp(
-                                    c_transf_cof, row['conta_deb_cof'], data_fecho, row['valor_cofins'], 
-                                    "", hist_unidade, "FECHO"
-                                ))
-
-                    # 5. Gera a linha consolidada de COFINS
-                    if c_transf_cof:
-                        for _, row in resumo_cof.iterrows():
-                            if row['valor_cofins'] > 0:
-                                apelido = str(row['apelido_unidade']).upper()
-                                hist_unidade = f"Vr. transferido para apuracao do COFINS n/ mes {competencia} - {apelido}"
-                                # Débito: Conta de Fecho (4326) | Crédito: Conta onde o COFINS foi debitado na nota (ex: 2513)
-                                linhas_excel.append(criar_linha_erp(
-                                    c_transf_cof, row['conta_deb_cof'], data_fecho, row['valor_cofins'], 
-                                    "", hist_unidade, "FECHO"
-                                ))
-
-                    # 5. Gera as linhas de transferência para COFINS
-                    if c_transf_cof:
-                        for _, row in resumo_cof.iterrows():
-                            if row['valor_cofins'] > 0:
-                                apelido = str(row['apelido_unidade']).upper()
-                                hist_unidade = f"Vr. transferido para apuracao do COFINS n/ mes {competencia} - {apelido}"
-                                linhas_excel.append(criar_linha_erp(
-                                    c_transf_cof, row['conta_cred_cof'], data_fecho, row['valor_cofins'], 
-                                    "", hist_unidade, "FECHO"
-                                ))
             df_xlsx = pd.DataFrame(linhas_excel)
             buffer = io.BytesIO()
             colunas_erp = ["Lancto Aut.", "Debito", "Credito", "Data", "Valor", "Cod. Historico", "Historico", "Ccusto Debito", "Ccusto Credito", "Nr.Documento", "Complemento"]
@@ -699,8 +632,8 @@ def modulo_relatorios():
                     desc_op = r['op_nome']
                     apelido_clean = limpar_texto(r.get('apelido_unidade', ''))
                     if consolidar and r['emp_tipo'] == 'Filial': desc_op += f" ({apelido_clean or 'Filial'})"
-                    pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r['valor_base']), 1); pdf.cell(30, 6, formatar_moeda(r['valor_pis']), 1); pdf.cell(35, 6, formatar_moeda(r['valor_cofins']), 1, ln=True)
-                    deb_pis += r['valor_pis']; deb_cof += r['valor_cofins']; ret_pis += r['valor_pis_retido']; ret_cof += r['valor_cofins_retido']
+                    pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_base',0))), 1; pdf.cell(30, 6, formatar_moeda(r.get('valor_pis',0))), 1; pdf.cell(35, 6, formatar_moeda(r.get('valor_cofins',0))), 1, ln=True
+                    deb_pis += r.get('valor_pis', 0); deb_cof += r.get('valor_cofins', 0); ret_pis += r.get('valor_pis_retido', 0); ret_cof += r.get('valor_cofins_retido', 0)
             
             pdf.ln(5); pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "2. INSUMOS, CREDITOS E EXTEMPORANEOS", ln=True); pdf.set_font("Arial", 'B', 9); pdf.cell(90, 6, "Operacao", 1); pdf.cell(35, 6, "Base", 1); pdf.cell(30, 6, "PIS", 1); pdf.cell(35, 6, "COFINS", 1, ln=True); pdf.set_font("Arial", '', 9)
             if not df_pdf.empty:
@@ -708,9 +641,9 @@ def modulo_relatorios():
                     desc_op = r['op_nome']
                     apelido_clean = limpar_texto(r.get('apelido_unidade', ''))
                     if consolidar and r['emp_tipo'] == 'Filial': desc_op += f" ({apelido_clean or 'Filial'})"
-                    pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r['valor_base']), 1); pdf.cell(30, 6, formatar_moeda(r['valor_pis']), 1); pdf.cell(35, 6, formatar_moeda(r['valor_cofins']), 1, ln=True)
-                    if r['origem_retroativa'] == 1: ext_pis += r['valor_pis']; ext_cof += r['valor_cofins']
-                    else: cred_pis += r['valor_pis']; cred_cof += r['valor_cofins']
+                    pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_base', 0))), 1; pdf.cell(30, 6, formatar_moeda(r.get('valor_pis', 0))), 1; pdf.cell(35, 6, formatar_moeda(r.get('valor_cofins', 0))), 1, ln=True
+                    if r.get('origem_retroativa') == 1: ext_pis += r.get('valor_pis', 0); ext_cof += r.get('valor_cofins', 0)
+                    else: cred_pis += r.get('valor_pis', 0); cred_cof += r.get('valor_cofins', 0)
             
             pdf.ln(10); pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "3. QUADRO DE APURACAO FINAL", ln=True); pdf.set_font("Arial", '', 10)
             pdf.cell(120, 6, "A) Total de Debitos:", 0); pdf.cell(35, 6, formatar_moeda(deb_pis), 0); pdf.cell(35, 6, formatar_moeda(deb_cof), 0, ln=True)
@@ -733,16 +666,16 @@ def modulo_relatorios():
             if not df_ext.empty:
                 pdf.ln(5); pdf.set_font("Arial", 'B', 9); pdf.cell(0, 6, "NOTA DE AUDITORIA - APROVEITAMENTO DE CREDITO EXTEMPORANEO:", ln=True); pdf.set_font("Arial", '', 8)
                 pdf.multi_cell(0, 4, "Esta apuracao inclui a apropriacao de credito tributario originado em competencia anterior, lancado tempestivamente neste periodo."); pdf.ln(2)
-                for _, r in df_ext.iterrows(): pdf.multi_cell(0, 4, f"- Origem: {r['competencia_origem']} | Doc: {r['num_nota']} - {r['fornecedor']} | PIS: {formatar_moeda(r['valor_pis'])} | COF: {formatar_moeda(r['valor_cofins'])}\n  Justificativa: {r['historico']}")
+                for _, r in df_ext.iterrows(): pdf.multi_cell(0, 4, f"- Origem: {r.get('competencia_origem', '')} | Doc: {r.get('num_nota', '')} - {r.get('fornecedor', '')} | PIS: {formatar_moeda(r.get('valor_pis',0))} | COF: {formatar_moeda(r.get('valor_cofins',0))}\n  Justificativa: {r.get('historico', '')}")
             
             with get_db_connection() as conn:
                 df_fut = pd.read_sql(f"SELECT * FROM lancamentos l WHERE {filtro_empresa} AND l.competencia_origem = %s AND l.competencia != %s AND l.status_auditoria = 'ATIVO' AND l.is_custo_avulso = 0", conn, params=(comp_db, comp_db))
             
             if not df_fut.empty:
                 pdf.ln(5); pdf.set_font("Arial", 'B', 9); pdf.cell(0, 6, "NOTA DE AUDITORIA - CREDITO APROPRIADO EXTEMPORANEAMENTE (NO FUTURO):", ln=True); pdf.set_font("Arial", '', 8)
-                for _, r in df_fut.iterrows(): pdf.multi_cell(0, 4, f"Registra-se que o documento fiscal {r['num_nota']}, emitido por {r['fornecedor']} nesta competencia ({comp_db}), nao compos a base de calculo original deste demonstrativo. O respectivo credito foi apropriado extemporaneamente na competencia {r['competencia']}.\nMotivo: {r['historico']}"); pdf.ln(2)
+                for _, r in df_fut.iterrows(): pdf.multi_cell(0, 4, f"Registra-se que o documento fiscal {r.get('num_nota', '')}, emitido por {r.get('fornecedor', '')} nesta competencia ({comp_db}), nao compos a base de calculo original deste demonstrativo. O respectivo credito foi apropriado extemporaneamente na competencia {r.get('competencia', '')}.\nMotivo: {r.get('historico', '')}"); pdf.ln(2)
 
-            pdf_bytes = pdf.output(dest='S').encode('latin1', 'replace') # Correção: 'replace' para evitar travamento com caracteres do FPDF
+            pdf_bytes = pdf.output(dest='S').encode('latin1', 'replace')
             st.success("Ficheiros processados com sucesso!")
             c_btn1, c_btn2, _ = st.columns([1, 1, 2])
             c_btn1.download_button("Baixar XLSX (Exportação ERP)", data=buffer.getvalue(), file_name=f"LCTOS_{comp_db}.xlsx")
