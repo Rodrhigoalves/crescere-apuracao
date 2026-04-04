@@ -521,17 +521,16 @@ def modulo_relatorios():
                 res_hist_cof = (hist_deb['t_cof'].sum() if not hist_deb.empty else 0) - (hist_cred['t_cof'].sum() if not hist_cred.empty else 0) - (hist_deb['t_cof_ret'].sum() if not hist_deb.empty else 0)
                 if res_hist_pis < 0: saldo_ant_pis = abs(res_hist_pis)
                 if res_hist_cof < 0: saldo_ant_cof = abs(res_hist_cof)
-            # --- EXPORTAÇÃO EXCEL (TODOS) ---
+           # --- EXPORTAÇÃO EXCEL (TODOS) ---
             linhas_excel = []
             if not df_export.empty:
                 for _, r in df_export.iterrows():
                     
                     # --- LÓGICA DE DATA E HISTÓRICO CORRIGIDA ---
                     is_retro = r.get('origem_retroativa') == 1
-                    comp_origem = r.get('competencia_origem') # Vem do banco como AAAA-MM-DD ou MM/AAAA
+                    comp_origem = r.get('competencia_origem')
                     
-                    if is_retro and comp_origem:
-                        # Se vier do banco como YYYY-MM-DD, tratamos para o padrão BR
+                    if is_retro and pd.notnull(comp_origem) and str(comp_origem).strip():
                         if '-' in str(comp_origem):
                             ano_alvo, mes_alvo = str(comp_origem).split('-')[:2]
                         else:
@@ -541,24 +540,71 @@ def modulo_relatorios():
                         ultimo_dia = calendar.monthrange(int(ano_alvo), int(mes_alvo))[1]
                         d_str = f"{ultimo_dia:02d}/{int(mes_alvo):02d}/{ano_alvo}"
                     else:
-                        # Para lançamentos normais, usa a competência da tela
                         comp_exibicao = competencia
-                        mes_c, ano_c = competencia.split('/')
-                        ultimo_dia = calendar.monthrange(int(ano_c), int(mes_c))[1]
-                        d_str = f"{ultimo_dia:02d}/{mes_c}/{ano_c}"
+                        try:
+                            mes_c, ano_c = competencia.split('/')
+                            ultimo_dia = calendar.monthrange(int(ano_c), int(mes_c))[1]
+                            d_str = f"{ultimo_dia:02d}/{mes_c}/{ano_c}"
+                        except:
+                            d_str = r.get('data_lancamento').strftime('%d/%m/%Y') if pd.notnull(r.get('data_lancamento')) else ''
                     
-                    doc = r['num_nota'] or r['id']
+                    doc = r.get('num_nota') or r.get('id')
                     
+                    # Usando .get() para BLINDAR contra KeyError
                     if r.get('is_custo_avulso') == 0:
-                        if pd.notnull(r['conta_deb_pis']) and pd.notnull(r['conta_cred_pis']):
-                            linhas_excel.append(criar_linha_erp(r['conta_deb_pis'], r['conta_cred_pis'], d_str, r['valor_pis'], r.get('pis_h_codigo'), formatar_historico_erp(r.get('pis_h_texto'), comp_exibicao), doc))
-                        if pd.notnull(r['conta_deb_cof']) and pd.notnull(r['conta_cred_cof']):
-                            linhas_excel.append(criar_linha_erp(r['conta_deb_cof'], r['conta_cred_cof'], d_str, r['valor_cofins'], r.get('cofins_h_codigo'), formatar_historico_erp(r.get('cofins_h_texto'), comp_exibicao), doc))
+                        if pd.notnull(r.get('conta_deb_pis')) and pd.notnull(r.get('conta_cred_pis')):
+                            linhas_excel.append(criar_linha_erp(r.get('conta_deb_pis'), r.get('conta_cred_pis'), d_str, r.get('valor_pis', 0), r.get('pis_h_codigo'), formatar_historico_erp(r.get('pis_h_texto'), comp_exibicao), doc))
+                        if pd.notnull(r.get('conta_deb_cof')) and pd.notnull(r.get('conta_cred_cof')):
+                            linhas_excel.append(criar_linha_erp(r.get('conta_deb_cof'), r.get('conta_cred_cof'), d_str, r.get('valor_cofins', 0), r.get('cofins_h_codigo'), formatar_historico_erp(r.get('cofins_h_texto'), comp_exibicao), doc))
                     
                     if r.get('is_custo_avulso') == 1 and float(r.get('valor_custo_liquido', 0)) > 0:
-                        h_complementar = f" - {r['historico']}" if r.get('historico') else ""
+                        h_complementar = f" - {r.get('historico')}" if r.get('historico') else ""
                         texto_final_custo = formatar_historico_erp(r.get('custo_hist_texto'), comp_exibicao) + h_complementar
-                        linhas_excel.append(criar_linha_erp(r['custo_conta_deb'], r['custo_conta_cred'], d_str, r['valor_custo_liquido'], r.get('custo_hist_cod'), texto_final_custo, doc))
+                        linhas_excel.append(criar_linha_erp(r.get('custo_conta_deb'), r.get('custo_conta_cred'), d_str, r.get('valor_custo_liquido', 0), r.get('custo_hist_cod'), texto_final_custo, doc))
+
+                # --- LÓGICA DE TRANSFERÊNCIA / FECHO MENSAL CONSOLIDADO ---
+                c_transf_pis = emp_row.get('conta_transf_pis')
+                c_transf_cof = emp_row.get('conta_transf_cofins')
+                
+                df_notas = df_export[df_export['is_custo_avulso'] == 0].copy()
+
+                if not df_notas.empty:
+                    # Proteção extra para apelido
+                    if 'apelido_unidade' in df_notas.columns:
+                        df_notas['apelido_unidade'] = df_notas['apelido_unidade'].fillna('MATRIZ')
+                    else:
+                        df_notas['apelido_unidade'] = 'MATRIZ'
+                    
+                    try:
+                        m_c, a_c = competencia.split('/')
+                        u_dia = calendar.monthrange(int(a_c), int(m_c))[1]
+                        data_fecho = f"{u_dia:02d}/{m_c}/{a_c}"
+                    except:
+                        data_fecho = ""
+
+                    # FECHO PIS
+                    if c_transf_pis and 'conta_deb_pis' in df_notas.columns:
+                        df_pis_valido = df_notas[df_notas['conta_deb_pis'].notnull()]
+                        if not df_pis_valido.empty:
+                            resumo_pis = df_pis_valido.groupby(['conta_deb_pis', 'apelido_unidade'])['valor_pis'].sum().reset_index()
+                            for _, row in resumo_pis.iterrows():
+                                if row.get('valor_pis', 0) > 0:
+                                    apelido = str(row.get('apelido_unidade', '')).upper()
+                                    hist = f"Vr. transferido para apuracao do PIS n/ mes {competencia} - {apelido}"
+                                    linhas_excel.append(criar_linha_erp(c_transf_pis, row['conta_deb_pis'], data_fecho, row['valor_pis'], "", hist, "FECHO"))
+
+                    # FECHO COFINS
+                    if c_transf_cof and 'conta_deb_cof' in df_notas.columns:
+                        df_cof_valido = df_notas[df_notas['conta_deb_cof'].notnull()]
+                        if not df_cof_valido.empty:
+                            resumo_cof = df_cof_valido.groupby(['conta_deb_cof', 'apelido_unidade'])['valor_cofins'].sum().reset_index()
+                            for _, row in resumo_cof.iterrows():
+                                if row.get('valor_cofins', 0) > 0:
+                                    apelido = str(row.get('apelido_unidade', '')).upper()
+                                    hist = f"Vr. transferido para apuracao do COFINS n/ mes {competencia} - {apelido}"
+                                    linhas_excel.append(criar_linha_erp(c_transf_cof, row['conta_deb_cof'], data_fecho, row['valor_cofins'], "", hist, "FECHO"))
+
+            df_xlsx = pd.DataFrame(linhas_excel)
            # --- LÓGICA DE TRANSFERÊNCIA / FECHO MENSAL CONSOLIDADO (PROTEGIDO) ---
             if not df_export.empty:
                 c_transf_pis = emp_row.get('conta_transf_pis')
