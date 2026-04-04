@@ -99,7 +99,7 @@ def init_connection_pool():
     try:
         return MySQLConnectionPool(
             pool_name="crescere_pool",
-            pool_size=5,
+            pool_size=10, # Aumentado de 5 para 10 para suportar o módulo imobilizado com segurança
             pool_reset_session=True,
             **st.secrets["mysql"]
         )
@@ -526,33 +526,34 @@ def modulo_relatorios():
             linhas_excel = []
             if not df_export.empty:
                 for _, r in df_export.iterrows():
-                    # Lógica de Data Dinâmica
-                    if r.get('origem_retroativa') == 1 and pd.notnull(r.get('competencia_origem')) and str(r['competencia_origem']).strip():
-                        try:
-                            mes_str, ano_str = r['competencia_origem'].split('/')
-                            ultimo_dia = calendar.monthrange(int(ano_str), int(mes_str))[1]
-                            d_str = f"{ultimo_dia:02d}/{int(mes_str):02d}/{ano_str}"
-                        except:
-                            d_str = r['data_lancamento'].strftime('%d/%m/%Y') if pd.notnull(r['data_lancamento']) else ''
+                    
+                    # --- CORREÇÃO CIRÚRGICA DE DATA E HISTÓRICO PARA EXTEMPORÂNEOS ---
+                    is_retro = r.get('origem_retroativa') == 1
+                    comp_origem = r.get('competencia_origem')
+                    
+                    if is_retro and pd.notnull(comp_origem) and str(comp_origem).strip():
+                        comp_alvo = str(comp_origem).strip()
                     else:
-                        try:
-                            mes_str, ano_str = competencia.split('/')
-                            ultimo_dia = calendar.monthrange(int(ano_str), int(mes_str))[1]
-                            d_str = f"{ultimo_dia:02d}/{int(mes_str):02d}/{ano_str}"
-                        except:
-                            d_str = r['data_lancamento'].strftime('%d/%m/%Y') if pd.notnull(r['data_lancamento']) else ''
+                        comp_alvo = competencia
+                    
+                    try:
+                        mes_str, ano_str = comp_alvo.split('/')
+                        ultimo_dia = calendar.monthrange(int(ano_str), int(mes_str))[1]
+                        d_str = f"{ultimo_dia:02d}/{int(mes_str):02d}/{ano_str}"
+                    except:
+                        d_str = r['data_lancamento'].strftime('%d/%m/%Y') if pd.notnull(r['data_lancamento']) else ''
                     
                     doc = r['num_nota'] or r['id']
                     
                     if r.get('is_custo_avulso') == 0:
                         if pd.notnull(r['conta_deb_pis']) and pd.notnull(r['conta_cred_pis']):
-                            linhas_excel.append(criar_linha_erp(r['conta_deb_pis'], r['conta_cred_pis'], d_str, r['valor_pis'], r.get('pis_h_codigo'), formatar_historico_erp(r.get('pis_h_texto'), competencia), doc))
+                            linhas_excel.append(criar_linha_erp(r['conta_deb_pis'], r['conta_cred_pis'], d_str, r['valor_pis'], r.get('pis_h_codigo'), formatar_historico_erp(r.get('pis_h_texto'), comp_alvo), doc))
                         if pd.notnull(r['conta_deb_cof']) and pd.notnull(r['conta_cred_cof']):
-                            linhas_excel.append(criar_linha_erp(r['conta_deb_cof'], r['conta_cred_cof'], d_str, r['valor_cofins'], r.get('cofins_h_codigo'), formatar_historico_erp(r.get('cofins_h_texto'), competencia), doc))
+                            linhas_excel.append(criar_linha_erp(r['conta_deb_cof'], r['conta_cred_cof'], d_str, r['valor_cofins'], r.get('cofins_h_codigo'), formatar_historico_erp(r.get('cofins_h_texto'), comp_alvo), doc))
                     
                     if r.get('is_custo_avulso') == 1 and float(r.get('valor_custo_liquido', 0)) > 0:
                         h_complementar = f" - {r['historico']}" if r.get('historico') else ""
-                        texto_final_custo = formatar_historico_erp(r.get('custo_hist_texto'), competencia) + h_complementar
+                        texto_final_custo = formatar_historico_erp(r.get('custo_hist_texto'), comp_alvo) + h_complementar
                         linhas_excel.append(criar_linha_erp(r['custo_conta_deb'], r['custo_conta_cred'], d_str, r['valor_custo_liquido'], r.get('custo_hist_cod'), texto_final_custo, doc))
             
             df_xlsx = pd.DataFrame(linhas_excel)
@@ -619,7 +620,7 @@ def modulo_relatorios():
                 pdf.ln(5); pdf.set_font("Arial", 'B', 9); pdf.cell(0, 6, "NOTA DE AUDITORIA - CREDITO APROPRIADO EXTEMPORANEAMENTE (NO FUTURO):", ln=True); pdf.set_font("Arial", '', 8)
                 for _, r in df_fut.iterrows(): pdf.multi_cell(0, 4, f"Registra-se que o documento fiscal {r['num_nota']}, emitido por {r['fornecedor']} nesta competencia ({comp_db}), nao compos a base de calculo original deste demonstrativo. O respectivo credito foi apropriado extemporaneamente na competencia {r['competencia']}.\nMotivo: {r['historico']}"); pdf.ln(2)
 
-            pdf_bytes = pdf.output(dest='S').encode('latin1')
+            pdf_bytes = pdf.output(dest='S').encode('latin1', 'replace') # Correção: 'replace' para evitar travamento com caracteres do FPDF
             st.success("Ficheiros processados com sucesso!")
             c_btn1, c_btn2, _ = st.columns([1, 1, 2])
             c_btn1.download_button("Baixar XLSX (Exportação ERP)", data=buffer.getvalue(), file_name=f"LCTOS_{comp_db}.xlsx")
@@ -1007,7 +1008,7 @@ def modulo_imobilizado():
                                             if data_plan.month == 12: data_plan = date(data_plan.year + 1, 1, 1)
                                             else: data_plan = date(data_plan.year, data_plan.month + 1, 1)
 
-                                st.success("Bem registado com sucesso!"); st.rerun()
+                            st.success("Bem registado com sucesso!"); st.rerun()
                             except Exception as e: st.error(f"Erro ao salvar: {e}")
 
         with col_ras:
@@ -1083,7 +1084,7 @@ def modulo_imobilizado():
                                         dias_uso = max(0, dia_final_calculo - dia_inicial + 1)
                                         cota = (base_calc * taxa_anual / 365.0) * dias_uso
                                     
-                                    cota = min(cota, residual_ant)
+                                cota = min(cota, residual_ant)
                                 
                                 if cota > 0:
                                     c_d_use = b.get('conta_despesa') or b.get('conta_contabil_despesa', '')
@@ -1290,7 +1291,7 @@ def modulo_imobilizado():
                     pdf_inv.cell(30, 8, formatar_moeda(t_dep), 1)
                     pdf_inv.cell(40, 8, formatar_moeda(t_res), 1, ln=True)
                     
-                    pdf_bytes_inv = pdf_inv.output(dest='S').encode('latin1')
+                    pdf_bytes_inv = pdf_inv.output(dest='S').encode('latin1', 'replace') # Correção 'replace'
                     st.session_state['pdf_inv_b64'] = pdf_bytes_inv
                     st.session_state['pdf_inv_nome'] = f"Inventario_{row_emp_ativa['apelido_unidade'] or row_emp_ativa['id']}_{data_posicao.strftime('%m%Y')}.pdf"
 
