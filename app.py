@@ -559,41 +559,45 @@ def modulo_relatorios():
                         h_complementar = f" - {r['historico']}" if r.get('historico') else ""
                         texto_final_custo = formatar_historico_erp(r.get('custo_hist_texto'), comp_exibicao) + h_complementar
                         linhas_excel.append(criar_linha_erp(r['custo_conta_deb'], r['custo_conta_cred'], d_str, r['valor_custo_liquido'], r.get('custo_hist_cod'), texto_final_custo, doc))
-           # --- LÓGICA DE TRANSFERÊNCIA / FECHO MENSAL CONSOLIDADO (VERSÃO FINAL) ---
+           # --- LÓGICA DE TRANSFERÊNCIA / FECHO MENSAL CONSOLIDADO (PROTEGIDO) ---
             if not df_export.empty:
-                # 1. Recupera as contas de DESTINO (Configuradas na aba de Fecho)
                 c_transf_pis = emp_row.get('conta_transf_pis')
                 c_transf_cof = emp_row.get('conta_transf_cofins')
                 
-                # 2. Filtra apenas lançamentos de notas (ignora custos avulsos)
-                df_notas = df_export[df_export['is_custo_avulso'] == 0].copy()
+                # Filtra apenas o que é nota fiscal e tem valor de imposto
+                df_notas = df_export[(df_export['is_custo_avulso'] == 0)].copy()
 
                 if not df_notas.empty:
-                    # Garante que temos um apelido para o histórico
                     df_notas['apelido_unidade'] = df_notas['apelido_unidade'].fillna('MATRIZ')
                     
-                    # 3. Agrupamos pela conta de DÉBITO (onde o imposto entrou) 
-                    # para gerar um único CRÉDITO de saída para cada conta de imposto usada
-                    resumo_pis = df_notas.groupby(['conta_deb_pis', 'apelido_unidade'])['valor_pis'].sum().reset_index()
-                    resumo_cof = df_notas.groupby(['conta_deb_cof', 'apelido_unidade'])['valor_cofins'].sum().reset_index()
-
-                    # Calcula data (último dia da competência)
+                    # Calcula data do último dia
                     m_c, a_c = competencia.split('/')
                     u_dia = calendar.monthrange(int(a_c), int(m_c))[1]
                     data_fecho = f"{u_dia:02d}/{m_c}/{a_c}"
 
-                    # 4. Gera a linha consolidada de PIS
-                    if c_transf_pis:
-                        for _, row in resumo_pis.iterrows():
-                            if row['valor_pis'] > 0:
-                                apelido = str(row['apelido_unidade']).upper()
-                                hist_unidade = f"Vr. transferido para apuracao do PIS n/ mes {competencia} - {apelido}"
-                                # DEBITO: Conta de Fecho (4501) | CREDITO: Conta de PIS a Recuperar (ex: 2492)
-                                linhas_excel.append(criar_linha_erp(
-                                    c_transf_pis, row['conta_deb_pis'], data_fecho, row['valor_pis'], 
-                                    "", hist_unidade, "FECHO"
-                                ))
+                    # --- PROCESSAMENTO PIS ---
+                    if c_transf_pis and 'conta_deb_pis' in df_notas.columns:
+                        # Remove linhas onde a conta de débito está vazia para não dar erro no groupby
+                        df_pis_valido = df_notas[df_notas['conta_deb_pis'].notnull()]
+                        if not df_pis_valido.empty:
+                            resumo_pis = df_pis_valido.groupby(['conta_deb_pis', 'apelido_unidade'])['valor_pis'].sum().reset_index()
+                            for _, row in resumo_pis.iterrows():
+                                if row['valor_pis'] > 0:
+                                    apelido = str(row['apelido_unidade']).upper()
+                                    hist = f"Vr. transferido para apuracao do PIS n/ mes {competencia} - {apelido}"
+                                    linhas_excel.append(criar_linha_erp(c_transf_pis, row['conta_deb_pis'], data_fecho, row['valor_pis'], "", hist, "FECHO"))
 
+                    # --- PROCESSAMENTO COFINS ---
+                    if c_transf_cof and 'conta_deb_cof' in df_notas.columns:
+                        # Remove linhas onde a conta de débito está vazia
+                        df_cof_valido = df_notas[df_notas['conta_deb_cof'].notnull()]
+                        if not df_cof_valido.empty:
+                            resumo_cof = df_cof_valido.groupby(['conta_deb_cof', 'apelido_unidade'])['valor_cofins'].sum().reset_index()
+                            for _, row in resumo_cof.iterrows():
+                                if row['valor_cofins'] > 0:
+                                    apelido = str(row['apelido_unidade']).upper()
+                                    hist = f"Vr. transferido para apuracao do COFINS n/ mes {competencia} - {apelido}"
+                                    linhas_excel.append(criar_linha_erp(c_transf_cof, row['conta_deb_cof'], data_fecho, row['valor_cofins'], "", hist, "FECHO"))
                     # 5. Gera a linha consolidada de COFINS
                     if c_transf_cof:
                         for _, row in resumo_cof.iterrows():
