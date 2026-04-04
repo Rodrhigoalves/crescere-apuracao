@@ -961,8 +961,7 @@ def modulo_imobilizado():
                     
                     btn_disabled = ("3" in cenario and not confirmacao_cad)
                     if btn_disabled: st.warning("⚠️ Confirme a memória de cálculo para habilitar a gravação.")
-                    
-                    if st.button("Registar no Inventário", type="primary", use_container_width=True, disabled=btn_disabled):
+                   if st.button("Registar no Inventário", type="primary", use_container_width=True, disabled=btn_disabled):
                         if not desc or v_aq <= 0: st.error("Descrição e Valor de Aquisição são obrigatórios e devem ser maiores que zero.")
                         elif dt_c > hoje_br.date(): st.error("A Data de Compra não pode ser no futuro.")
                         elif ("1" not in cenario) and v_residual_atual <= 0 and "3" in cenario: st.error("O Valor Residual calculado zerou. Não utilize Continuidade para itens 100% depreciados.")
@@ -992,8 +991,10 @@ def modulo_imobilizado():
                                             if data_plan.month == 12: data_plan = date(data_plan.year + 1, 1, 1)
                                             else: data_plan = date(data_plan.year, data_plan.month + 1, 1)
 
-                            st.success("Bem registado com sucesso!"); st.rerun()
-                            except Exception as e: st.error(f"Erro ao salvar: {e}")
+                                st.success("Bem registado com sucesso!"); st.rerun()
+                            except Exception as e: 
+                                st.error(f"Erro ao salvar: {e}") 
+                   
 
         with col_ras:
             st.markdown("#### Processamento em Lote (Exportação Alterdata)")
