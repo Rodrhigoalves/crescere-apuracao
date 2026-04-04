@@ -521,39 +521,43 @@ def modulo_relatorios():
                 res_hist_cof = (hist_deb['t_cof'].sum() if not hist_deb.empty else 0) - (hist_cred['t_cof'].sum() if not hist_cred.empty else 0) - (hist_deb['t_cof_ret'].sum() if not hist_deb.empty else 0)
                 if res_hist_pis < 0: saldo_ant_pis = abs(res_hist_pis)
                 if res_hist_cof < 0: saldo_ant_cof = abs(res_hist_cof)
-
             # --- EXPORTAÇÃO EXCEL (TODOS) ---
             linhas_excel = []
             if not df_export.empty:
                 for _, r in df_export.iterrows():
                     
-                    # --- CORREÇÃO CIRÚRGICA DE DATA E HISTÓRICO PARA EXTEMPORÂNEOS ---
+                    # --- LÓGICA DE DATA E HISTÓRICO CORRIGIDA ---
                     is_retro = r.get('origem_retroativa') == 1
-                    comp_origem = r.get('competencia_origem')
+                    comp_origem = r.get('competencia_origem') # Vem do banco como AAAA-MM-DD ou MM/AAAA
                     
-                    if is_retro and pd.notnull(comp_origem) and str(comp_origem).strip():
-                        comp_alvo = str(comp_origem).strip()
+                    if is_retro and comp_origem:
+                        # Se vier do banco como YYYY-MM-DD, tratamos para o padrão BR
+                        if '-' in str(comp_origem):
+                            ano_alvo, mes_alvo = str(comp_origem).split('-')[:2]
+                        else:
+                            mes_alvo, ano_alvo = str(comp_origem).split('/')
+                        
+                        comp_exibicao = f"{int(mes_alvo):02d}/{ano_alvo}"
+                        ultimo_dia = calendar.monthrange(int(ano_alvo), int(mes_alvo))[1]
+                        d_str = f"{ultimo_dia:02d}/{int(mes_alvo):02d}/{ano_alvo}"
                     else:
-                        comp_alvo = competencia
-                    
-                    try:
-                        mes_str, ano_str = comp_alvo.split('/')
-                        ultimo_dia = calendar.monthrange(int(ano_str), int(mes_str))[1]
-                        d_str = f"{ultimo_dia:02d}/{int(mes_str):02d}/{ano_str}"
-                    except:
-                        d_str = r['data_lancamento'].strftime('%d/%m/%Y') if pd.notnull(r['data_lancamento']) else ''
+                        # Para lançamentos normais, usa a competência da tela
+                        comp_exibicao = competencia
+                        mes_c, ano_c = competencia.split('/')
+                        ultimo_dia = calendar.monthrange(int(ano_c), int(mes_c))[1]
+                        d_str = f"{ultimo_dia:02d}/{mes_c}/{ano_c}"
                     
                     doc = r['num_nota'] or r['id']
                     
                     if r.get('is_custo_avulso') == 0:
                         if pd.notnull(r['conta_deb_pis']) and pd.notnull(r['conta_cred_pis']):
-                            linhas_excel.append(criar_linha_erp(r['conta_deb_pis'], r['conta_cred_pis'], d_str, r['valor_pis'], r.get('pis_h_codigo'), formatar_historico_erp(r.get('pis_h_texto'), comp_alvo), doc))
+                            linhas_excel.append(criar_linha_erp(r['conta_deb_pis'], r['conta_cred_pis'], d_str, r['valor_pis'], r.get('pis_h_codigo'), formatar_historico_erp(r.get('pis_h_texto'), comp_exibicao), doc))
                         if pd.notnull(r['conta_deb_cof']) and pd.notnull(r['conta_cred_cof']):
-                            linhas_excel.append(criar_linha_erp(r['conta_deb_cof'], r['conta_cred_cof'], d_str, r['valor_cofins'], r.get('cofins_h_codigo'), formatar_historico_erp(r.get('cofins_h_texto'), comp_alvo), doc))
+                            linhas_excel.append(criar_linha_erp(r['conta_deb_cof'], r['conta_cred_cof'], d_str, r['valor_cofins'], r.get('cofins_h_codigo'), formatar_historico_erp(r.get('cofins_h_texto'), comp_exibicao), doc))
                     
                     if r.get('is_custo_avulso') == 1 and float(r.get('valor_custo_liquido', 0)) > 0:
                         h_complementar = f" - {r['historico']}" if r.get('historico') else ""
-                        texto_final_custo = formatar_historico_erp(r.get('custo_hist_texto'), comp_alvo) + h_complementar
+                        texto_final_custo = formatar_historico_erp(r.get('custo_hist_texto'), comp_exibicao) + h_complementar
                         linhas_excel.append(criar_linha_erp(r['custo_conta_deb'], r['custo_conta_cred'], d_str, r['valor_custo_liquido'], r.get('custo_hist_cod'), texto_final_custo, doc))
             
             df_xlsx = pd.DataFrame(linhas_excel)
