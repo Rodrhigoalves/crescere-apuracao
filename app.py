@@ -562,8 +562,8 @@ def modulo_relatorios():
             # --- LÓGICA DE TRANSFERÊNCIA / FECHO MENSAL DINÂMICO (COM IDENTIFICAÇÃO DE UNIDADE) ---
             if not df_export.empty:
                 # 1. Recupera as contas de DESTINO (Configuradas na aba de Fecho)
-                c_transf_pis = row_emp_f.get('conta_transf_pis')
-                c_transf_cof = row_emp_f.get('conta_transf_cofins')
+                c_transf_pis = emp_row.get('conta_transf_pis')
+                c_transf_cof = emp_row.get('conta_transf_cofins')
                 
                 # 2. Filtra apenas lançamentos de notas (ignora custos avulsos para o total da apuração)
                 df_notas = df_export[df_export['is_custo_avulso'] == 0].copy()
