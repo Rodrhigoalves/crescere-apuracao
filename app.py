@@ -59,7 +59,6 @@ class RelatorioCrescerePDF(FPDF):
         self.cell(0, 6, f"CNPJ: {empresa_cnpj}", ln=True, align='L')
         self.ln(5)
         self.set_font("Arial", 'B', 12)
-        # Suporte para títulos com quebra de linha (útil para os Cenários Dinâmicos)
         for linha_titulo in titulo_relatorio.split('\n'):
             self.cell(0, 8, linha_titulo, ln=True, align='C')
         if periodo:
@@ -142,6 +141,29 @@ def carregar_empresas_ativas():
     with get_db_connection() as conn:
         return pd.read_sql("SELECT * FROM empresas WHERE status_assinatura = 'ATIVO'", conn)
 
+@st.cache_data(ttl=120)
+def carregar_empresas_visiveis():
+    if st.session_state.nivel_acesso == "SUPER_ADMIN":
+        return carregar_empresas_ativas()
+    
+    with get_db_connection() as conn:
+        query = """
+            SELECT e.* FROM empresas e
+            JOIN usuario_empresas ue ON e.id = ue.empresa_id
+            WHERE ue.contabilidade_id = %s
+              AND ue.usuario_id = %s
+              AND ue.status = 'ATIVO'
+              AND e.status_assinatura = 'ATIVO'
+        """
+        df = pd.read_sql(query, conn, params=(st.session_state.contabilidade_id, st.session_state.usuario_id))
+        
+        # Fallback obrigatório (Modelo Antigo)
+        if df.empty and st.session_state.empresa_id_legacy:
+            query_fallback = "SELECT * FROM empresas WHERE id = %s AND status_assinatura = 'ATIVO'"
+            df = pd.read_sql(query_fallback, conn, params=(st.session_state.empresa_id_legacy,))
+            
+        return df
+
 def verificar_senha(senha_plana, hash_banco): return bcrypt.checkpw(senha_plana.encode('utf-8'), hash_banco.encode('utf-8'))
 def gerar_hash_senha(senha_plana): return bcrypt.hashpw(senha_plana.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
@@ -163,6 +185,9 @@ def calcular_impostos(regime, operacao_nome, valor_base):
 
 # --- 4. CONTROLE DE ESTADO E AUTENTICAÇÃO ---
 if 'autenticado' not in st.session_state: st.session_state.autenticado = False
+if 'usuario_id' not in st.session_state: st.session_state.usuario_id = None
+if 'contabilidade_id' not in st.session_state: st.session_state.contabilidade_id = None
+if 'empresa_id_legacy' not in st.session_state: st.session_state.empresa_id_legacy = None
 if 'dados_form' not in st.session_state: st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": "", "apelido_unidade": "", "conta_transf_pis": "", "conta_transf_cofins": ""}
 if 'rascunho_lancamentos' not in st.session_state: st.session_state.rascunho_lancamentos = []
 if 'form_key' not in st.session_state: st.session_state.form_key = 0
@@ -188,7 +213,12 @@ if not st.session_state.autenticado:
                     st.session_state.autenticado = True
                     st.session_state.usuario_logado = user_data['nome']
                     st.session_state.username = user_data['username']
-                    st.session_state.empresa_id = user_data.get('empresa_id')
+                    
+                    # Carga Multiempresa na Sessão
+                    st.session_state.usuario_id = user_data.get('id')
+                    st.session_state.contabilidade_id = user_data.get('contabilidade_id')
+                    st.session_state.empresa_id_legacy = user_data.get('empresa_id')
+                    
                     st.session_state.nivel_acesso = "SUPER_ADMIN" if user_data['username'].lower() == "rodrhigo" else user_data['nivel_acesso']
                     st.rerun()
                 else: st.error("Credenciais inválidas.")
@@ -233,6 +263,7 @@ def modulo_empresas():
                             else: 
                                 cursor.execute("INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco, status_assinatura, apelido_unidade) VALUES (%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s)", (nome, fanta, cnpj, regime, tipo, cnae, endereco, apelido))
                         carregar_empresas_ativas.clear()
+                        carregar_empresas_visiveis.clear()
                         st.success("Gravado com sucesso!")
                         st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": "", "apelido_unidade": "", "conta_transf_pis": "", "conta_transf_cofins": ""}
                     except Exception as e: st.error(f"Erro: {e}")
@@ -251,11 +282,11 @@ def modulo_empresas():
 # --- 6. MÓDULO APURAÇÃO ---
 def modulo_apuracao():
     st.markdown("### Apuração de Impostos (PIS/COFINS)")
-    df_emp = carregar_empresas_ativas()
+    df_emp = carregar_empresas_visiveis()
     
-    if st.session_state.nivel_acesso != "SUPER_ADMIN" and st.session_state.empresa_id:
-        df_emp = df_emp[df_emp['id'] == st.session_state.empresa_id]
-        if df_emp.empty: st.warning("Nenhuma unidade vinculada a este utilizador."); return
+    if df_emp.empty:
+        st.warning("Nenhuma unidade liberada para este utilizador. Solicite o acesso ao seu Gestor.")
+        return
 
     df_op = carregar_operacoes()
     df_op['nome_exibicao'] = df_op.apply(lambda x: f"[{x['tipo']}] {x['nome']}", axis=1)
@@ -405,8 +436,10 @@ def modulo_apuracao():
 # --- 7. MÓDULO RELATÓRIOS E INTEGRAÇÃO ---
 def modulo_relatorios():
     st.markdown("### Exportação para Alterdata e PDF Analítico")
-    df_emp = carregar_empresas_ativas()
-    if st.session_state.nivel_acesso != "SUPER_ADMIN" and st.session_state.empresa_id: df_emp = df_emp[df_emp['id'] == st.session_state.empresa_id]
+    df_emp = carregar_empresas_visiveis()
+    if df_emp.empty:
+        st.warning("Nenhuma unidade liberada para este utilizador.")
+        return
 
     c1, c2 = st.columns([2, 1])
     emp_sel = c1.selectbox("Unidade (CNPJ)", df_emp.apply(lambda r: f"{r['nome']} - {r['cnpj']}", axis=1))
@@ -534,8 +567,10 @@ def modulo_relatorios():
 # --- 7.5 MÓDULO IMOBILIZADO E DEPRECIAÇÃO ---
 def modulo_imobilizado():
     st.markdown("### Gestão de Ativo Imobilizado")
-    df_emp = carregar_empresas_ativas()
-    if st.session_state.nivel_acesso != "SUPER_ADMIN" and st.session_state.empresa_id: df_emp = df_emp[df_emp['id'] == st.session_state.empresa_id]
+    df_emp = carregar_empresas_visiveis()
+    if df_emp.empty:
+        st.warning("Nenhuma unidade liberada para este utilizador.")
+        return
     
     c_emp, c_vazio = st.columns([2, 1])
     emp_sel = c_emp.selectbox("Unidade", df_emp.apply(formatar_nome_empresa, axis=1), key="imo_emp")
@@ -952,7 +987,6 @@ def modulo_imobilizado():
                                 if pd.notnull(b.get('taxa_customizada')) and float(b['taxa_customizada']) > 0: taxa_anual = float(b['taxa_customizada']) / 100.0
                                 elif pd.notnull(b.get('taxa_anual_percentual')): taxa_anual = float(b['taxa_anual_percentual']) / 100.0
 
-                                # === IMPLEMENTAÇÃO DA TRAVA DE RESIDUAL ZERO ===
                                 dep_acumulada_ant = 0.0
                                 saldo_ini = float(b.get('valor_residual_inicial', 0.0))
                                 plano_do_bem = df_planos[df_planos['bem_id'] == b['id']] if not df_planos.empty else pd.DataFrame()
@@ -967,9 +1001,7 @@ def modulo_imobilizado():
                                 if pd.notnull(b.get('data_saldo_inicial')): residual_ant = max(0.0, saldo_ini - dep_acumulada_ant)
                                 else: residual_ant = max(0.0, base_calc - dep_acumulada_ant)
                                 
-                                # Trava: Se já estava zerado no início do mês, não gera despesa
                                 if residual_ant <= 0.009: continue
-                                # ================================================
 
                                 cota = 0.0
                                 usou_plano = False
@@ -989,7 +1021,6 @@ def modulo_imobilizado():
                                         dias_uso = max(0, dia_final_calculo - dia_inicial + 1)
                                         cota = (base_calc * taxa_anual / 365.0) * dias_uso
                                     
-                                    # Garantir que a cota não ultrapasse o residual
                                     cota = min(cota, residual_ant)
                                 
                                 if cota > 0:
@@ -1077,7 +1108,6 @@ def modulo_imobilizado():
             grupo_filtro = c_filtro.selectbox("Filtrar por Grupo", opcoes_grupos, key="filtro_grupo_pdf")
             
             data_minima = date(2025, 12, 31)
-            # Retirado o max_value para permitir simulações no futuro!
             data_posicao = c_data.date_input("Data Base (Posição ou Projeção)", value=hoje_br.date(), min_value=data_minima, key="dt_pos_pdf")
             
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
@@ -1090,13 +1120,9 @@ def modulo_imobilizado():
                 if df_pdf.empty:
                     st.warning("Nenhum bem encontrado para esta unidade.")
                 else:
-                    # === ETIQUETAS DINÂMICAS ===
-                    if data_posicao < hoje_br.date():
-                        etiqueta_titulo = "[POSICAO HISTORICA - AUDITORIA]"
-                    elif data_posicao > hoje_br.date():
-                        etiqueta_titulo = "[PROJECAO DE VALOR CONTABIL - SIMULACAO]"
-                    else:
-                        etiqueta_titulo = "[POSICAO ATUAL - INVENTARIO]"
+                    if data_posicao < hoje_br.date(): etiqueta_titulo = "[POSICAO HISTORICA - AUDITORIA]"
+                    elif data_posicao > hoje_br.date(): etiqueta_titulo = "[PROJECAO DE VALOR CONTABIL - SIMULACAO]"
+                    else: etiqueta_titulo = "[POSICAO ATUAL - INVENTARIO]"
                     
                     titulo_final = f"INVENTARIO DE ATIVO IMOBILIZADO\n{etiqueta_titulo}"
 
@@ -1292,7 +1318,7 @@ def modulo_parametros():
 
     with tab_fecho:
         st.markdown("##### Contas de Transferência / Fecho (Apuração Mensal)")
-        df_emp_f = carregar_empresas_ativas()
+        df_emp_f = carregar_empresas_visiveis()
         if not df_emp_f.empty:
             with st.form("form_fecho"):
                 emp_sel_f = st.selectbox("Selecione a Empresa", df_emp_f.apply(formatar_nome_empresa, axis=1))
@@ -1304,10 +1330,13 @@ def modulo_parametros():
                 if st.form_submit_button("Salvar Contas de Fecho"):
                     with get_db_cursor(commit=True) as cursor:
                         cursor.execute("UPDATE empresas SET conta_transf_pis=%s, conta_transf_cofins=%s WHERE id=%s", (t_pis, t_cofins, int(emp_id_f)))
-                    carregar_empresas_ativas.clear(); st.success("Atualizado!"); st.rerun()
+                    carregar_empresas_ativas.clear(); carregar_empresas_visiveis.clear()
+                    st.success("Atualizado!"); st.rerun()
 
     with tab_imob:
-        df_e = carregar_empresas_ativas()
+        df_e = carregar_empresas_visiveis()
+        if df_e.empty: st.warning("Nenhuma unidade encontrada."); return
+        
         e_sel = st.selectbox("Selecione a Empresa para Gerir Grupos", df_e.apply(formatar_nome_empresa, axis=1), key="sel_emp_grp")
         e_id = int(df_e.loc[df_e.apply(formatar_nome_empresa, axis=1) == e_sel].iloc[0]['id'])
         
@@ -1369,23 +1398,29 @@ def modulo_parametros():
                             cursor.execute("INSERT INTO grupos_imobilizado (tenant_id, nome_grupo, taxa_anual_percentual, conta_contabil_despesa, conta_contabil_dep_acumulada) VALUES (%s,%s,%s,%s,%s)", (int(e_id), n_g_n, float(tx_n), cd_n, cc_n))
                         st.success("Criado!"); st.rerun()
 
-# --- 9. GESTÃO DE UTILIZADORES ---
+# --- 9. GESTÃO DE UTILIZADORES (MULTIEMPRESA) ---
 def modulo_usuarios():
-    if st.session_state.nivel_acesso != "SUPER_ADMIN": st.error("Acesso restrito."); return
+    if st.session_state.nivel_acesso not in ["SUPER_ADMIN", "ADMIN"]: 
+        st.error("Acesso restrito.")
+        return
     
     st.markdown("### Gestão de Utilizadores")
     with get_db_connection() as conn:
-        df_users = pd.read_sql("SELECT id, nome, username, nivel_acesso, status_usuario, data_criacao FROM usuarios ORDER BY nome ASC", conn)
-        df_empresas = pd.read_sql("SELECT id, nome FROM empresas WHERE status_assinatura = 'ATIVO'", conn)
+        if st.session_state.nivel_acesso == "SUPER_ADMIN":
+            df_users = pd.read_sql("SELECT id, nome, username, nivel_acesso, status_usuario, data_criacao, contabilidade_id FROM usuarios ORDER BY nome ASC", conn)
+        else:
+            df_users = pd.read_sql("SELECT id, nome, username, nivel_acesso, status_usuario, data_criacao, contabilidade_id FROM usuarios WHERE contabilidade_id = %s ORDER BY nome ASC", conn, params=(st.session_state.contabilidade_id,))
+        
+        df_empresas = carregar_empresas_ativas()
     
-    tab_lista, tab_novo = st.tabs(["Utilizadores Registados", "Adicionar Utilizador"])
+    tab_lista, tab_novo, tab_perm = st.tabs(["Utilizadores Registados", "Adicionar Utilizador", "Permissões por Empresa"])
     
     with tab_lista:
         st.dataframe(df_users, use_container_width=True, hide_index=True)
-        st.markdown("##### Gerir Acesso")
+        st.markdown("##### Gerir Acesso Base")
         with st.form("form_gestao_usuario"):
             c1, c2 = st.columns([2, 1])
-            usr_sel = c1.selectbox("Selecione o Utilizador", df_users['username'].tolist())
+            usr_sel = c1.selectbox("Selecione o Utilizador", df_users['username'].tolist() if not df_users.empty else [])
             nova_acao = c2.selectbox("Ação", ["Inativar Acesso", "Reativar Acesso", "Redefinir Palavra-passe"])
             nova_senha = st.text_input("Nova Palavra-passe (se aplicável)", type="password")
             
@@ -1416,22 +1451,74 @@ def modulo_usuarios():
             nova_pass = col_pass.text_input("Palavra-passe Inicial", type="password")
             nivel = col_nivel.selectbox("Nível de Acesso", ["CLIENT_OPERATOR", "ADMIN", "SUPER_ADMIN"])
             
-            lista_empresas = ["Nenhuma (Acesso Global)"] + df_empresas['nome'].tolist()
-            emp_vinculada = st.selectbox("Vincular a uma Unidade/Empresa", lista_empresas)
+            lista_empresas = ["Nenhuma (Configurar depois)"] + df_empresas['nome'].tolist() if not df_empresas.empty else ["Nenhuma (Configurar depois)"]
+            emp_vinculada = st.selectbox("Vincular Empresa Padrão Inicial", lista_empresas)
             
             if st.form_submit_button("Criar Utilizador"):
                 if not novo_nome or not novo_user or len(nova_pass) < 6: st.error("Preencha todos os campos corretamente (senha mín. 6 caracteres).")
-                elif novo_user in df_users['username'].tolist(): st.error("Este utilizador já existe.")
+                elif not df_users.empty and novo_user in df_users['username'].tolist(): st.error("Este utilizador já existe.")
                 else:
                     try:
                         with get_db_cursor(commit=True) as cursor:
                             empresa_id_db = None
-                            if emp_vinculada != "Nenhuma (Acesso Global)": empresa_id_db = int(df_empresas[df_empresas['nome'] == emp_vinculada].iloc[0]['id'])
-                            query = """INSERT INTO usuarios (nome, username, senha_hash, nivel_acesso, status_usuario, data_criacao, empresa_id) VALUES (%s, %s, %s, %s, 'ATIVO', NOW(), %s)"""
-                            cursor.execute(query, (novo_nome, novo_user, gerar_hash_senha(nova_pass), nivel, empresa_id_db))
+                            if emp_vinculada != "Nenhuma (Configurar depois)": 
+                                empresa_id_db = int(df_empresas[df_empresas['nome'] == emp_vinculada].iloc[0]['id'])
+                            
+                            query_u = """INSERT INTO usuarios (nome, username, senha_hash, nivel_acesso, status_usuario, data_criacao, contabilidade_id, empresa_id) VALUES (%s, %s, %s, %s, 'ATIVO', NOW(), %s, %s)"""
+                            cursor.execute(query_u, (novo_nome, novo_user, gerar_hash_senha(nova_pass), nivel, st.session_state.contabilidade_id, empresa_id_db))
+                            novo_id = cursor.lastrowid
+                            
+                            if empresa_id_db and st.session_state.contabilidade_id:
+                                query_p = """INSERT INTO usuario_empresas (contabilidade_id, usuario_id, empresa_id, status, concedido_por) VALUES (%s, %s, %s, 'ATIVO', %s)"""
+                                cursor.execute(query_p, (st.session_state.contabilidade_id, novo_id, empresa_id_db, st.session_state.usuario_id))
+                                
                         st.toast("Utilizador criado com sucesso!", icon="✅")
+                        carregar_empresas_visiveis.clear()
                         import time; time.sleep(1.2); st.rerun()
                     except Exception as e: st.error(f"Erro ao inserir no banco: {e}")
+
+    with tab_perm:
+        st.markdown("##### Gerir Permissões Multiempresa")
+        if not df_users.empty and not df_empresas.empty:
+            usr_sel_perm = st.selectbox("Utilizador Alvo", df_users.apply(lambda r: f"{r['nome']} ({r['username']})", axis=1))
+            usr_row = df_users.iloc[df_users.apply(lambda r: f"{r['nome']} ({r['username']})", axis=1) == usr_sel_perm].iloc[0]
+            u_id = int(usr_row['id'])
+            u_contab = usr_row['contabilidade_id'] or st.session_state.contabilidade_id
+            
+            with get_db_connection() as conn_perm:
+                df_perms_atuais = pd.read_sql("SELECT empresa_id FROM usuario_empresas WHERE usuario_id = %s AND status = 'ATIVO'", conn_perm, params=(u_id,))
+            
+            ids_atuais = df_perms_atuais['empresa_id'].tolist() if not df_perms_atuais.empty else []
+            nomes_empresas = df_empresas.apply(formatar_nome_empresa, axis=1).tolist()
+            empresas_pre_selecionadas = df_empresas[df_empresas['id'].isin(ids_atuais)].apply(formatar_nome_empresa, axis=1).tolist()
+            
+            with st.form("form_perm"):
+                empresas_selecionadas = st.multiselect("Empresas Permitidas", options=nomes_empresas, default=empresas_pre_selecionadas)
+                
+                if st.form_submit_button("Salvar Permissões", type="primary"):
+                    ids_selecionados = df_empresas[df_empresas.apply(formatar_nome_empresa, axis=1).isin(empresas_selecionadas)]['id'].tolist()
+                    
+                    try:
+                        with get_db_cursor(commit=True) as cursor_perm:
+                            for eid in ids_selecionados:
+                                query_upsert = """
+                                    INSERT INTO usuario_empresas (contabilidade_id, usuario_id, empresa_id, status, concedido_por) 
+                                    VALUES (%s, %s, %s, 'ATIVO', %s) 
+                                    ON DUPLICATE KEY UPDATE status='ATIVO', concedido_por=VALUES(concedido_por)
+                                """
+                                cursor_perm.execute(query_upsert, (u_contab, u_id, eid, st.session_state.usuario_id))
+                            
+                            ids_revogados = [eid for eid in ids_atuais if eid not in ids_selecionados]
+                            if ids_revogados:
+                                format_strings = ','.join(['%s'] * len(ids_revogados))
+                                query_revoke = f"UPDATE usuario_empresas SET status='INATIVO', concedido_por=%s WHERE usuario_id=%s AND empresa_id IN ({format_strings})"
+                                params_revoke = [st.session_state.usuario_id, u_id] + ids_revogados
+                                cursor_perm.execute(query_revoke, params_revoke)
+                        
+                        carregar_empresas_visiveis.clear()
+                        st.success("Permissões salvas com sucesso!")
+                        import time; time.sleep(1); st.rerun()
+                    except Exception as e: st.error(f"Erro ao salvar: {e}")
 
 # --- 10. MENU LATERAL ---
 with st.sidebar:
@@ -1446,7 +1533,13 @@ with st.sidebar:
     st.markdown("<h2 style='color: #004b87; text-align: center;'>CRESCERE</h2>", unsafe_allow_html=True)
     st.markdown(f"<p style='text-align: center;'><b>{st.session_state.usuario_logado}</b><br><small>{st.session_state.nivel_acesso}</small></p>", unsafe_allow_html=True)
     st.write("---")
-    menu = st.radio("Módulos", ["Gestão de Empresas", "Apuração Mensal", "Relatórios e Integração", "Imobilizado & Depreciação", "Parâmetros Contábeis", "Gestão de Utilizadores"])
+    
+    if st.session_state.nivel_acesso in ["SUPER_ADMIN", "ADMIN"]:
+        modulos_disp = ["Gestão de Empresas", "Apuração Mensal", "Relatórios e Integração", "Imobilizado & Depreciação", "Parâmetros Contábeis", "Gestão de Utilizadores"]
+    else:
+        modulos_disp = ["Apuração Mensal", "Relatórios e Integração", "Imobilizado & Depreciação"]
+        
+    menu = st.radio("Módulos", modulos_disp)
     
     st.write("---")
     st.markdown(f"""
