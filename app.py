@@ -559,7 +559,7 @@ def modulo_relatorios():
                         h_complementar = f" - {r['historico']}" if r.get('historico') else ""
                         texto_final_custo = formatar_historico_erp(r.get('custo_hist_texto'), comp_exibicao) + h_complementar
                         linhas_excel.append(criar_linha_erp(r['custo_conta_deb'], r['custo_conta_cred'], d_str, r['valor_custo_liquido'], r.get('custo_hist_cod'), texto_final_custo, doc))
-            # --- LÓGICA DE TRANSFERÊNCIA / FECHO MENSAL CONSOLIDADO (CORRIGIDO) ---
+           # --- LÓGICA DE TRANSFERÊNCIA / FECHO MENSAL CONSOLIDADO (VERSÃO FINAL) ---
             if not df_export.empty:
                 # 1. Recupera as contas de DESTINO (Configuradas na aba de Fecho)
                 c_transf_pis = emp_row.get('conta_transf_pis')
@@ -572,10 +572,12 @@ def modulo_relatorios():
                     # Garante que temos um apelido para o histórico
                     df_notas['apelido_unidade'] = df_notas['apelido_unidade'].fillna('MATRIZ')
                     
-                    # 3. Agrupamos pela conta de DÉBITO (onde o imposto entrou) para fazer o CRÉDITO de saída
+                    # 3. Agrupamos pela conta de DÉBITO (onde o imposto entrou) 
+                    # para gerar um único CRÉDITO de saída para cada conta de imposto usada
                     resumo_pis = df_notas.groupby(['conta_deb_pis', 'apelido_unidade'])['valor_pis'].sum().reset_index()
                     resumo_cof = df_notas.groupby(['conta_deb_cof', 'apelido_unidade'])['valor_cofins'].sum().reset_index()
 
+                    # Calcula data (último dia da competência)
                     m_c, a_c = competencia.split('/')
                     u_dia = calendar.monthrange(int(a_c), int(m_c))[1]
                     data_fecho = f"{u_dia:02d}/{m_c}/{a_c}"
@@ -586,9 +588,21 @@ def modulo_relatorios():
                             if row['valor_pis'] > 0:
                                 apelido = str(row['apelido_unidade']).upper()
                                 hist_unidade = f"Vr. transferido para apuracao do PIS n/ mes {competencia} - {apelido}"
-                                # Débito: Conta de Fecho (4501) | Crédito: Conta onde o PIS foi debitado na nota (ex: 2492)
+                                # DEBITO: Conta de Fecho (4501) | CREDITO: Conta de PIS a Recuperar (ex: 2492)
                                 linhas_excel.append(criar_linha_erp(
                                     c_transf_pis, row['conta_deb_pis'], data_fecho, row['valor_pis'], 
+                                    "", hist_unidade, "FECHO"
+                                ))
+
+                    # 5. Gera a linha consolidada de COFINS
+                    if c_transf_cof:
+                        for _, row in resumo_cof.iterrows():
+                            if row['valor_cofins'] > 0:
+                                apelido = str(row['apelido_unidade']).upper()
+                                hist_unidade = f"Vr. transferido para apuracao do COFINS n/ mes {competencia} - {apelido}"
+                                # DEBITO: Conta de Fecho (4326) | CREDITO: Conta de COFINS a Recuperar (ex: 2513)
+                                linhas_excel.append(criar_linha_erp(
+                                    c_transf_cof, row['conta_deb_cof'], data_fecho, row['valor_cofins'], 
                                     "", hist_unidade, "FECHO"
                                 ))
 
