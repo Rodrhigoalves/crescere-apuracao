@@ -77,7 +77,7 @@ class RelatorioCrescerePDF(FPDF):
         self.cell(0, 5, 'Desenvolvido por Rodrhigo Alves | Conciliacao e Auditoria Contabil', 0, 1, 'C')
         self.cell(0, 5, f'Pagina {self.page_no()}', 0, 0, 'C')
 
-# --- FUNÇÃO PADRÃO PARA EXPORTAÇÃO ALTERDATA ---
+# --- FUNÇÃO PADRÃO PARA EXPORTAÇÃO ERP ---
 def criar_linha_erp(deb, cred, data, valor, cod_hist, hist, nr_doc):
     return {
         "Lancto Aut.": "",
@@ -361,7 +361,7 @@ def modulo_apuracao():
                     st.session_state.form_key += 1; st.rerun()
 
         with tab_custo:
-            st.info("Utilize esta aba para apropriar o custo cheio do estoque ou serviço consumido no mês. O sistema extrairá os impostos recuperáveis para gerar a linha contábil Alterdata, sem afetar o PDF de apuração.")
+            st.info("Utilize esta aba para apropriar o custo cheio do estoque ou serviço consumido no mês. O sistema extrairá os impostos recuperáveis para gerar a linha contábil ERP, sem afetar o PDF de apuração.")
             if df_destinos_custo.empty:
                 st.error("Nenhum Destino de Custo configurado para esta unidade. Vá na aba 'Parâmetros Contábeis' > 'Destinos de Custo'.")
             else:
@@ -411,7 +411,7 @@ def modulo_apuracao():
                     c_txt, c_val, c_del = st.columns([5, 3, 1])
                     
                     if it['is_custo_avulso'] == 1:
-                        c_txt.markdown(f"<small style='line-height: 1.2; color: #16a34a;'><b>{it['op_nome']}</b><br>Custo Líquido p/ Alterdata: {formatar_moeda(it['custo_liq']).replace('$', '&#36;')}<br><span style='color:#64748b;'>Doc: {it['nota'] or 'N/A'}</span></small>", unsafe_allow_html=True)
+                        c_txt.markdown(f"<small style='line-height: 1.2; color: #16a34a;'><b>{it['op_nome']}</b><br>Custo Líquido p/ ERP: {formatar_moeda(it['custo_liq']).replace('$', '&#36;')}<br><span style='color:#64748b;'>Doc: {it['nota'] or 'N/A'}</span></small>", unsafe_allow_html=True)
                         c_val.markdown(f"<span style='font-size: 14px; font-weight: 600; color: #16a34a;'>{formatar_moeda(it['v_base']).replace('$', '&#36;')}</span>", unsafe_allow_html=True)
                     else:
                         retro_badge = f" <span style='color:red;font-size:10px;'>(EXTEMP)</span>" if it['retro'] == 1 else ""
@@ -465,7 +465,7 @@ def modulo_apuracao():
 
 # --- 7. MÓDULO RELATÓRIOS E INTEGRAÇÃO ---
 def modulo_relatorios():
-    st.markdown("### Exportação para Alterdata e PDF Analítico")
+    st.markdown("### Exportação para ERP e PDF Analítico")
     df_emp = carregar_empresas_visiveis()
     if df_emp.empty:
         st.warning("Nenhuma unidade liberada para este utilizador.")
@@ -607,7 +607,7 @@ def modulo_relatorios():
             pdf_bytes = pdf.output(dest='S').encode('latin1')
             st.success("Ficheiros processados com sucesso!")
             c_btn1, c_btn2, _ = st.columns([1, 1, 2])
-            c_btn1.download_button("Baixar XLSX (Exportação Alterdata)", data=buffer.getvalue(), file_name=f"LCTOS_{comp_db}.xlsx")
+            c_btn1.download_button("Baixar XLSX (Exportação ERP)", data=buffer.getvalue(), file_name=f"LCTOS_{comp_db}.xlsx")
             c_btn2.download_button("Baixar PDF (Demonstrativo Fiscal)", data=pdf_bytes, file_name=f"RESUMO_{comp_db}.pdf")
         except Exception as e: st.error(f"Erro na geração: {e}")
 
@@ -961,7 +961,8 @@ def modulo_imobilizado():
                     
                     btn_disabled = ("3" in cenario and not confirmacao_cad)
                     if btn_disabled: st.warning("⚠️ Confirme a memória de cálculo para habilitar a gravação.")
-                   if st.button("Registar no Inventário", type="primary", use_container_width=True, disabled=btn_disabled):
+                    
+                    if st.button("Registar no Inventário", type="primary", use_container_width=True, disabled=btn_disabled):
                         if not desc or v_aq <= 0: st.error("Descrição e Valor de Aquisição são obrigatórios e devem ser maiores que zero.")
                         elif dt_c > hoje_br.date(): st.error("A Data de Compra não pode ser no futuro.")
                         elif ("1" not in cenario) and v_residual_atual <= 0 and "3" in cenario: st.error("O Valor Residual calculado zerou. Não utilize Continuidade para itens 100% depreciados.")
@@ -992,12 +993,10 @@ def modulo_imobilizado():
                                             else: data_plan = date(data_plan.year, data_plan.month + 1, 1)
 
                                 st.success("Bem registado com sucesso!"); st.rerun()
-                            except Exception as e: 
-                                st.error(f"Erro ao salvar: {e}") 
-                   
+                            except Exception as e: st.error(f"Erro ao salvar: {e}")
 
         with col_ras:
-            st.markdown("#### Processamento em Lote (Exportação Alterdata)")
+            st.markdown("#### Processamento em Lote (Exportação ERP)")
             with st.container(height=380, border=True):
                 c_a, c_m = st.columns([1, 2])
                 a_proc = c_a.number_input("Ano Base", value=hoje_br.year)
@@ -1100,7 +1099,7 @@ def modulo_imobilizado():
                         else: df_xlsx = df_xlsx[colunas_erp]
                         
                         with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_xlsx.to_excel(writer, index=False, sheet_name='Depreciacao')
-                        st.download_button("Baixar Planilha Alterdata (XLSX)", data=buffer.getvalue(), file_name=f"DEPREC_{a_proc}.xlsx")
+                        st.download_button("Baixar Planilha ERP (XLSX)", data=buffer.getvalue(), file_name=f"DEPREC_{a_proc}.xlsx")
 
     with tabs[1]:
         st.markdown("#### Consultar Inventário Dinâmico")
@@ -1291,7 +1290,7 @@ def modulo_imobilizado():
 # --- 8. MÓDULO PARÂMETROS CONTÁBEIS ---
 def modulo_parametros():
     if st.session_state.nivel_acesso == "CLIENT_OPERATOR": st.error("Acesso restrito."); return
-    st.markdown("### Parâmetros Contábeis e Exportação Alterdata")
+    st.markdown("### Parâmetros Contábeis e Exportação ERP")
     df_op = carregar_operacoes()
     op_nomes = df_op['nome'].tolist()
     
@@ -1311,14 +1310,14 @@ def modulo_parametros():
             c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
             p_deb = c1.text_input("Débito PIS", value=limpar_texto(row_op.get('conta_deb_pis')), key=f"pd_{oid}")
             p_cred = c2.text_input("Crédito PIS", value=limpar_texto(row_op.get('conta_cred_pis')), key=f"pc_{oid}")
-            p_cod = c3.text_input("Cód Alterdata PIS", value=limpar_texto(row_op.get('pis_h_codigo')), key=f"pcd_{oid}")
+            p_cod = c3.text_input("Cód ERP PIS", value=limpar_texto(row_op.get('pis_h_codigo')), key=f"pcd_{oid}")
             p_txt = c4.text_input("Texto Padrão PIS", value=limpar_texto(row_op.get('pis_h_texto')), key=f"ptx_{oid}")
             
             st.markdown("##### Configuração COFINS")
             c5, c6, c7, c8 = st.columns([1, 1, 1, 2])
             c_deb = c5.text_input("Débito COFINS", value=limpar_texto(row_op.get('conta_deb_cof')), key=f"cd_{oid}")
             c_cred = c6.text_input("Crédito COFINS", value=limpar_texto(row_op.get('conta_cred_cof')), key=f"cc_{oid}")
-            c_cod = c7.text_input("Cód Alterdata COFINS", value=limpar_texto(row_op.get('cofins_h_codigo')), key=f"ccd_{oid}")
+            c_cod = c7.text_input("Cód ERP COFINS", value=limpar_texto(row_op.get('cofins_h_codigo')), key=f"ccd_{oid}")
             c_txt = c8.text_input("Texto Padrão COF", value=limpar_texto(row_op.get('cofins_h_texto')), key=f"ctx_{oid}")
 
             if st.form_submit_button("Atualizar Operação Global"):
@@ -1334,9 +1333,9 @@ def modulo_parametros():
             novo_nome = c_nome.text_input("Nome da Nova Operação")
             novo_tipo = c_tipo.selectbox("Natureza", ["RECEITA", "DESPESA"])
             st.markdown("##### Configuração PIS")
-            c1, c2, c3, c4 = st.columns([1, 1, 1, 2]); n_p_deb = c1.text_input("Débito PIS", key="n_pd"); n_p_cred = c2.text_input("Crédito PIS", key="n_pc"); n_p_cod = c3.text_input("Cód Alterdata PIS", key="n_pcd"); n_p_txt = c4.text_input("Texto Padrão PIS", key="n_ptx")
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 2]); n_p_deb = c1.text_input("Débito PIS", key="n_pd"); n_p_cred = c2.text_input("Crédito PIS", key="n_pc"); n_p_cod = c3.text_input("Cód ERP PIS", key="n_pcd"); n_p_txt = c4.text_input("Texto Padrão PIS", key="n_ptx")
             st.markdown("##### Configuração COFINS")
-            c5, c6, c7, c8 = st.columns([1, 1, 1, 2]); n_c_deb = c5.text_input("Débito COFINS", key="n_cd"); n_c_cred = c6.text_input("Crédito COFINS", key="n_cc"); n_c_cod = c7.text_input("Cód Alterdata COFINS", key="n_ccd"); n_c_txt = c8.text_input("Texto Padrão COF", key="n_ctx")
+            c5, c6, c7, c8 = st.columns([1, 1, 1, 2]); n_c_deb = c5.text_input("Débito COFINS", key="n_cd"); n_c_cred = c6.text_input("Crédito COFINS", key="n_cc"); n_c_cod = c7.text_input("Cód ERP COFINS", key="n_ccd"); n_c_txt = c8.text_input("Texto Padrão COF", key="n_ctx")
             st.divider()
             
             if st.form_submit_button("Registar Nova Operação"):
@@ -1426,7 +1425,7 @@ def modulo_parametros():
                 c_d1, c_d2, c_d3, c_d4 = st.columns([1, 1, 1, 2])
                 n_cd = c_d1.text_input("Conta Débito Custo")
                 n_cc = c_d2.text_input("Conta Crédito Custo")
-                n_hc = c_d3.text_input("Cód Alterdata")
+                n_hc = c_d3.text_input("Cód ERP")
                 n_ht = c_d4.text_input("Texto Padrão Custo")
                 
                 if st.form_submit_button("Salvar Destino de Custo"):
@@ -1522,8 +1521,8 @@ def modulo_parametros():
                 with st.form("ed_grp"):
                     n_g = st.text_input("Nome", value=limpar_texto(g_row['nome_grupo']))
                     tx = st.number_input("Taxa Anual (%)", value=float(g_row['taxa_anual_percentual']))
-                    cd = st.text_input("Conta Despesa (Alterdata)", value=limpar_texto(g_row['conta_contabil_despesa']))
-                    cc = st.text_input("Conta Dep. Acumulada (Alterdata)", value=limpar_texto(g_row['conta_contabil_dep_acumulada']))
+                    cd = st.text_input("Conta Despesa (ERP)", value=limpar_texto(g_row['conta_contabil_despesa']))
+                    cc = st.text_input("Conta Dep. Acumulada (ERP)", value=limpar_texto(g_row['conta_contabil_dep_acumulada']))
                     
                     if st.form_submit_button("Atualizar Grupo"):
                         with get_db_cursor(commit=True) as cursor:
@@ -1540,8 +1539,8 @@ def modulo_parametros():
             with st.form("nv_grp"):
                 n_g_n = st.text_input("Nome do Grupo", value=nome_sugerido)
                 tx_n = st.number_input("Taxa Anual (%)", min_value=0.0, value=opcoes_rf[padrao_sel])
-                cd_n = st.text_input("Conta Despesa (D) - Alterdata")
-                cc_n = st.text_input("Conta Dep. Acumulada (C) - Alterdata")
+                cd_n = st.text_input("Conta Despesa (D) - ERP")
+                cc_n = st.text_input("Conta Dep. Acumulada (C) - ERP")
                 if st.form_submit_button("Adicionar Grupo"):
                     if n_g_n:
                         with get_db_cursor(commit=True) as cursor:
