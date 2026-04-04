@@ -18,8 +18,8 @@ st.set_page_config(page_title="Crescere - Apuração Fiscal", layout="wide", ini
 st.markdown("""
 <style>
     .stApp { background-color: #f4f6f9; }
-    .stButton>button, .stDownloadButton>button { background-color: #004b87; color: white; border-radius: 4px; border: none; font-weight: 500; height: 45px; width: 100%; transition: all 0.2s; }
-    .stButton>button:hover, .stDownloadButton>button:hover { background-color: #003366; color: white; transform: translateY(-1px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    .stButton>button, .stDownloadButton>button, a[data-testid="stLinkButton"]>button { background-color: #004b87; color: white; border-radius: 4px; border: none; font-weight: 500; height: 45px; width: 100%; transition: all 0.2s; }
+    .stButton>button:hover, .stDownloadButton>button:hover, a[data-testid="stLinkButton"]>button:hover { background-color: #003366; color: white; transform: translateY(-1px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     .btn-excluir button { background-color: #dc2626 !important; color: white !important; }
     .btn-excluir button:hover { background-color: #b91c1c !important; }
     div[data-testid="stForm"], .css-1d391kg, .stExpander, div[data-testid="stVerticalBlock"] > div > div[data-testid="stVerticalBlock"] { background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }
@@ -512,10 +512,12 @@ def modulo_relatorios():
 
                 query_hist = f"SELECT o.tipo as op_tipo, SUM(l.valor_pis) as t_pis, SUM(l.valor_cofins) as t_cof, SUM(l.valor_pis_retido) as t_pis_ret, SUM(l.valor_cofins_retido) as t_cof_ret FROM lancamentos l JOIN operacoes o ON l.operacao_id = o.id WHERE {filtro_empresa} AND l.competencia < %s AND l.status_auditoria = 'ATIVO' AND l.is_custo_avulso = 0 GROUP BY o.tipo"
                 df_hist = pd.read_sql(query_hist, conn, params=(comp_db,))
+                
+                # --- PROTEÇÃO CONTRA BASE VAZIA E EXTRAÇÃO DE ANEXOS FUTUROS ---
+                df_fut = pd.read_sql(f"SELECT * FROM lancamentos l WHERE {filtro_empresa} AND l.competencia_origem = %s AND l.competencia != %s AND l.status_auditoria = 'ATIVO' AND l.is_custo_avulso = 0", conn, params=(comp_db, comp_db))
             
-            # --- PROTEÇÃO CONTRA BASE VAZIA ---
-            if df_export.empty:
-                st.warning(f"Atenção: Não existem lançamentos para a competência {competencia} na base de dados.")
+            if df_export.empty and df_fut.empty:
+                st.warning(f"Atenção: Não existem lançamentos e nem anotações de auditoria para a competência {competencia} na base de dados.")
                 return
 
             saldo_ant_pis = 0.0; saldo_ant_cof = 0.0
@@ -619,57 +621,60 @@ def modulo_relatorios():
             
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_xlsx.to_excel(writer, index=False, sheet_name='Lancamentos_Contabeis')
             
-            # --- GERAÇÃO DO PDF (SOMENTE FISCAL) ---
-            df_pdf = df_export[df_export['is_custo_avulso'] == 0]
-            
+            # --- GERAÇÃO DO PDF (SOMENTE FISCAL E ANEXOS) ---
             pdf = RelatorioCrescerePDF()
             pdf.add_page(); pdf.add_cabecalho(nome_relatorio_pdf, emp_row['cnpj'], "*** DEMONSTRATIVO DE APURACAO - PIS E COFINS ***", competencia)
-            deb_pis = deb_cof = cred_pis = cred_cof = ret_pis = ret_cof = ext_pis = ext_cof = 0
             
-            pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "1. BASE DE CALCULO DAS RECEITAS (DEBITOS)", ln=True); pdf.set_font("Arial", 'B', 9); pdf.cell(90, 6, "Operacao", 1); pdf.cell(35, 6, "Base", 1); pdf.cell(30, 6, "PIS", 1); pdf.cell(35, 6, "COFINS", 1, ln=True); pdf.set_font("Arial", '', 9)
-            if not df_pdf.empty:
-                for _, r in df_pdf[(df_pdf['op_tipo'] == 'RECEITA') & (df_pdf['origem_retroativa'] == 0)].iterrows():
-                    desc_op = r['op_nome']
-                    apelido_clean = limpar_texto(r.get('apelido_unidade', ''))
-                    if consolidar and r['emp_tipo'] == 'Filial': desc_op += f" ({apelido_clean or 'Filial'})"
-                    pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_base',0)), 1); pdf.cell(30, 6, formatar_moeda(r.get('valor_pis',0)), 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_cofins',0)), 1, ln=True)
-                    deb_pis += r.get('valor_pis', 0); deb_cof += r.get('valor_cofins', 0); ret_pis += r.get('valor_pis_retido', 0); ret_cof += r.get('valor_cofins_retido', 0)
-            
-            pdf.ln(5); pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "2. INSUMOS, CREDITOS E EXTEMPORANEOS", ln=True); pdf.set_font("Arial", 'B', 9); pdf.cell(90, 6, "Operacao", 1); pdf.cell(35, 6, "Base", 1); pdf.cell(30, 6, "PIS", 1); pdf.cell(35, 6, "COFINS", 1, ln=True); pdf.set_font("Arial", '', 9)
-            if not df_pdf.empty:
-                for _, r in df_pdf[df_pdf['op_tipo'] == 'DESPESA'].iterrows():
-                    desc_op = r['op_nome']
-                    apelido_clean = limpar_texto(r.get('apelido_unidade', ''))
-                    if consolidar and r['emp_tipo'] == 'Filial': desc_op += f" ({apelido_clean or 'Filial'})"
-                    pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_base', 0)), 1); pdf.cell(30, 6, formatar_moeda(r.get('valor_pis', 0)), 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_cofins', 0)), 1, ln=True)
-                    if r.get('origem_retroativa') == 1: ext_pis += r.get('valor_pis', 0); ext_cof += r.get('valor_cofins', 0)
-                    else: cred_pis += r.get('valor_pis', 0); cred_cof += r.get('valor_cofins', 0)
-            
-            pdf.ln(10); pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "3. QUADRO DE APURACAO FINAL", ln=True); pdf.set_font("Arial", '', 10)
-            pdf.cell(120, 6, "A) Total de Debitos:", 0); pdf.cell(35, 6, formatar_moeda(deb_pis), 0); pdf.cell(35, 6, formatar_moeda(deb_cof), 0, ln=True)
-            pdf.cell(120, 6, "B) (-) Creditos do Mes:", 0); pdf.cell(35, 6, formatar_moeda(cred_pis), 0); pdf.cell(35, 6, formatar_moeda(cred_cof), 0, ln=True)
-            pdf.cell(120, 6, "C) (-) Retencoes na Fonte:", 0); pdf.cell(35, 6, formatar_moeda(ret_pis), 0); pdf.cell(35, 6, formatar_moeda(ret_cof), 0, ln=True)
-            pdf.cell(120, 6, "D) (-) Creditos Extemporaneos:", 0); pdf.cell(35, 6, formatar_moeda(ext_pis), 0); pdf.cell(35, 6, formatar_moeda(ext_cof), 0, ln=True)
-            pdf.cell(120, 6, "E) (-) Saldo Credor Mes Anterior:", 0); pdf.cell(35, 6, formatar_moeda(saldo_ant_pis), 0); pdf.cell(35, 6, formatar_moeda(saldo_ant_cof), 0, ln=True)
-            
-            res_pis = deb_pis - cred_pis - ret_pis - ext_pis - saldo_ant_pis; res_cof = deb_cof - cred_cof - ret_cof - ext_cof - saldo_ant_cof
-            
-            pdf.set_font("Arial", 'B', 11)
-            pdf.cell(120, 8, "(=) TOTAL IMPOSTO A RECOLHER:", 0); pdf.cell(35, 8, formatar_moeda(max(0, res_pis)), 0); pdf.cell(35, 8, formatar_moeda(max(0, res_cof)), 0, ln=True)
-            pdf.set_font("Arial", 'B', 9); pdf.set_text_color(0, 100, 0)
-            pdf.cell(120, 6, "(=) SALDO CREDOR TRANSPORTADO PARA O MES SEGUINTE:", 0); pdf.cell(35, 6, formatar_moeda(abs(res_pis) if res_pis < 0 else 0), 0); pdf.cell(35, 6, formatar_moeda(abs(res_cof) if res_cof < 0 else 0), 0, ln=True)
-            pdf.set_text_color(0, 0, 0)
+            if not df_export.empty:
+                df_pdf = df_export[df_export['is_custo_avulso'] == 0]
+                deb_pis = deb_cof = cred_pis = cred_cof = ret_pis = ret_cof = ext_pis = ext_cof = 0
+                
+                pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "1. BASE DE CALCULO DAS RECEITAS (DEBITOS)", ln=True); pdf.set_font("Arial", 'B', 9); pdf.cell(90, 6, "Operacao", 1); pdf.cell(35, 6, "Base", 1); pdf.cell(30, 6, "PIS", 1); pdf.cell(35, 6, "COFINS", 1, ln=True); pdf.set_font("Arial", '', 9)
+                if not df_pdf.empty:
+                    for _, r in df_pdf[(df_pdf['op_tipo'] == 'RECEITA') & (df_pdf['origem_retroativa'] == 0)].iterrows():
+                        desc_op = r['op_nome']
+                        apelido_clean = limpar_texto(r.get('apelido_unidade', ''))
+                        if consolidar and r['emp_tipo'] == 'Filial': desc_op += f" ({apelido_clean or 'Filial'})"
+                        pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_base',0)), 1); pdf.cell(30, 6, formatar_moeda(r.get('valor_pis',0)), 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_cofins',0)), 1, ln=True)
+                        deb_pis += r.get('valor_pis', 0); deb_cof += r.get('valor_cofins', 0); ret_pis += r.get('valor_pis_retido', 0); ret_cof += r.get('valor_cofins_retido', 0)
+                
+                pdf.ln(5); pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "2. INSUMOS, CREDITOS E EXTEMPORANEOS", ln=True); pdf.set_font("Arial", 'B', 9); pdf.cell(90, 6, "Operacao", 1); pdf.cell(35, 6, "Base", 1); pdf.cell(30, 6, "PIS", 1); pdf.cell(35, 6, "COFINS", 1, ln=True); pdf.set_font("Arial", '', 9)
+                if not df_pdf.empty:
+                    for _, r in df_pdf[df_pdf['op_tipo'] == 'DESPESA'].iterrows():
+                        desc_op = r['op_nome']
+                        apelido_clean = limpar_texto(r.get('apelido_unidade', ''))
+                        if consolidar and r['emp_tipo'] == 'Filial': desc_op += f" ({apelido_clean or 'Filial'})"
+                        pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_base', 0)), 1); pdf.cell(30, 6, formatar_moeda(r.get('valor_pis', 0)), 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_cofins', 0)), 1, ln=True)
+                        if r.get('origem_retroativa') == 1: ext_pis += r.get('valor_pis', 0); ext_cof += r.get('valor_cofins', 0)
+                        else: cred_pis += r.get('valor_pis', 0); cred_cof += r.get('valor_cofins', 0)
+                
+                pdf.ln(10); pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "3. QUADRO DE APURACAO FINAL", ln=True); pdf.set_font("Arial", '', 10)
+                pdf.cell(120, 6, "A) Total de Debitos:", 0); pdf.cell(35, 6, formatar_moeda(deb_pis), 0); pdf.cell(35, 6, formatar_moeda(deb_cof), 0, ln=True)
+                pdf.cell(120, 6, "B) (-) Creditos do Mes:", 0); pdf.cell(35, 6, formatar_moeda(cred_pis), 0); pdf.cell(35, 6, formatar_moeda(cred_cof), 0, ln=True)
+                pdf.cell(120, 6, "C) (-) Retencoes na Fonte:", 0); pdf.cell(35, 6, formatar_moeda(ret_pis), 0); pdf.cell(35, 6, formatar_moeda(ret_cof), 0, ln=True)
+                pdf.cell(120, 6, "D) (-) Creditos Extemporaneos:", 0); pdf.cell(35, 6, formatar_moeda(ext_pis), 0); pdf.cell(35, 6, formatar_moeda(ext_cof), 0, ln=True)
+                pdf.cell(120, 6, "E) (-) Saldo Credor Mes Anterior:", 0); pdf.cell(35, 6, formatar_moeda(saldo_ant_pis), 0); pdf.cell(35, 6, formatar_moeda(saldo_ant_cof), 0, ln=True)
+                
+                res_pis = deb_pis - cred_pis - ret_pis - ext_pis - saldo_ant_pis; res_cof = deb_cof - cred_cof - ret_cof - ext_cof - saldo_ant_cof
+                
+                pdf.set_font("Arial", 'B', 11)
+                pdf.cell(120, 8, "(=) TOTAL IMPOSTO A RECOLHER:", 0); pdf.cell(35, 8, formatar_moeda(max(0, res_pis)), 0); pdf.cell(35, 8, formatar_moeda(max(0, res_cof)), 0, ln=True)
+                pdf.set_font("Arial", 'B', 9); pdf.set_text_color(0, 100, 0)
+                pdf.cell(120, 6, "(=) SALDO CREDOR TRANSPORTADO PARA O MES SEGUINTE:", 0); pdf.cell(35, 6, formatar_moeda(abs(res_pis) if res_pis < 0 else 0), 0); pdf.cell(35, 6, formatar_moeda(abs(res_cof) if res_cof < 0 else 0), 0, ln=True)
+                pdf.set_text_color(0, 0, 0)
+            else:
+                pdf.set_font("Arial", '', 10)
+                pdf.cell(0, 10, "Nao houve movimentacao de faturamento ou creditos ordinarios nesta competencia.", ln=True, align='C')
 
             # --- ANEXO DE AUDITORIA ---
             pdf.add_page(); pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "ANEXO I - DETALHAMENTO E NOTAS DE AUDITORIA FISCAL", ln=True)
-            df_ext = df_pdf[df_pdf['origem_retroativa'] == 1]
-            if not df_ext.empty:
-                pdf.ln(5); pdf.set_font("Arial", 'B', 9); pdf.cell(0, 6, "NOTA DE AUDITORIA - APROVEITAMENTO DE CREDITO EXTEMPORANEO:", ln=True); pdf.set_font("Arial", '', 8)
-                pdf.multi_cell(0, 4, "Esta apuracao inclui a apropriacao de credito tributario originado em competencia anterior, lancado tempestivamente neste periodo."); pdf.ln(2)
-                for _, r in df_ext.iterrows(): pdf.multi_cell(0, 4, f"- Origem: {r.get('competencia_origem', '')} | Doc: {r.get('num_nota', '')} - {r.get('fornecedor', '')} | PIS: {formatar_moeda(r.get('valor_pis',0))} | COF: {formatar_moeda(r.get('valor_cofins',0))}\n  Justificativa: {r.get('historico', '')}")
             
-            with get_db_connection() as conn:
-                df_fut = pd.read_sql(f"SELECT * FROM lancamentos l WHERE {filtro_empresa} AND l.competencia_origem = %s AND l.competencia != %s AND l.status_auditoria = 'ATIVO' AND l.is_custo_avulso = 0", conn, params=(comp_db, comp_db))
+            if not df_export.empty:
+                df_ext = df_pdf[df_pdf['origem_retroativa'] == 1]
+                if not df_ext.empty:
+                    pdf.ln(5); pdf.set_font("Arial", 'B', 9); pdf.cell(0, 6, "NOTA DE AUDITORIA - APROVEITAMENTO DE CREDITO EXTEMPORANEO:", ln=True); pdf.set_font("Arial", '', 8)
+                    pdf.multi_cell(0, 4, "Esta apuracao inclui a apropriacao de credito tributario originado em competencia anterior, lancado tempestivamente neste periodo."); pdf.ln(2)
+                    for _, r in df_ext.iterrows(): pdf.multi_cell(0, 4, f"- Origem: {r.get('competencia_origem', '')} | Doc: {r.get('num_nota', '')} - {r.get('fornecedor', '')} | PIS: {formatar_moeda(r.get('valor_pis',0))} | COF: {formatar_moeda(r.get('valor_cofins',0))}\n  Justificativa: {r.get('historico', '')}")
             
             if not df_fut.empty:
                 pdf.ln(5); pdf.set_font("Arial", 'B', 9); pdf.cell(0, 6, "NOTA DE AUDITORIA - CREDITO APROPRIADO EXTEMPORANEAMENTE (NO FUTURO):", ln=True); pdf.set_font("Arial", '', 8)
@@ -1656,7 +1661,41 @@ def modulo_usuarios():
                 except Exception as e: st.error(f"Erro no banco: {e}")
                     
     with tab_novo:
-        st.info("Módulo de Inserção - Inalterado")
+        st.markdown("##### Registar Novo Utilizador")
+        with st.form("form_novo_usuario", clear_on_submit=True):
+            c_u1, c_u2 = st.columns(2)
+            n_nome = c_u1.text_input("Nome Completo")
+            n_user = c_u2.text_input("Username (Login)")
+            
+            c_u3, c_u4 = st.columns(2)
+            n_senha = c_u3.text_input("Palavra-passe", type="password")
+            
+            opcoes_nivel = ["CLIENT_OPERATOR", "ADMIN"]
+            if st.session_state.nivel_acesso == "SUPER_ADMIN":
+                opcoes_nivel.append("SUPER_ADMIN")
+            n_nivel = c_u4.selectbox("Nível de Acesso", opcoes_nivel)
+            
+            if st.form_submit_button("Registar Utilizador", type="primary"):
+                if not n_nome or not n_user or not n_senha:
+                    st.error("Nome, Username e Palavra-passe são obrigatórios.")
+                elif len(n_senha) < 6:
+                    st.error("A palavra-passe deve ter pelo menos 6 caracteres.")
+                else:
+                    try:
+                        with get_db_cursor(commit=True) as cur_usr:
+                            cur_usr.execute("SELECT id FROM usuarios WHERE username = %s", (n_user,))
+                            if cur_usr.fetchone():
+                                st.error("Este username já está em uso.")
+                            else:
+                                contab_id_novo = st.session_state.contabilidade_id if st.session_state.contabilidade_id else None
+                                cur_usr.execute(
+                                    "INSERT INTO usuarios (nome, username, senha_hash, nivel_acesso, status_usuario, contabilidade_id) VALUES (%s, %s, %s, %s, 'ATIVO', %s)",
+                                    (n_nome, n_user, gerar_hash_senha(n_senha), n_nivel, contab_id_novo)
+                                )
+                        st.success("Utilizador registado com sucesso!")
+                        import time; time.sleep(1); st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao registar: {e}")
 
     with tab_perm:
         st.markdown("##### Gerir Permissões Multiempresa")
@@ -1724,6 +1763,12 @@ with st.sidebar:
     menu = st.radio("Módulos", modulos_disp)
     
     st.write("---")
+    
+    # --- NOVO BOTÃO ESTRATÉGICO ---
+    st.markdown("##### Sistemas Integrados")
+    st.link_button("📊 Auditoria de Vendas", "https://conciliador-contabil-hsppms6xpbjstvmmfktgkc.streamlit.app/", use_container_width=True, help="Acessar o sistema de conciliação e auditoria de vendas")
+    st.markdown("<br>", unsafe_allow_html=True)
+    
     if st.button("Encerrar Sessão", use_container_width=True): st.session_state.autenticado = False; st.rerun()
 
 # --- 11. RENDERIZAÇÃO DE ROTAS ---
