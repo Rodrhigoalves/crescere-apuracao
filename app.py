@@ -527,7 +527,7 @@ def modulo_relatorios():
                 if res_hist_pis < 0: saldo_ant_pis = abs(res_hist_pis)
                 if res_hist_cof < 0: saldo_ant_cof = abs(res_hist_cof)
 
-            # --- EXPORTAÇÃO EXCEL (TODOS E CONSOLIDAÇÃO) ---
+            # --- EXPORTAÇÃO EXCEL E FECHO CONSOLIDADO ---
             linhas_excel = []
             if not df_export.empty:
                 for _, r in df_export.iterrows():
@@ -556,7 +556,7 @@ def modulo_relatorios():
                     
                     doc = r.get('num_nota') or r.get('id')
                     
-                    # --- LANÇAMENTOS INDIVIDUAIS (Com .get() para segurança) ---
+                    # --- LANÇAMENTOS INDIVIDUAIS ---
                     if r.get('is_custo_avulso') == 0:
                         if pd.notnull(r.get('conta_deb_pis')) and pd.notnull(r.get('conta_cred_pis')):
                             linhas_excel.append(criar_linha_erp(r.get('conta_deb_pis'), r.get('conta_cred_pis'), d_str, r.get('valor_pis', 0), r.get('pis_h_codigo'), formatar_historico_erp(r.get('pis_h_texto'), comp_exibicao), doc))
@@ -632,7 +632,7 @@ def modulo_relatorios():
                     desc_op = r['op_nome']
                     apelido_clean = limpar_texto(r.get('apelido_unidade', ''))
                     if consolidar and r['emp_tipo'] == 'Filial': desc_op += f" ({apelido_clean or 'Filial'})"
-                    pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_base',0))), 1; pdf.cell(30, 6, formatar_moeda(r.get('valor_pis',0))), 1; pdf.cell(35, 6, formatar_moeda(r.get('valor_cofins',0))), 1, ln=True
+                    pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_base',0)), 1); pdf.cell(30, 6, formatar_moeda(r.get('valor_pis',0)), 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_cofins',0)), 1, ln=True)
                     deb_pis += r.get('valor_pis', 0); deb_cof += r.get('valor_cofins', 0); ret_pis += r.get('valor_pis_retido', 0); ret_cof += r.get('valor_cofins_retido', 0)
             
             pdf.ln(5); pdf.set_font("Arial", 'B', 10); pdf.cell(190, 8, "2. INSUMOS, CREDITOS E EXTEMPORANEOS", ln=True); pdf.set_font("Arial", 'B', 9); pdf.cell(90, 6, "Operacao", 1); pdf.cell(35, 6, "Base", 1); pdf.cell(30, 6, "PIS", 1); pdf.cell(35, 6, "COFINS", 1, ln=True); pdf.set_font("Arial", '', 9)
@@ -641,7 +641,7 @@ def modulo_relatorios():
                     desc_op = r['op_nome']
                     apelido_clean = limpar_texto(r.get('apelido_unidade', ''))
                     if consolidar and r['emp_tipo'] == 'Filial': desc_op += f" ({apelido_clean or 'Filial'})"
-                    pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_base', 0))), 1; pdf.cell(30, 6, formatar_moeda(r.get('valor_pis', 0))), 1; pdf.cell(35, 6, formatar_moeda(r.get('valor_cofins', 0))), 1, ln=True
+                    pdf.cell(90, 6, desc_op[:50], 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_base', 0)), 1); pdf.cell(30, 6, formatar_moeda(r.get('valor_pis', 0)), 1); pdf.cell(35, 6, formatar_moeda(r.get('valor_cofins', 0)), 1, ln=True)
                     if r.get('origem_retroativa') == 1: ext_pis += r.get('valor_pis', 0); ext_cof += r.get('valor_cofins', 0)
                     else: cred_pis += r.get('valor_pis', 0); cred_cof += r.get('valor_cofins', 0)
             
