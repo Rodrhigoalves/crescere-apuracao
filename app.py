@@ -99,7 +99,7 @@ def init_connection_pool():
     try:
         return MySQLConnectionPool(
             pool_name="crescere_pool",
-            pool_size=10, # Aumentado de 5 para 10 para suportar o módulo imobilizado com segurança
+            pool_size=10, 
             pool_reset_session=True,
             **st.secrets["mysql"]
         )
@@ -1008,7 +1008,7 @@ def modulo_imobilizado():
                                             if data_plan.month == 12: data_plan = date(data_plan.year + 1, 1, 1)
                                             else: data_plan = date(data_plan.year, data_plan.month + 1, 1)
 
-                            st.success("Bem registado com sucesso!"); st.rerun()
+                                st.success("Bem registado com sucesso!"); st.rerun()
                             except Exception as e: st.error(f"Erro ao salvar: {e}")
 
         with col_ras:
