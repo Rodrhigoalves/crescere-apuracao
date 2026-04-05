@@ -313,6 +313,51 @@ def modulo_apuracao():
         with tab_fiscal:
             op_sel = st.selectbox("Operação Fiscal", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
             op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
+            # ... código anterior ...
+op_sel = st.selectbox("Operação Fiscal", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
+
+# --- LÓGICA DO ASSISTENTE ---
+if "Depreciação" in op_sel:
+    valor_sugerido = buscar_sugestao_imobilizado(emp_id, competencia)
+    
+    if valor_sugerido > 0:
+        st.info(f"💡 **Assistente Crescere:** Identificamos **{formatar_moeda(valor_sugerido)}** de base de crédito validada para este mês no Imobilizado.")
+        
+        if st.button("✨ Usar valor sugerido"):
+            # Isso vai atualizar o valor do componente number_input na próxima renderização
+            st.session_state[f"base_{fk}"] = valor_sugerido
+            st.rerun()
+    else:
+        st.warning("⚠️ **Assistente Crescere:** Não encontramos parcelas de depreciação com direito a crédito para esta competência no módulo de Imobilizado.")
+            # --- Dentro do modulo_apuracao() ---
+
+with tab_fiscal:
+    # 1. Seleção da Operação
+    op_sel = st.selectbox("Operação Fiscal", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
+    op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
+
+    # --- INÍCIO DO ASSISTENTE CRESCERE ---
+    # Verificamos se a operação selecionada é de Depreciação
+    if "Depreciação" in op_row['nome']:
+        valor_sugerido = buscar_sugestao_imobilizado(emp_id, competencia)
+        
+        if valor_sugerido > 0:
+            st.info(f"💡 **Assistente Crescere:** Identificamos **{formatar_moeda(valor_sugerido)}** de base de crédito validada para este mês no Imobilizado.")
+            if st.button("✨ Preencher Automaticamente"):
+                # Salvamos no estado para o campo de valor ler abaixo
+                st.session_state[f"valor_sugerido_{fk}"] = valor_sugerido
+                st.rerun()
+    # --- FIM DO ASSISTENTE ---
+
+    # 2. Input do Valor (Ajustado para aceitar a sugestão)
+    # Buscamos se existe um valor sugerido no session_state, senão 0.0
+    val_default = st.session_state.get(f"valor_sugerido_{fk}", 0.0)
+    
+    v_base = st.number_input("Valor Total da Fatura / Base (R$)", 
+                             min_value=0.00, 
+                             step=100.0, 
+                             value=val_default, # O segredo está aqui!
+                             key=f"base_{fk}")
             
             v_base = st.number_input("Valor Total da Fatura / Base (R$)", min_value=0.00, step=100.0, key=f"base_{fk}")
             v_pis_ret = v_cof_ret = 0.0
