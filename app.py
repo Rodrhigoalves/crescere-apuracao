@@ -180,13 +180,34 @@ def consultar_cnpj(cnpj_limpo):
         return res.json() if res.status_code == 200 else None
     except: return None
 
-# --- 3. MOTOR DE CÁLCULO ---
+# --- 3. MOTOR DE CÁLCULO E ASSISTENTE ---
 def calcular_impostos(regime, operacao_nome, valor_base):
     if regime == "Lucro Real":
         if "Receita Financeira" in operacao_nome: return (valor_base * 0.0065, valor_base * 0.04)
         return (valor_base * 0.0165, valor_base * 0.076)
     elif regime == "Lucro Presumido": return (valor_base * 0.0065, valor_base * 0.03)
     return (0.0, 0.0)
+
+def buscar_sugestao_imobilizado(emp_id, competencia_str):
+    comp_db = validar_competencia(competencia_str)
+    if not comp_db: return 0.0
+    
+    data_alvo = f"{comp_db}-01"
+    
+    query = """
+        SELECT SUM(p.valor_cota) as total_base
+        FROM plano_depreciacao_itens p
+        JOIN bens_imobilizado b ON p.bem_id = b.id
+        WHERE b.tenant_id = %s 
+          AND b.status = 'ativo'
+          AND b.regra_credito != 'NENHUM (Sem Crédito)'
+          AND p.mes_referencia = %s
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(query, (emp_id, data_alvo))
+        res = cursor.fetchone()
+        return float(res['total_base'] or 0.0)
 
 # --- 4. CONTROLE DE ESTADO E AUTENTICAÇÃO ---
 if 'autenticado' not in st.session_state: st.session_state.autenticado = False
@@ -313,53 +334,20 @@ def modulo_apuracao():
         with tab_fiscal:
             op_sel = st.selectbox("Operação Fiscal", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
             op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
-            # ... código anterior ...
-op_sel = st.selectbox("Operação Fiscal", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
-
-# --- LÓGICA DO ASSISTENTE ---
-if "Depreciação" in op_sel:
-    valor_sugerido = buscar_sugestao_imobilizado(emp_id, competencia)
-    
-    if valor_sugerido > 0:
-        st.info(f"💡 **Assistente Crescere:** Identificamos **{formatar_moeda(valor_sugerido)}** de base de crédito validada para este mês no Imobilizado.")
-        
-        if st.button("✨ Usar valor sugerido"):
-            # Isso vai atualizar o valor do componente number_input na próxima renderização
-            st.session_state[f"base_{fk}"] = valor_sugerido
-            st.rerun()
-    else:
-        st.warning("⚠️ **Assistente Crescere:** Não encontramos parcelas de depreciação com direito a crédito para esta competência no módulo de Imobilizado.")
-            # --- Dentro do modulo_apuracao() ---
-
-with tab_fiscal:
-    # 1. Seleção da Operação
-    op_sel = st.selectbox("Operação Fiscal", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
-    op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
-
-    # --- INÍCIO DO ASSISTENTE CRESCERE ---
-    # Verificamos se a operação selecionada é de Depreciação
-    if "Depreciação" in op_row['nome']:
-        valor_sugerido = buscar_sugestao_imobilizado(emp_id, competencia)
-        
-        if valor_sugerido > 0:
-            st.info(f"💡 **Assistente Crescere:** Identificamos **{formatar_moeda(valor_sugerido)}** de base de crédito validada para este mês no Imobilizado.")
-            if st.button("✨ Preencher Automaticamente"):
-                # Salvamos no estado para o campo de valor ler abaixo
-                st.session_state[f"valor_sugerido_{fk}"] = valor_sugerido
-                st.rerun()
-    # --- FIM DO ASSISTENTE ---
-
-    # 2. Input do Valor (Ajustado para aceitar a sugestão)
-    # Buscamos se existe um valor sugerido no session_state, senão 0.0
-    val_default = st.session_state.get(f"valor_sugerido_{fk}", 0.0)
-    
-    v_base = st.number_input("Valor Total da Fatura / Base (R$)", 
-                             min_value=0.00, 
-                             step=100.0, 
-                             value=val_default, # O segredo está aqui!
-                             key=f"base_{fk}")
             
-            v_base = st.number_input("Valor Total da Fatura / Base (R$)", min_value=0.00, step=100.0, key=f"base_{fk}")
+            # --- INÍCIO DO ASSISTENTE CRESCERE ---
+            if "Depreciação" in op_row['nome']:
+                valor_sugerido = buscar_sugestao_imobilizado(emp_id, competencia)
+                if valor_sugerido > 0:
+                    st.info(f"💡 **Assistente Crescere:** Identificamos **{formatar_moeda(valor_sugerido)}** de base de crédito (depreciação mensal/integral) validada para este mês no Imobilizado.")
+                    if st.button("✨ Usar valor sugerido", key=f"btn_sug_{fk}"):
+                        st.session_state[f"valor_sugerido_{fk}"] = valor_sugerido
+                        st.rerun()
+            # --- FIM DO ASSISTENTE ---
+
+            val_default = st.session_state.get(f"valor_sugerido_{fk}", 0.0)
+            
+            v_base = st.number_input("Valor Total da Fatura / Base (R$)", min_value=0.00, step=100.0, value=val_default, key=f"base_{fk}")
             v_pis_ret = v_cof_ret = 0.0
             teve_retencao = False
             
@@ -403,6 +391,8 @@ with tab_fiscal:
                         "origem": comp_origem if retro else None, "nota": num_nota, "fornecedor": fornecedor,
                         "is_custo_avulso": 0, "custo_liq": 0.0, "c_deb": None, "c_cred": None, "c_cod": None, "c_txt": None
                     })
+                    # Limpa a sugestão após adicionar
+                    if f"valor_sugerido_{fk}" in st.session_state: del st.session_state[f"valor_sugerido_{fk}"]
                     st.session_state.form_key += 1; st.rerun()
 
         with tab_custo:
@@ -1098,20 +1088,20 @@ def modulo_imobilizado():
                                     cursor_c.execute("""INSERT INTO bens_imobilizado (tenant_id, grupo_id, descricao_item, marca_modelo, num_serie_placa, plaqueta, localizacao, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, regra_credito, data_saldo_inicial, valor_residual_inicial, taxa_customizada) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (int(emp_id), int(g_row['id']), desc, marca, num_serie, plaqueta, localizacao, nf, forn, dt_c, float(v_aq), regra_cred, dt_s_db, v_s_db, tx_cust_db))
                                     bem_id = cursor_c.lastrowid
 
-                                    if "3" in cenario and cota_sugerida > 0 and v_s_db > 0:
-                                        saldo_restante = v_s_db
-                                        mes_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
-                                        ano_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
-                                        data_plan = date(ano_plan, mes_plan, 1)
+                                if "3" in cenario and cota_sugerida > 0 and v_s_db > 0:
+                                    saldo_restante = v_s_db
+                                    mes_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
+                                    ano_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
+                                    data_plan = date(ano_plan, mes_plan, 1)
 
-                                        is_first_month = True
-                                        while saldo_restante > 0.009:
-                                            cota_atual = min(saldo_restante, float(primeira_cota_manual) if is_first_month else float(cota_sugerida))
-                                            cursor_c.execute("INSERT INTO plano_depreciacao_itens (bem_id, mes_referencia, valor_cota, tipo_registro, status_contabil) VALUES (%s, %s, %s, 'PROJETADO', 'PENDENTE')", (bem_id, data_plan.strftime('%Y-%m-%d'), cota_atual))
-                                            saldo_restante -= cota_atual
-                                            is_first_month = False
-                                            if data_plan.month == 12: data_plan = date(data_plan.year + 1, 1, 1)
-                                            else: data_plan = date(data_plan.year, data_plan.month + 1, 1)
+                                    is_first_month = True
+                                    while saldo_restante > 0.009:
+                                        cota_atual = min(saldo_restante, float(primeira_cota_manual) if is_first_month else float(cota_sugerida))
+                                        cursor_c.execute("INSERT INTO plano_depreciacao_itens (bem_id, mes_referencia, valor_cota, tipo_registro, status_contabil) VALUES (%s, %s, %s, 'PROJETADO', 'PENDENTE')", (bem_id, data_plan.strftime('%Y-%m-%d'), cota_atual))
+                                        saldo_restante -= cota_atual
+                                        is_first_month = False
+                                        if data_plan.month == 12: data_plan = date(data_plan.year + 1, 1, 1)
+                                        else: data_plan = date(data_plan.year, data_plan.month + 1, 1)
 
                                 st.success("Bem registado com sucesso!"); st.rerun()
                             except Exception as e: st.error(f"Erro ao salvar: {e}")
