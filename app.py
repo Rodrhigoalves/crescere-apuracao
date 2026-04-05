@@ -307,7 +307,6 @@ def modulo_apuracao():
     col_in, col_ras = st.columns([1, 1], gap="large")
 
     with col_in:
-        # Aqui usamos a fk (form_key) para criar campos dinâmicos que limpam automaticamente
         fk = st.session_state.form_key
         tab_fiscal, tab_custo = st.tabs(["1. Notas Fiscais (PDF / Impostos)", "2. Custo Avulso (CMV / CSV)"])
 
@@ -315,43 +314,6 @@ def modulo_apuracao():
             op_sel = st.selectbox("Operação Fiscal", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
             op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
             
-           # --- INÍCIO DA LÓGICA DO ASSISTENTE CRESCERE (VERSÃO BLINDADA) ---
-            valor_sugerido = 0.0
-            if "Deprecia" in op_row['nome'] or "Imobilizado" in op_row['nome']:
-                # Extrai apenas os números da competência (ex: 032026)
-                comp_limpa = "".join(filter(str.isdigit, competencia))
-                if len(comp_limpa) == 6:
-                    mes_sug = comp_limpa[:2]
-                    ano_sug = comp_limpa[2:]
-                    try:
-                        with get_db_connection() as conn_sug:
-                            # A query agora usa %m e %Y de forma estrita para evitar erros de dia
-                            query_sug = """
-                                SELECT SUM(p.valor_cota) as total
-                                FROM plano_depreciacao_itens p
-                                JOIN bens_imobilizado b ON p.bem_id = b.id
-                                WHERE b.tenant_id = %s 
-                                AND MONTH(p.mes_referencia) = %s 
-                                AND YEAR(p.mes_referencia) = %s
-                                AND b.status = 'ativo'
-                            """
-                            cursor_sug = conn_sug.cursor(dictionary=True)
-                            cursor_sug.execute(query_sug, (emp_id, int(mes_sug), int(ano_sug)))
-                            res_sug = cursor_sug.fetchone()
-                            if res_sug and res_sug['total']:
-                                valor_sugerido = float(res_sug['total'])
-                    except Exception as e:
-                        st.error(f"Erro no Assistente: {e}") # Agora vamos ver o erro se ele existir
-
-            if valor_sugerido > 0:
-                st.info(f"💡 **Assistente Crescere:** Identificamos **{formatar_moeda(valor_sugerido)}** de base de crédito validada para este mês.")
-                
-                # Esta função garante que o valor entre no campo DEPOIS do clique
-                if st.button("Aplicar Valor Sugerido", key=f"btn_sug_{fk}"):
-                    st.session_state[f"base_{fk}"] = valor_sugerido
-                    st.rerun() 
-            # --- FIM DA LÓGICA DO ASSISTENTE ---
-
             v_base = st.number_input("Valor Total da Fatura / Base (R$)", min_value=0.00, step=100.0, key=f"base_{fk}")
             v_pis_ret = v_cof_ret = 0.0
             teve_retencao = False
@@ -396,7 +358,6 @@ def modulo_apuracao():
                         "origem": comp_origem if retro else None, "nota": num_nota, "fornecedor": fornecedor,
                         "is_custo_avulso": 0, "custo_liq": 0.0, "c_deb": None, "c_cred": None, "c_cod": None, "c_txt": None
                     })
-                    # O "pulo do gato" da limpeza: somamos 1 ao form_key. A tela vai recarregar zerada!
                     st.session_state.form_key += 1; st.rerun()
 
         with tab_custo:
@@ -434,7 +395,6 @@ def modulo_apuracao():
                             "c_deb": dest_row['conta_debito'], "c_cred": dest_row['conta_credito'],
                             "c_cod": dest_row['hist_codigo'], "c_txt": dest_row['hist_texto']
                         })
-                        # Limpa também a aba de custo ao concluir
                         st.session_state.form_key += 1; st.rerun()
 
     with col_ras:
@@ -489,7 +449,7 @@ def modulo_apuracao():
             else:
                 st.dataframe(df_gravados, use_container_width=True, hide_index=True)
                 with st.expander("Estornar / Inativar Lançamento"):
-                    with st.form("form_edicao_lancamento", clear_on_submit=True):
+                    with st.form("form_edicao_lancamento"):
                         c_id, c_motivo = st.columns([1, 3])
                         id_alvo = c_id.selectbox("ID do Lançamento", df_gravados['id'].tolist())
                         motivo = c_motivo.text_input("Motivo do Estorno (Obrigatório)")
