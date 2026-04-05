@@ -18,26 +18,14 @@ st.set_page_config(page_title="Crescere - Apuração Fiscal", layout="wide", ini
 st.markdown("""
 <style>
     .stApp { background-color: #f4f6f9; }
-    .stButton>button, .stDownloadButton>button { background-color: #004b87; color: white; border-radius: 4px; border: none; font-weight: 500; height: 45px; width: 100%; transition: all 0.2s; }
-    .stButton>button:hover, .stDownloadButton>button:hover { background-color: #003366; color: white; transform: translateY(-1px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    .stButton>button, .stDownloadButton>button, a[data-testid="stLinkButton"]>button { background-color: #004b87; color: white; border-radius: 4px; border: none; font-weight: 500; height: 45px; width: 100%; transition: all 0.2s; }
+    .stButton>button:hover, .stDownloadButton>button:hover, a[data-testid="stLinkButton"]>button:hover { background-color: #003366; color: white; transform: translateY(-1px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     .btn-excluir button { background-color: #dc2626 !important; color: white !important; }
     .btn-excluir button:hover { background-color: #b91c1c !important; }
     div[data-testid="stForm"], .css-1d391kg, .stExpander, div[data-testid="stVerticalBlock"] > div > div[data-testid="stVerticalBlock"] { background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }
     h1, h2, h3, h4 { color: #0f172a; font-weight: 600; font-family: 'Segoe UI', sans-serif; }
     .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] { background-color: #f8fafc; border: 1px solid #cbd5e1; }
     #MainMenu {visibility: hidden;} footer {visibility: hidden;}
-    
-    /* OPÇÃO 2: Estilo para destacar botões de links externos no Menu Lateral */
-    div[data-testid="stSidebar"] a[data-testid="stLinkButton"] button {
-        background-color: #f1f5f9 !important; 
-        border: 1px solid #e2e8f0 !important;
-        color: #0f172a !important; 
-        transition: background-color 0.3s;
-    }
-    div[data-testid="stSidebar"] a[data-testid="stLinkButton"] button:hover {
-        background-color: #e2e8f0 !important; 
-        border-color: #cbd5e1 !important;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -192,96 +180,13 @@ def consultar_cnpj(cnpj_limpo):
         return res.json() if res.status_code == 200 else None
     except: return None
 
-# --- 3. MOTOR DE CÁLCULO E GATILHOS INTELIGENTES ---
+# --- 3. MOTOR DE CÁLCULO ---
 def calcular_impostos(regime, operacao_nome, valor_base):
     if regime == "Lucro Real":
         if "Receita Financeira" in operacao_nome: return (valor_base * 0.0065, valor_base * 0.04)
         return (valor_base * 0.0165, valor_base * 0.076)
     elif regime == "Lucro Presumido": return (valor_base * 0.0065, valor_base * 0.03)
     return (0.0, 0.0)
-
-def buscar_valor_depreciacao_mes(emp_id, competencia_str):
-    comp_valida = validar_competencia(competencia_str)
-    if not comp_valida: return 0.0
-    
-    a_proc, m_proc = int(comp_valida.split('-')[0]), int(comp_valida.split('-')[1])
-    hoje_calc = datetime.now(timezone(timedelta(hours=-3)))
-    
-    if a_proc > hoje_calc.year or (a_proc == hoje_calc.year and m_proc > hoje_calc.month): return 0.0
-        
-    total_base_credito = 0.0
-    try:
-        with get_db_connection() as conn_p:
-            df_bens = pd.read_sql("SELECT b.*, g.taxa_anual_percentual FROM bens_imobilizado b LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id WHERE b.tenant_id = %s AND b.status = 'ativo'", conn_p, params=(int(emp_id),))
-            df_planos = pd.read_sql("SELECT p.* FROM plano_depreciacao_itens p JOIN bens_imobilizado b ON p.bem_id = b.id WHERE b.tenant_id = %s", conn_p, params=(int(emp_id),))
-            if not df_planos.empty: df_planos['mes_referencia'] = pd.to_datetime(df_planos['mes_referencia']).dt.date
-
-        if not df_bens.empty:
-            last_day = calendar.monthrange(a_proc, m_proc)[1]
-            dia_final_calculo = hoje_calc.day if (a_proc == hoje_calc.year and m_proc == hoje_calc.month) else last_day
-            data_ref_plano = date(a_proc, m_proc, 1)
-
-            for _, b in df_bens.iterrows():
-                dt_base = b['data_saldo_inicial'] if pd.notnull(b.get('data_saldo_inicial')) else b['data_compra']
-                if isinstance(dt_base, pd.Timestamp) or isinstance(dt_base, datetime): dt_base = dt_base.date()
-                
-                dt_compra = b['data_compra']
-                if isinstance(dt_compra, pd.Timestamp) or isinstance(dt_compra, datetime): dt_compra = dt_compra.date()
-
-                regra = limpar_texto(b.get('regra_credito', '')).upper()
-                
-                # Regra: Integral no mês de aquisição
-                if "INTEGRAL" in regra:
-                    if dt_compra.year == a_proc and dt_compra.month == m_proc:
-                        total_base_credito += float(b['valor_compra'])
-                    continue
-
-                if "MENSAL" not in regra: continue
-
-                # Regra: Mensal (Cálculo padrão da Depreciação)
-                if a_proc < dt_base.year or (a_proc == dt_base.year and m_proc < dt_base.month): continue
-
-                base_calc = float(b['valor_compra'])
-                taxa_anual = 0.0
-                if pd.notnull(b.get('taxa_customizada')) and float(b['taxa_customizada']) > 0: taxa_anual = float(b['taxa_customizada']) / 100.0
-                elif pd.notnull(b.get('taxa_anual_percentual')): taxa_anual = float(b['taxa_anual_percentual']) / 100.0
-
-                dep_acumulada_ant = 0.0
-                saldo_ini = float(b.get('valor_residual_inicial', 0.0))
-                plano_do_bem = df_planos[df_planos['bem_id'] == b['id']] if not df_planos.empty else pd.DataFrame()
-
-                dt_ref_calc_ant = date(a_proc, m_proc, 1) - timedelta(days=1)
-                if not plano_do_bem.empty:
-                    dep_acumulada_ant = plano_do_bem[plano_do_bem['mes_referencia'] <= dt_ref_calc_ant]['valor_cota'].sum()
-                else:
-                    dias_totais_ant = max(0, (dt_ref_calc_ant - dt_base).days)
-                    dep_acumulada_ant = min(base_calc, (base_calc * taxa_anual / 365.0) * dias_totais_ant)
-
-                if pd.notnull(b.get('data_saldo_inicial')): residual_ant = max(0.0, saldo_ini - dep_acumulada_ant)
-                else: residual_ant = max(0.0, base_calc - dep_acumulada_ant)
-
-                if residual_ant <= 0.009: continue
-
-                cota = 0.0
-                usou_plano = False
-
-                if not plano_do_bem.empty:
-                    plano_item = plano_do_bem[plano_do_bem['mes_referencia'] == data_ref_plano]
-                    if not plano_item.empty:
-                        cota = float(plano_item.iloc[0]['valor_cota'])
-                        usou_plano = True
-
-                if not usou_plano:
-                    dia_inicial = dt_base.day if (a_proc == dt_base.year and m_proc == dt_base.month) else 1
-                    dias_uso = max(0, dia_final_calculo - dia_inicial + 1)
-                    cota = (base_calc * taxa_anual / 365.0) * dias_uso
-
-                cota = min(cota, residual_ant)
-                total_base_credito += cota
-
-    except Exception as e: pass
-    return round(total_base_credito, 2)
-
 
 # --- 4. CONTROLE DE ESTADO E AUTENTICAÇÃO ---
 if 'autenticado' not in st.session_state: st.session_state.autenticado = False
@@ -402,7 +307,6 @@ def modulo_apuracao():
     col_in, col_ras = st.columns([1, 1], gap="large")
 
     with col_in:
-        # Aqui usamos a fk (form_key) para criar campos dinâmicos que limpam automaticamente
         fk = st.session_state.form_key
         tab_fiscal, tab_custo = st.tabs(["1. Notas Fiscais (PDF / Impostos)", "2. Custo Avulso (CMV / CSV)"])
 
@@ -410,37 +314,6 @@ def modulo_apuracao():
             op_sel = st.selectbox("Operação Fiscal", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
             op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
             
-            # --- INÍCIO DA LÓGICA DO ASSISTENTE CRESCERE ---
-            valor_sugerido = 0.0
-            # Identifica se a operação é a de depreciação (busca palavras-chave)
-            if "Deprecia" in op_row['nome'] or "Imobilizado" in op_row['nome']:
-                comp_valida_sug = validar_competencia(competencia)
-                if comp_valida_sug:
-                    try:
-                        with get_db_connection() as conn_sug:
-                            # Busca o valor exato no plano de depreciação desta competência
-                            query_sug = """
-                                SELECT SUM(p.valor_cota) as total
-                                FROM plano_depreciacao_itens p
-                                JOIN bens_imobilizado b ON p.bem_id = b.id
-                                WHERE b.tenant_id = %s AND DATE_FORMAT(p.mes_referencia, '%%Y-%%m') = %s
-                            """
-                            df_sug = pd.read_sql(query_sug, conn_sug, params=(emp_id, comp_valida_sug))
-                            if not df_sug.empty and pd.notnull(df_sug.iloc[0]['total']):
-                                valor_sugerido = float(df_sug.iloc[0]['total'])
-                    except Exception as e:
-                        pass # Ignora erros silenciosamente para não travar a tela
-            
-            if valor_sugerido > 0:
-                st.info(f"💡 **Assistente Crescere:** Identificamos **{formatar_moeda(valor_sugerido)}** de base de crédito (depreciação mensal/integral) validada para este mês no Imobilizado.")
-                
-                # Callback (Função que injeta o valor na chave ANTES do campo renderizar)
-                def aplicar_valor(val):
-                    st.session_state[f"base_{st.session_state.form_key}"] = val
-                    
-                st.button("Aplicar Valor Sugerido", on_click=aplicar_valor, args=(valor_sugerido,))
-            # --- FIM DA LÓGICA DO ASSISTENTE ---
-
             v_base = st.number_input("Valor Total da Fatura / Base (R$)", min_value=0.00, step=100.0, key=f"base_{fk}")
             v_pis_ret = v_cof_ret = 0.0
             teve_retencao = False
@@ -485,7 +358,6 @@ def modulo_apuracao():
                         "origem": comp_origem if retro else None, "nota": num_nota, "fornecedor": fornecedor,
                         "is_custo_avulso": 0, "custo_liq": 0.0, "c_deb": None, "c_cred": None, "c_cod": None, "c_txt": None
                     })
-                    # O "pulo do gato" da limpeza: somamos 1 ao form_key. A tela vai recarregar zerada!
                     st.session_state.form_key += 1; st.rerun()
 
         with tab_custo:
@@ -523,7 +395,6 @@ def modulo_apuracao():
                             "c_deb": dest_row['conta_debito'], "c_cred": dest_row['conta_credito'],
                             "c_cod": dest_row['hist_codigo'], "c_txt": dest_row['hist_texto']
                         })
-                        # Limpa também a aba de custo ao concluir
                         st.session_state.form_key += 1; st.rerun()
 
     with col_ras:
@@ -578,7 +449,7 @@ def modulo_apuracao():
             else:
                 st.dataframe(df_gravados, use_container_width=True, hide_index=True)
                 with st.expander("Estornar / Inativar Lançamento"):
-                    with st.form("form_edicao_lancamento", clear_on_submit=True):
+                    with st.form("form_edicao_lancamento"):
                         c_id, c_motivo = st.columns([1, 3])
                         id_alvo = c_id.selectbox("ID do Lançamento", df_gravados['id'].tolist())
                         motivo = c_motivo.text_input("Motivo do Estorno (Obrigatório)")
@@ -706,11 +577,13 @@ def modulo_relatorios():
                 df_notas = df_export[df_export['is_custo_avulso'] == 0].copy()
 
                 if not df_notas.empty:
+                    # Protege a unidade nula
                     if 'apelido_unidade' in df_notas.columns:
                         df_notas['apelido_unidade'] = df_notas['apelido_unidade'].fillna('MATRIZ')
                     else:
                         df_notas['apelido_unidade'] = 'MATRIZ'
                     
+                    # Data final da competência para o Fecho
                     try:
                         m_c, a_c = competencia.split('/')
                         u_dia = calendar.monthrange(int(a_c), int(m_c))[1]
@@ -718,6 +591,7 @@ def modulo_relatorios():
                     except:
                         data_fecho = ""
 
+                    # FECHO PIS (Agrupado por débito/ativo)
                     if c_transf_pis and 'conta_deb_pis' in df_notas.columns:
                         df_pis_valido = df_notas[df_notas['conta_deb_pis'].notnull()]
                         if not df_pis_valido.empty:
@@ -728,6 +602,7 @@ def modulo_relatorios():
                                     hist = f"Vr. transferido para apuracao do PIS n/ mes {competencia} - {apelido}"
                                     linhas_excel.append(criar_linha_erp(c_transf_pis, row['conta_deb_pis'], data_fecho, row['valor_pis'], "", hist, "FECHO"))
 
+                    # FECHO COFINS (Agrupado por débito/ativo)
                     if c_transf_cof and 'conta_deb_cof' in df_notas.columns:
                         df_cof_valido = df_notas[df_notas['conta_deb_cof'].notnull()]
                         if not df_cof_valido.empty:
@@ -1476,7 +1351,7 @@ def modulo_imobilizado():
                     pdf_inv.cell(30, 8, formatar_moeda(t_dep), 1)
                     pdf_inv.cell(40, 8, formatar_moeda(t_res), 1, ln=True)
                     
-                    pdf_bytes_inv = pdf_inv.output(dest='S').encode('latin1', 'replace')
+                    pdf_bytes_inv = pdf_inv.output(dest='S').encode('latin1', 'replace') # Correção 'replace'
                     st.session_state['pdf_inv_b64'] = pdf_bytes_inv
                     st.session_state['pdf_inv_nome'] = f"Inventario_{row_emp_ativa['apelido_unidade'] or row_emp_ativa['id']}_{data_posicao.strftime('%m%Y')}.pdf"
 
@@ -1852,7 +1727,7 @@ def modulo_usuarios():
                                     VALUES (%s, %s, %s, 'ATIVO', %s) 
                                     ON DUPLICATE KEY UPDATE status='ATIVO', concedido_por=VALUES(concedido_por)
                                 """
-                                cursor_perm.execute(query_upsert, (int(u_contab) if u_contab else None, int(u_id), int(eid), 'ATIVO', int(st.session_state.usuario_id)))
+                                cursor_perm.execute(query_upsert, (int(u_contab) if u_contab else None, int(u_id), int(eid), int(st.session_state.usuario_id)))
                             
                             ids_revogados = [int(eid) for eid in ids_atuais if eid not in ids_selecionados]
                             if ids_revogados:
@@ -1889,9 +1764,9 @@ with st.sidebar:
     
     st.write("---")
     
-    # --- NOVO BOTÃO ESTRATÉGICO E ESTILIZADO ---
+    # --- NOVO BOTÃO ESTRATÉGICO ---
     st.markdown("##### Sistemas Integrados")
-    st.link_button("💳 Auditoria de Vendas", "https://conciliador-contabil-hsppms6xpbjstvmmfktgkc.streamlit.app/", use_container_width=True, help="Acessar o sistema de conciliação e auditoria de vendas")
+    st.link_button("📊 Auditoria de Vendas", "https://conciliador-contabil-hsppms6xpbjstvmmfktgkc.streamlit.app/", use_container_width=True, help="Acessar o sistema de conciliação e auditoria de vendas")
     st.markdown("<br>", unsafe_allow_html=True)
     
     if st.button("Encerrar Sessão", use_container_width=True): st.session_state.autenticado = False; st.rerun()
