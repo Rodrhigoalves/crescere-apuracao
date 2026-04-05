@@ -315,35 +315,41 @@ def modulo_apuracao():
             op_sel = st.selectbox("Operação Fiscal", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
             op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
             
-            # --- INÍCIO DA LÓGICA DO ASSISTENTE CRESCERE ---
+           # --- INÍCIO DA LÓGICA DO ASSISTENTE CRESCERE (VERSÃO BLINDADA) ---
             valor_sugerido = 0.0
-            # Identifica se a operação é a de depreciação (busca palavras-chave)
             if "Deprecia" in op_row['nome'] or "Imobilizado" in op_row['nome']:
-                comp_valida_sug = validar_competencia(competencia)
-                if comp_valida_sug:
+                # Extrai apenas os números da competência (ex: 032026)
+                comp_limpa = "".join(filter(str.isdigit, competencia))
+                if len(comp_limpa) == 6:
+                    mes_sug = comp_limpa[:2]
+                    ano_sug = comp_limpa[2:]
                     try:
                         with get_db_connection() as conn_sug:
-                            # Busca o valor exato no plano de depreciação desta competência
+                            # A query agora usa %m e %Y de forma estrita para evitar erros de dia
                             query_sug = """
                                 SELECT SUM(p.valor_cota) as total
                                 FROM plano_depreciacao_itens p
                                 JOIN bens_imobilizado b ON p.bem_id = b.id
-                                WHERE b.tenant_id = %s AND DATE_FORMAT(p.mes_referencia, '%%Y-%%m') = %s
+                                WHERE b.tenant_id = %s 
+                                AND MONTH(p.mes_referencia) = %s 
+                                AND YEAR(p.mes_referencia) = %s
+                                AND b.status = 'ativo'
                             """
-                            df_sug = pd.read_sql(query_sug, conn_sug, params=(emp_id, comp_valida_sug))
-                            if not df_sug.empty and pd.notnull(df_sug.iloc[0]['total']):
-                                valor_sugerido = float(df_sug.iloc[0]['total'])
+                            cursor_sug = conn_sug.cursor(dictionary=True)
+                            cursor_sug.execute(query_sug, (emp_id, int(mes_sug), int(ano_sug)))
+                            res_sug = cursor_sug.fetchone()
+                            if res_sug and res_sug['total']:
+                                valor_sugerido = float(res_sug['total'])
                     except Exception as e:
-                        pass # Ignora erros silenciosamente para não travar a tela
-            
+                        st.error(f"Erro no Assistente: {e}") # Agora vamos ver o erro se ele existir
+
             if valor_sugerido > 0:
-                st.info(f"💡 **Assistente Crescere:** Identificamos **{formatar_moeda(valor_sugerido)}** de base de crédito (depreciação mensal/integral) validada para este mês no Imobilizado.")
+                st.info(f"💡 **Assistente Crescere:** Identificamos **{formatar_moeda(valor_sugerido)}** de base de crédito validada para este mês.")
                 
-                # Callback (Função que injeta o valor na chave ANTES do campo renderizar)
-                def aplicar_valor(val):
-                    st.session_state[f"base_{st.session_state.form_key}"] = val
-                    
-                st.button("Aplicar Valor Sugerido", on_click=aplicar_valor, args=(valor_sugerido,))
+                # Esta função garante que o valor entre no campo DEPOIS do clique
+                if st.button("Aplicar Valor Sugerido", key=f"btn_sug_{fk}"):
+                    st.session_state[f"base_{fk}"] = valor_sugerido
+                    st.rerun() 
             # --- FIM DA LÓGICA DO ASSISTENTE ---
 
             v_base = st.number_input("Valor Total da Fatura / Base (R$)", min_value=0.00, step=100.0, key=f"base_{fk}")
