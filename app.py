@@ -191,23 +191,73 @@ def calcular_impostos(regime, operacao_nome, valor_base):
 def buscar_sugestao_imobilizado(emp_id, competencia_str):
     comp_db = validar_competencia(competencia_str)
     if not comp_db: return 0.0
-    
-    data_alvo = f"{comp_db}-01"
-    
-    query = """
-        SELECT SUM(p.valor_cota) as total_base
-        FROM plano_depreciacao_itens p
-        JOIN bens_imobilizado b ON p.bem_id = b.id
-        WHERE b.tenant_id = %s 
-          AND b.status = 'ativo'
-          AND b.regra_credito != 'NENHUM (Sem Crédito)'
-          AND p.mes_referencia = %s
+
+    ano_alvo, mes_alvo = map(int, comp_db.split('-'))
+    ultimo_dia = calendar.monthrange(ano_alvo, mes_alvo)[1]
+    data_inicio_mes = date(ano_alvo, mes_alvo, 1)
+
+    total_sugerido = 0.0
+
+    query_bens = """
+        SELECT b.*, g.taxa_anual_percentual
+        FROM bens_imobilizado b
+        LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id
+        WHERE b.tenant_id = %s AND b.status = 'ativo' AND b.regra_credito != 'NENHUM (Sem Crédito)'
     """
+
     with get_db_connection() as conn:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(query, (emp_id, data_alvo))
-        res = cursor.fetchone()
-        return float(res['total_base'] or 0.0)
+        df_bens = pd.read_sql(query_bens, conn, params=(emp_id,))
+        df_planos = pd.read_sql("SELECT * FROM plano_depreciacao_itens WHERE bem_id IN (SELECT id FROM bens_imobilizado WHERE tenant_id = %s)", conn, params=(emp_id,))
+
+    if df_bens.empty:
+        return 0.0
+
+    if not df_planos.empty:
+        df_planos['mes_referencia'] = pd.to_datetime(df_planos['mes_referencia']).dt.date
+
+    for _, b in df_bens.iterrows():
+        # 1. Regra de Crédito INTEGRAL
+        if "INTEGRAL" in b['regra_credito']:
+            dt_compra = b['data_compra']
+            if dt_compra.year == ano_alvo and dt_compra.month == mes_alvo:
+                total_sugerido += float(b['valor_compra'])
+            continue
+
+        # 2. Regra MENSAL
+        dt_base = b['data_saldo_inicial'] if pd.notnull(b.get('data_saldo_inicial')) else b['data_compra']
+        if ano_alvo < dt_base.year or (ano_alvo == dt_base.year and mes_alvo < dt_base.month):
+            continue # Bem ainda não tinha sido comprado nesta competência
+
+        # Tem plano de continuidade gravado (Cenário 3)?
+        plano_do_bem = df_planos[df_planos['bem_id'] == b['id']] if not df_planos.empty else pd.DataFrame()
+        if not plano_do_bem.empty:
+            plano_mes = plano_do_bem[plano_do_bem['mes_referencia'] == data_inicio_mes]
+            if not plano_mes.empty:
+                total_sugerido += float(plano_mes.iloc[0]['valor_cota'])
+            continue
+
+        # Se não tem plano, o Assistente calcula a cota dinamicamente (Cenário 1 ou 2)
+        base_calc = float(b['valor_compra'])
+        taxa_anual = float(b['taxa_customizada']) / 100.0 if (pd.notnull(b.get('taxa_customizada')) and float(b['taxa_customizada']) > 0) else (float(b['taxa_anual_percentual']) / 100.0 if pd.notnull(b.get('taxa_anual_percentual')) else 0.0)
+
+        if taxa_anual == 0: continue
+
+        dt_ref_calc_ant = data_inicio_mes - timedelta(days=1)
+        dias_totais_ant = max(0, (dt_ref_calc_ant - dt_base).days)
+        dep_acumulada_ant = min(base_calc, (base_calc * taxa_anual / 365.0) * dias_totais_ant)
+
+        saldo_ini = float(b.get('valor_residual_inicial', 0.0))
+        residual_ant = max(0.0, saldo_ini - dep_acumulada_ant) if pd.notnull(b.get('data_saldo_inicial')) else max(0.0, base_calc - dep_acumulada_ant)
+
+        if residual_ant <= 0.009: continue
+
+        dia_inicial = dt_base.day if (ano_alvo == dt_base.year and mes_alvo == dt_base.month) else 1
+        dias_uso = max(0, ultimo_dia - dia_inicial + 1)
+        cota = (base_calc * taxa_anual / 365.0) * dias_uso
+
+        total_sugerido += min(cota, residual_ant)
+
+    return float(total_sugerido)
 
 # --- 4. CONTROLE DE ESTADO E AUTENTICAÇÃO ---
 if 'autenticado' not in st.session_state: st.session_state.autenticado = False
@@ -336,7 +386,8 @@ def modulo_apuracao():
             op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
             
             # --- INÍCIO DO ASSISTENTE CRESCERE ---
-            if "Depreciação" in op_row['nome']:
+            # .lower() converte tudo para minúsculo, e buscando só "deprecia" a gente ignora erro de acento ou 'ç'
+            if "deprecia" in op_row['nome'].lower():
                 valor_sugerido = buscar_sugestao_imobilizado(emp_id, competencia)
                 if valor_sugerido > 0:
                     st.info(f"💡 **Assistente Crescere:** Identificamos **{formatar_moeda(valor_sugerido)}** de base de crédito (depreciação mensal/integral) validada para este mês no Imobilizado.")
@@ -493,7 +544,7 @@ def modulo_apuracao():
                             else:
                                 with get_db_cursor(commit=True) as cursor:
                                     historico_add = f" | [ESTORNADO]: {motivo}"
-                                    cursor.execute("UPDATE lancamentos SET status_auditoria = 'INATIVO', historico = CONCAT(IFNULL(historico,''), %s) WHERE id = %s", (historico_add, int(id_alvo)))
+                                    cursor.execute("UPDATE lancamentos SET status_auditoria = 'INATIVO', historico = CONCAT(IFNULL(historico,''), %s) WHERE id = %s", (int(id_alvo),))
                                 st.success("Lançamento inativado."); st.rerun()
         except Exception as e:
             st.error(f"Erro ao consultar: {e}")
@@ -1762,7 +1813,7 @@ def modulo_usuarios():
                                     VALUES (%s, %s, %s, 'ATIVO', %s) 
                                     ON DUPLICATE KEY UPDATE status='ATIVO', concedido_por=VALUES(concedido_por)
                                 """
-                                cursor_perm.execute(query_upsert, (int(u_contab) if u_contab else None, int(u_id), int(eid), int(st.session_state.usuario_id)))
+                                cursor_perm.execute(query_upsert, (int(u_contab) if u_contab else None, int(u_id), int(eid), 'ATIVO', int(st.session_state.usuario_id)))
                             
                             ids_revogados = [int(eid) for eid in ids_atuais if eid not in ids_selecionados]
                             if ids_revogados:
