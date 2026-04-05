@@ -402,6 +402,7 @@ def modulo_apuracao():
     col_in, col_ras = st.columns([1, 1], gap="large")
 
     with col_in:
+        # Aqui usamos a fk (form_key) para criar campos dinâmicos que limpam automaticamente
         fk = st.session_state.form_key
         tab_fiscal, tab_custo = st.tabs(["1. Notas Fiscais (PDF / Impostos)", "2. Custo Avulso (CMV / CSV)"])
 
@@ -409,21 +410,38 @@ def modulo_apuracao():
             op_sel = st.selectbox("Operação Fiscal", df_op['nome_exibicao'].tolist(), key=f"op_{fk}")
             op_row = df_op[df_op['nome_exibicao'] == op_sel].iloc[0]
             
-            # Controle de Sugestão de Imobilizado via Session State
-            if f"sugestao_base_{fk}" not in st.session_state:
-                st.session_state[f"sugestao_base_{fk}"] = 0.0
+            # --- INÍCIO DA LÓGICA DO ASSISTENTE CRESCERE ---
+            valor_sugerido = 0.0
+            # Identifica se a operação é a de depreciação (busca palavras-chave)
+            if "Deprecia" in op_row['nome'] or "Imobilizado" in op_row['nome']:
+                comp_valida_sug = validar_competencia(competencia)
+                if comp_valida_sug:
+                    try:
+                        with get_db_connection() as conn_sug:
+                            # Busca o valor exato no plano de depreciação desta competência
+                            query_sug = """
+                                SELECT SUM(p.valor_cota) as total
+                                FROM plano_depreciacao_itens p
+                                JOIN bens_imobilizado b ON p.bem_id = b.id
+                                WHERE b.tenant_id = %s AND DATE_FORMAT(p.mes_referencia, '%%Y-%%m') = %s
+                            """
+                            df_sug = pd.read_sql(query_sug, conn_sug, params=(emp_id, comp_valida_sug))
+                            if not df_sug.empty and pd.notnull(df_sug.iloc[0]['total']):
+                                valor_sugerido = float(df_sug.iloc[0]['total'])
+                    except Exception as e:
+                        pass # Ignora erros silenciosamente para não travar a tela
+            
+            if valor_sugerido > 0:
+                st.info(f"💡 **Assistente Crescere:** Identificamos **{formatar_moeda(valor_sugerido)}** de base de crédito (depreciação mensal/integral) validada para este mês no Imobilizado.")
+                
+                # Callback (Função que injeta o valor na chave ANTES do campo renderizar)
+                def aplicar_valor(val):
+                    st.session_state[f"base_{st.session_state.form_key}"] = val
+                    
+                st.button("Aplicar Valor Sugerido", on_click=aplicar_valor, args=(valor_sugerido,))
+            # --- FIM DA LÓGICA DO ASSISTENTE ---
 
-            # GATILHO INTELIGENTE: Depreciação
-            if "Depreciação" in op_sel or "Depreciacao" in op_sel:
-                valor_assistente = buscar_valor_depreciacao_mes(emp_id, competencia)
-                if valor_assistente > 0:
-                    st.info(f"💡 **Assistente Crescere:** Identificamos **{formatar_moeda(valor_assistente)}** de base de crédito (depreciação mensal/integral) validada para este mês no Imobilizado.")
-                    if st.button("Aplicar Valor Sugerido", key=f"btn_sugestao_{fk}"):
-                        st.session_state[f"sugestao_base_{fk}"] = valor_assistente
-                        st.rerun()
-            
-            v_base = st.number_input("Valor Total da Fatura / Base (R$)", min_value=0.00, step=100.0, value=float(st.session_state[f"sugestao_base_{fk}"]), key=f"base_{fk}")
-            
+            v_base = st.number_input("Valor Total da Fatura / Base (R$)", min_value=0.00, step=100.0, key=f"base_{fk}")
             v_pis_ret = v_cof_ret = 0.0
             teve_retencao = False
             
@@ -467,6 +485,7 @@ def modulo_apuracao():
                         "origem": comp_origem if retro else None, "nota": num_nota, "fornecedor": fornecedor,
                         "is_custo_avulso": 0, "custo_liq": 0.0, "c_deb": None, "c_cred": None, "c_cod": None, "c_txt": None
                     })
+                    # O "pulo do gato" da limpeza: somamos 1 ao form_key. A tela vai recarregar zerada!
                     st.session_state.form_key += 1; st.rerun()
 
         with tab_custo:
@@ -504,6 +523,7 @@ def modulo_apuracao():
                             "c_deb": dest_row['conta_debito'], "c_cred": dest_row['conta_credito'],
                             "c_cod": dest_row['hist_codigo'], "c_txt": dest_row['hist_texto']
                         })
+                        # Limpa também a aba de custo ao concluir
                         st.session_state.form_key += 1; st.rerun()
 
     with col_ras:
@@ -558,7 +578,7 @@ def modulo_apuracao():
             else:
                 st.dataframe(df_gravados, use_container_width=True, hide_index=True)
                 with st.expander("Estornar / Inativar Lançamento"):
-                    with st.form("form_edicao_lancamento"):
+                    with st.form("form_edicao_lancamento", clear_on_submit=True):
                         c_id, c_motivo = st.columns([1, 3])
                         id_alvo = c_id.selectbox("ID do Lançamento", df_gravados['id'].tolist())
                         motivo = c_motivo.text_input("Motivo do Estorno (Obrigatório)")
