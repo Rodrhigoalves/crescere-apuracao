@@ -535,19 +535,25 @@ def modulo_apuracao():
             else:
                 st.dataframe(df_gravados, use_container_width=True, hide_index=True)
                 with st.expander("Estornar / Inativar Lançamento"):
-                    with st.form("form_edicao_lancamento"):
-                        c_id, c_motivo = st.columns([1, 3])
-                        id_alvo = c_id.selectbox("ID do Lançamento", df_gravados['id'].tolist())
-                        motivo = c_motivo.text_input("Motivo do Estorno (Obrigatório)")
-                        if st.form_submit_button("Confirmar Estorno"):
-                            if not motivo or len(motivo.strip()) < 5: st.error("Informe um motivo válido.")
+                    if st.form_submit_button("Confirmar Estorno"):
+                            if not motivo or len(motivo.strip()) < 5:
+                                st.error("Informe um motivo válido (mínimo 5 caracteres).")
                             else:
-                                with get_db_cursor(commit=True) as cursor:
-                                    historico_add = f" | [ESTORNADO]: {motivo}"
-                                    cursor.execute("UPDATE lancamentos SET status_auditoria = 'INATIVO', historico = CONCAT(IFNULL(historico,''), %s) WHERE id = %s", (int(id_alvo),))
-                                st.success("Lançamento inativado."); st.rerun()
-        except Exception as e:
-            st.error(f"Erro ao consultar: {e}")
+                                try:
+                                    # Usamos o contexto de commit para garantir a gravação
+                                    with get_db_cursor(commit=True) as cursor_estorno:
+                                        historico_add = f" | [ESTORNADO]: {motivo}"
+                                        # O segredo está em passar os parâmetros como uma tupla (valor1, valor2)
+                                        sql = "UPDATE lancamentos SET status_auditoria = 'INATIVO', historico = CONCAT(IFNULL(historico,''), %s) WHERE id = %s"
+                                        cursor_estorno.execute(sql, (historico_add, int(id_alvo)))
+                                    
+                                    st.success(f"Lançamento ID {id_alvo} inativado com sucesso!")
+                                    # Pequena pausa para o usuário ver a mensagem antes de recarregar
+                                    import time
+                                    time.sleep(1)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Erro ao processar estorno no banco: {e}")
 
 # --- 7. MÓDULO RELATÓRIOS E INTEGRAÇÃO ---
 def modulo_relatorios():
