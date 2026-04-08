@@ -4,9 +4,12 @@ import pdfplumber
 import mysql.connector
 import io
 import re
+import unicodedata
+from thefuzz import fuzz
+from ofxparse import OfxParser
 
 # ---------------------------------------------------------
-# 1. CONEXÃO COM O BANCO UOL
+# 1. CONEXÃO E NORMALIZAÇÃO
 # ---------------------------------------------------------
 def get_connection():
     return mysql.connector.connect(
@@ -16,8 +19,15 @@ def get_connection():
         database=st.secrets["mysql"]["database"]
     )
 
+def padronizar_texto(texto):
+    """Remove acentos, deixa tudo maiúsculo e tira espaços duplos."""
+    if not texto: return ""
+    texto_sem_acento = unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('utf-8')
+    texto_limpo = re.sub(r'\s+', ' ', texto_sem_acento.upper().strip())
+    return texto_limpo
+
 # ---------------------------------------------------------
-# 2. LEITOR COM SUPORTE A HORAS (SEPARADOR INTELIGENTE)
+# 2. MOTORES DE LEITURA (PDF E OFX)
 # ---------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def extrair_texto_pdf(file_bytes):
@@ -35,47 +45,61 @@ def extrair_texto_pdf(file_bytes):
         linha = linha.strip()
         if not linha: continue
         
-        # GATILHO: Nova transação começa com DATA (00/00) ou HORA (00:00)
         tem_data = re.search(r'(\d{2}/\d{2}/\d{2,4})', linha)
         tem_hora = re.search(r'(\d{2}:\d{2})', linha)
         
         if tem_data or tem_hora:
-            if transacao_atual:
-                dados_extraidos.append(transacao_atual)
+            if transacao_atual: dados_extraidos.append(transacao_atual)
             
-            # Puxa a data da linha, ou herda da transação anterior se só tiver a hora
             data = tem_data.group(1) if tem_data else (transacao_atual['Data'] if transacao_atual else "")
             sinal = '+' if 'Entrada' in linha else '-' if 'Saída' in linha else '-' if ' - R$' in linha else '+'
             
             valores = re.findall(r'\d{1,3}(?:\.\d{3})*,\d{2}', linha)
             valor_num = float(valores[0].replace('.', '').replace(',', '.')) if valores else 0.0
             
-            # Limpeza cirúrgica da descrição
             desc = linha
             if tem_data: desc = desc.replace(tem_data.group(0), '')
             if tem_hora: desc = desc.replace(tem_hora.group(0), '')
             for v in valores: desc = desc.replace(v, '')
             desc = desc.replace('Entrada', '').replace('Saída', '').replace('R$', '').replace('-', '').strip()
-            desc = re.sub(r'\s+', ' ', desc)
             
-            transacao_atual = {'Data': data, 'Descricao': desc, 'Valor': abs(valor_num), 'Sinal': sinal}
+            transacao_atual = {'Data': data, 'Descricao': padronizar_texto(desc), 'Valor': abs(valor_num), 'Sinal': sinal}
         else:
-            # Continuação da linha anterior (ex: Pix | Maquininha)
             if transacao_atual and len(linha) > 2 and "Saldo" not in linha and "Página" not in linha:
-                transacao_atual['Descricao'] += f" {linha.replace('R$', '').strip()}"
+                complemento = linha.replace('R$', '').strip()
+                transacao_atual['Descricao'] += f" {padronizar_texto(complemento)}"
+                transacao_atual['Descricao'] = re.sub(r'\s+', ' ', transacao_atual['Descricao'])
                 
-    if transacao_atual: 
-        dados_extraidos.append(transacao_atual)
-        
+    if transacao_atual: dados_extraidos.append(transacao_atual)
+    return pd.DataFrame(dados_extraidos)
+
+@st.cache_data(show_spinner=False)
+def extrair_texto_ofx(file_bytes):
+    """Leitor nativo de OFX. 100% de precisão nos dados bancários."""
+    dados_extraidos = []
+    ofx = OfxParser.parse(io.BytesIO(file_bytes))
+    
+    for account in ofx.accounts:
+        for tx in account.statement.transactions:
+            valor = float(tx.amount)
+            sinal = '+' if valor > 0 else '-'
+            # OFX às vezes usa o 'payee', às vezes o 'memo'
+            desc_original = tx.payee if tx.payee else tx.memo
+            
+            dados_extraidos.append({
+                'Data': tx.date.strftime('%d/%m/%Y'),
+                'Descricao': padronizar_texto(desc_original),
+                'Valor': abs(valor),
+                'Sinal': sinal
+            })
     return pd.DataFrame(dados_extraidos)
 
 # ---------------------------------------------------------
 # 3. INTERFACE PRINCIPAL
 # ---------------------------------------------------------
 st.set_page_config(page_title="Conciliador", page_icon="🎯", layout="wide")
-st.title("🎯 Conciliador de Extratos Pro")
+st.title("🎯 Conciliador de Extratos Pro (Fuzzy AI)")
 
-# Configurações do Cabeçalho
 col_cfg1, col_cfg2 = st.columns([2, 1])
 try:
     conn = get_connection()
@@ -87,30 +111,44 @@ except Exception as e:
     st.error("Erro de conexão com o banco UOL.")
     st.stop()
 
-uploaded_file = st.file_uploader("Suba o PDF (Stone, etc.)", type="pdf")
+# Agora aceita PDFs e OFXs misturados
+uploaded_files = st.file_uploader("Suba os arquivos (PDF ou OFX)", type=["pdf", "ofx"], accept_multiple_files=True)
 
-if uploaded_file and conta_banco_fixa:
-    with st.spinner("Processando páginas e cruzando inteligência..."):
-        df_bruto = extrair_texto_pdf(uploaded_file.getvalue())
+if uploaded_files and conta_banco_fixa:
+    with st.spinner("Lendo arquivos e calculando similaridade neural..."):
+        
+        lista_dfs = []
+        for file in uploaded_files:
+            file_name = file.name.lower()
+            if file_name.endswith('.pdf'):
+                lista_dfs.append(extrair_texto_pdf(file.getvalue()))
+            elif file_name.endswith('.ofx'):
+                lista_dfs.append(extrair_texto_ofx(file.getvalue()))
+        
+        df_bruto = pd.concat(lista_dfs, ignore_index=True)
         regras = pd.read_sql(f"SELECT * FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn)
 
     prontos_alterdata = []
     pendentes_treinamento = []
 
-    # Motor de Classificação
+    # Motor de Classificação com Inteligência FUZZY
     for _, row in df_bruto.iterrows():
         match_encontrado = False
         ignorar_linha = False
         
         for _, r in regras.iterrows():
-            if r['termo_chave'].upper() in row['Descricao'].upper() and r['sinal_esperado'] == row['Sinal']:
+            termo_regra = padronizar_texto(r['termo_chave'])
+            
+            # Aqui está a mágica: Calcula a similaridade (0 a 100). Acima de 85, o robô entende que é a mesma coisa.
+            # partial_ratio permite achar a palavra mesmo que o banco tenha colocado lixo em volta
+            similaridade = fuzz.partial_ratio(termo_regra, row['Descricao'])
+            
+            if similaridade >= 85 and r['sinal_esperado'] == row['Sinal']:
                 
-                # Regra de Lixo (Descarta a linha)
                 if r['conta_contabil'] == 'IGNORAR':
                     ignorar_linha = True
                     break
                 
-                # Lógica de D/C Automática
                 conta_contra = r['conta_contabil']
                 debito = conta_banco_fixa if row['Sinal'] == '+' else conta_contra
                 credito = conta_contra if row['Sinal'] == '+' else conta_banco_fixa
@@ -131,7 +169,7 @@ if uploaded_file and conta_banco_fixa:
             pendentes_treinamento.append(row)
 
     # ---------------------------------------------------------
-    # 4. PAINEL DE RESULTADOS E TRAVA
+    # 4. PAINEL DE RESULTADOS E TRAVA DE EXPORTAÇÃO
     # ---------------------------------------------------------
     df_prontos = pd.DataFrame(prontos_alterdata)
     df_pendentes = pd.DataFrame(pendentes_treinamento)
@@ -149,17 +187,17 @@ if uploaded_file and conta_banco_fixa:
         st.warning(f"🔒 Resolva os {len(df_pendentes)} lançamentos abaixo para liberar a exportação.")
 
     # ---------------------------------------------------------
-    # 5. MESA DE TREINAMENTO (COM BOTÃO DE LIXO)
+    # 5. MESA DE TREINAMENTO INTELIGENTE
     # ---------------------------------------------------------
     if not df_pendentes.empty:
         st.divider()
         pendentes_agrupados = df_pendentes.groupby(['Descricao', 'Sinal']).size().reset_index(name='Qtd').sort_values('Qtd', ascending=False)
         top = pendentes_agrupados.iloc[0]
         
-        st.subheader(f"🎓 Treinando: {top['Qtd']} operações encontradas")
+        st.subheader(f"🎓 Treinando: {top['Qtd']} operações agrupadas")
         
         with st.form("form_treinamento", clear_on_submit=True):
-            termo = st.text_input("Termo Chave (Deixe só a palavra em comum. Ex: MATHEUS)", value=top['Descricao'])
+            termo = st.text_input("Termo Chave (Corte a sujeira)", value=top['Descricao'])
             st.caption(f"Operação lida como **{'🟢 ENTRADA' if top['Sinal'] == '+' else '🔴 SAÍDA'}**. Conta Fixa: {conta_banco_fixa}")
             
             c1, c2, c3 = st.columns([1, 1, 2])
@@ -168,21 +206,23 @@ if uploaded_file and conta_banco_fixa:
             txt_hist = c3.text_input("Texto do Histórico (Opcional)")
             
             b1, b2 = st.columns(2)
-            submit_salvar = b1.form_submit_button("✅ Salvar Regra de Conta")
+            submit_salvar = b1.form_submit_button("✅ Salvar Regra (Aplica com 85% de similaridade)")
             submit_lixo = b2.form_submit_button("🗑️ Ignorar / Descartar Lixo")
             
             if (submit_salvar and conta) or submit_lixo:
                 conta_final = 'IGNORAR' if submit_lixo else conta
+                termo_para_banco = padronizar_texto(termo)
+                
                 cursor = conn.cursor()
                 cursor.execute("""INSERT INTO tb_extratos_regras 
                                (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil, cod_historico_erp, historico_padrao) 
                                VALUES (%s, %s, %s, %s, %s, %s, %s)""", 
-                               (id_empresa, 'STONE', termo.upper(), top['Sinal'], conta_final, cod_hist if cod_hist else None, txt_hist))
+                               (id_empresa, 'PADRAO', termo_para_banco, top['Sinal'], conta_final, cod_hist if cod_hist else None, txt_hist))
                 conn.commit()
                 st.rerun()
 
     # ---------------------------------------------------------
-    # 6. GERENCIADOR DE REGRAS (EDICAO E EXCLUSAO)
+    # 6. GERENCIADOR DE REGRAS
     # ---------------------------------------------------------
     st.divider()
     with st.expander("⚙️ Gerenciar Banco de Inteligência (Ver, Editar ou Excluir)"):
@@ -190,7 +230,6 @@ if uploaded_file and conta_banco_fixa:
         st.dataframe(regras_view, use_container_width=True)
         
         c_ed1, c_ed2 = st.columns(2)
-        
         with c_ed1:
             st.write("**Editar Conta**")
             with st.form("form_edit"):
