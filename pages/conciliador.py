@@ -83,7 +83,6 @@ def extrair_texto_ofx(file_bytes):
         for tx in account.statement.transactions:
             valor = float(tx.amount)
             sinal = '+' if valor > 0 else '-'
-            # OFX às vezes usa o 'payee', às vezes o 'memo'
             desc_original = tx.payee if tx.payee else tx.memo
             
             dados_extraidos.append({
@@ -102,16 +101,18 @@ st.title("🎯 Conciliador de Extratos Pro (Fuzzy AI)")
 
 col_cfg1, col_cfg2 = st.columns([2, 1])
 try:
-    conn = get_connection()
-    empresas = pd.read_sql("SELECT id, nome FROM empresas", conn)
+    # CONEXÃO 1: Apenas para carregar as empresas. Abre e fecha rápido.
+    conn_setup = get_connection()
+    empresas = pd.read_sql("SELECT id, nome FROM empresas", conn_setup)
+    conn_setup.close()
+    
     empresa_sel = col_cfg1.selectbox("Empresa / Filial", empresas['nome'])
     id_empresa = int(empresas[empresas['nome'] == empresa_sel]['id'].values[0])
     conta_banco_fixa = col_cfg2.text_input("Conta Contábil do Banco (Âncora)", value="196")
 except Exception as e:
-    st.error("Erro de conexão com o banco UOL.")
+    st.error(f"Erro ao carregar dados iniciais: {e}")
     st.stop()
 
-# Agora aceita PDFs e OFXs misturados
 uploaded_files = st.file_uploader("Suba os arquivos (PDF ou OFX)", type=["pdf", "ofx"], accept_multiple_files=True)
 
 if uploaded_files and conta_banco_fixa:
@@ -126,7 +127,11 @@ if uploaded_files and conta_banco_fixa:
                 lista_dfs.append(extrair_texto_ofx(file.getvalue()))
         
         df_bruto = pd.concat(lista_dfs, ignore_index=True)
-        regras = pd.read_sql(f"SELECT * FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn)
+        
+        # CONEXÃO 2: O arquivo já foi processado. Agora abrimos para buscar as regras.
+        conn_regras = get_connection()
+        regras = pd.read_sql(f"SELECT * FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn_regras)
+        conn_regras.close()
 
     prontos_alterdata = []
     pendentes_treinamento = []
@@ -138,13 +143,9 @@ if uploaded_files and conta_banco_fixa:
         
         for _, r in regras.iterrows():
             termo_regra = padronizar_texto(r['termo_chave'])
-            
-            # Aqui está a mágica: Calcula a similaridade (0 a 100). Acima de 85, o robô entende que é a mesma coisa.
-            # partial_ratio permite achar a palavra mesmo que o banco tenha colocado lixo em volta
             similaridade = fuzz.partial_ratio(termo_regra, row['Descricao'])
             
             if similaridade >= 85 and r['sinal_esperado'] == row['Sinal']:
-                
                 if r['conta_contabil'] == 'IGNORAR':
                     ignorar_linha = True
                     break
@@ -213,12 +214,15 @@ if uploaded_files and conta_banco_fixa:
                 conta_final = 'IGNORAR' if submit_lixo else conta
                 termo_para_banco = padronizar_texto(termo)
                 
-                cursor = conn.cursor()
+                # CONEXÃO 3: Abre só para salvar a regra e já fecha
+                conn_save = get_connection()
+                cursor = conn_save.cursor()
                 cursor.execute("""INSERT INTO tb_extratos_regras 
                                (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil, cod_historico_erp, historico_padrao) 
                                VALUES (%s, %s, %s, %s, %s, %s, %s)""", 
                                (id_empresa, 'PADRAO', termo_para_banco, top['Sinal'], conta_final, cod_hist if cod_hist else None, txt_hist))
-                conn.commit()
+                conn_save.commit()
+                conn_save.close()
                 st.rerun()
 
     # ---------------------------------------------------------
@@ -226,7 +230,11 @@ if uploaded_files and conta_banco_fixa:
     # ---------------------------------------------------------
     st.divider()
     with st.expander("⚙️ Gerenciar Banco de Inteligência (Ver, Editar ou Excluir)"):
-        regras_view = pd.read_sql(f"SELECT id, termo_chave, sinal_esperado, conta_contabil as contrapartida, historico_padrao FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn)
+        # CONEXÃO 4: Abre só para popular a tabela do gerenciador
+        conn_view = get_connection()
+        regras_view = pd.read_sql(f"SELECT id, termo_chave, sinal_esperado, conta_contabil as contrapartida, historico_padrao FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn_view)
+        conn_view.close()
+        
         st.dataframe(regras_view, use_container_width=True)
         
         c_ed1, c_ed2 = st.columns(2)
@@ -236,9 +244,11 @@ if uploaded_files and conta_banco_fixa:
                 id_edit = st.number_input("ID da Regra", step=1, value=0)
                 nova_conta = st.text_input("Nova Conta Contrapartida")
                 if st.form_submit_button("Atualizar Conta"):
-                    cursor = conn.cursor()
+                    conn_edit = get_connection()
+                    cursor = conn_edit.cursor()
                     cursor.execute(f"UPDATE tb_extratos_regras SET conta_contabil = '{nova_conta}' WHERE id = {id_edit} AND id_empresa = {id_empresa}")
-                    conn.commit()
+                    conn_edit.commit()
+                    conn_edit.close()
                     st.success("Conta atualizada!"); st.rerun()
                     
         with c_ed2:
@@ -246,9 +256,9 @@ if uploaded_files and conta_banco_fixa:
             with st.form("form_del"):
                 id_del = st.number_input("ID para Excluir", step=1, value=0)
                 if st.form_submit_button("Excluir Permanentemente"):
-                    cursor = conn.cursor()
+                    conn_del = get_connection()
+                    cursor = conn_del.cursor()
                     cursor.execute(f"DELETE FROM tb_extratos_regras WHERE id = {id_del} AND id_empresa = {id_empresa}")
-                    conn.commit()
+                    conn_del.commit()
+                    conn_del.close()
                     st.error("Regra excluída!"); st.rerun()
-
-conn.close()
