@@ -6,3 +6,5 @@ fpdf
 openpyxl
 bcrypt
 pdfplumber
+thefuzz  
+ofxparse
