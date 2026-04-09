@@ -24,6 +24,10 @@ def padronizar_texto(texto):
     texto_sem_acento = unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('utf-8')
     texto_limpo = re.sub(r'\s+', ' ', texto_sem_acento.upper().strip())
     return texto_limpo
+    # Adicione temporariamente um botão no topo da app:
+if st.button("🗑️ Limpar Cache"):
+    st.cache_data.clear()
+    st.rerun()
 
 # ---------------------------------------------------------
 # 2. MOTOR DE RECINTOS (ÂNCORA DE MARGEM ESQUERDA)
@@ -152,6 +156,18 @@ if uploaded_files and conta_banco_fixa:
                 lista_dfs.append(extrair_texto_ofx(file.getvalue()))
                 
         df_bruto = pd.concat(lista_dfs, ignore_index=True)
+        df_bruto = pd.concat(lista_dfs, ignore_index=True)
+
+# --- DEBUG TEMPORÁRIO ---
+with st.expander("🔍 Ver texto bruto extraído do PDF"):
+    for file in uploaded_files:
+        if file.name.lower().endswith('.pdf'):
+            import pdfplumber, io
+            with pdfplumber.open(io.BytesIO(file.getvalue())) as pdf:
+                for i, page in enumerate(pdf.pages):
+                    st.text(f"=== PÁGINA {i+1} ===")
+                    st.text(page.extract_text())
+# --- FIM DEBUG ---
         regras = pd.read_sql(f"SELECT * FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn)
 
     prontos, pendentes = [], []
