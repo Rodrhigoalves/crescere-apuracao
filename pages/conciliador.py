@@ -28,7 +28,6 @@ def padronizar_texto(texto):
     return texto_limpo
 
 def formatar_moeda(valor):
-    """Formata float para R$ no padrão brasileiro"""
     return f"R$ {valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
 
 # ---------------------------------------------------------
@@ -89,48 +88,48 @@ def extrair_por_recintos(file_bytes):
                 texto_linha = " ".join([w['text'] for w in linha_ordenada])
                 texto_completo += texto_linha + "\n"
 
+    # Filtro de ruídos comuns (cabeçalhos e rodapés)
     RUIDO = ["período:", "página", "saldo anterior", "saldo atual", "saldo final",
              "data tipo descri", "cnpj", "emitido em", "extrato de conta",
              "dados da conta", "nome documento", "instituição agência",
              "contraparte stone"]
-    linhas = [l.strip() for l in texto_completo.split('\n')
-              if l.strip() and not any(x in l.lower() for x in RUIDO)]
-    texto = " ".join(linhas)
+             
+    linhas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
 
-    ANCHOR = r'(\d{2}/\d{2}/\d{2,4})\s+(Saída|Entrada|Saque|Depósito)'
-    partes = re.split(ANCHOR, texto)
-
-    n = (len(partes) - 1) // 3
     dados = []
+    linhas_ignoradas = [] # Armazena o que não for reconhecido como transação ou ruído
 
-    for i in range(n):
-        data  = partes[i * 3 + 1]
-        tipo  = partes[i * 3 + 2]
-        corpo = partes[i * 3 + 3].strip()
-
-        chunk_anterior = partes[(i - 1) * 3 + 3] if i > 0 else partes[0]
-        contraparte = _extrair_nome_final(chunk_anterior)
-
-        valores = re.findall(r'\d{1,3}(?:\.\d{3})*,\d{2}', corpo)
-        if not valores:
+    for linha in linhas:
+        # Se for um ruído conhecido, pula direto
+        if any(x in linha.lower() for x in RUIDO):
             continue
-        valor_num = float(valores[0].replace('.', '').replace(',', '.'))
-        sinal = '+' if tipo.lower() == 'entrada' else '-'
+            
+        match = re.search(r'(\d{2}/\d{2}/\d{2,4})\s+(Saída|Entrada|Saque|Depósito|Transferência|PIX)', linha, re.IGNORECASE)
+        
+        if match:
+            data = match.group(1)
+            tipo = match.group(2)
+            valores = re.findall(r'\d{1,3}(?:\.\d{3})*,\d{2}', linha)
+            if valores:
+                valor_num = float(valores[0].replace('.', '').replace(',', '.'))
+                sinal = '+' if tipo.lower() in ['entrada', 'depósito'] else '-'
+                desc_limpa = linha.replace(data, "").replace(valores[0], "").strip()
+                
+                dados.append({
+                    'Data':      data,
+                    'Descricao': padronizar_texto(desc_limpa),
+                    'Valor':     abs(valor_num),
+                    'Sinal':     sinal
+                })
+            else:
+                # Tem data e tipo, mas o valor sumiu ou quebrou na linha
+                linhas_ignoradas.append(linha)
+        else:
+            # Não é ruído e não tem padrão de transação. Guarda se não for muito curta.
+            if len(linha) > 8:
+                linhas_ignoradas.append(linha)
 
-        sub = re.search(r'([A-ZÀ-Úa-zà-ú]+(?:\s+[A-ZÀ-Úa-zà-ú]+)*\s*\|\s*[A-ZÀ-Úa-zà-ú]+(?:\s+[A-ZÀ-Úa-zà-ú]+)*|Tarifa)', corpo)
-        subcategoria = sub.group(1).strip() if sub else ""
-
-        desc_parts = [p for p in [contraparte, subcategoria] if p]
-        desc = " ".join(desc_parts) if desc_parts else corpo[:60]
-
-        dados.append({
-            'Data':      data,
-            'Descricao': padronizar_texto(desc),
-            'Valor':     abs(valor_num),
-            'Sinal':     sinal
-        })
-
-    return pd.DataFrame(dados)
+    return pd.DataFrame(dados), linhas_ignoradas
 
 @st.cache_data(show_spinner=False)
 def extrair_texto_ofx(file_bytes):
@@ -150,24 +149,22 @@ def extrair_texto_ofx(file_bytes):
 # ---------------------------------------------------------
 # 3. INTERFACE PRINCIPAL
 # ---------------------------------------------------------
-st.set_page_config(page_title="Conciliador Pro", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Conciliação Bancária", page_icon="🏦", layout="wide")
 
 if 'skipped_indices' not in st.session_state:
     st.session_state.skipped_indices = []
 if 'editando_regra_id' not in st.session_state:
     st.session_state.editando_regra_id = None
 
-st.title("🎯 Conciliador Pro - Mesa por Cliques")
+st.title("🏦 Conciliação Bancária")
 
 conn = get_connection()
 empresas = pd.read_sql("SELECT id, nome FROM empresas", conn)
 
-# --- CONFIGURAÇÕES INICIAIS ---
 col_cfg1, col_cfg2, col_cfg3 = st.columns([2, 1, 1])
 empresa_sel = col_cfg1.selectbox("Empresa / Filial", empresas['nome'])
 id_empresa = int(empresas[empresas['nome'] == empresa_sel]['id'].values[0])
 conta_banco_fixa = col_cfg2.text_input("Conta Banco (Âncora)", value="196")
-# NOVO: Campo para o usuário informar o saldo inicial
 saldo_anterior_informado = col_cfg3.number_input("Saldo Anterior (R$)", value=0.00, step=100.00, format="%.2f")
 
 uploaded_files = st.file_uploader(
@@ -177,60 +174,69 @@ uploaded_files = st.file_uploader(
 if uploaded_files and conta_banco_fixa:
     with st.spinner("Processando extratos..."):
         lista_dfs = []
+        todas_linhas_ignoradas = []
+        
         for file in uploaded_files:
             file_name = file.name.lower()
             if file_name.endswith('.pdf'):
-                lista_dfs.append(extrair_por_recintos(file.getvalue()))
+                df_extrato, ignoradas = extrair_por_recintos(file.getvalue())
+                lista_dfs.append(df_extrato)
+                todas_linhas_ignoradas.extend(ignoradas)
             elif file_name.endswith('.ofx'):
                 lista_dfs.append(extrair_texto_ofx(file.getvalue()))
 
-        df_bruto = pd.concat(lista_dfs, ignore_index=True)
+        df_bruto = pd.concat(lista_dfs, ignore_index=True) if lista_dfs else pd.DataFrame()
         regras = pd.read_sql(
             f"SELECT * FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn
         )
 
     # ---------------------------------------------------------
-    # NOVO: AUDITORIA DE SALDOS
+    # AUDITORIA DE SALDOS E ALERTAS
     # ---------------------------------------------------------
     st.divider()
-    st.subheader("📊 Auditoria de Leitura (Prova de Caixa)")
+    st.subheader("📊 Auditoria de Leitura")
     
-    total_entradas = df_bruto[df_bruto['Sinal'] == '+']['Valor'].sum()
-    total_saidas = df_bruto[df_bruto['Sinal'] == '-']['Valor'].sum()
-    saldo_final_calculado = saldo_anterior_informado + total_entradas - total_saidas
+    if not df_bruto.empty:
+        total_entradas = df_bruto[df_bruto['Sinal'] == '+']['Valor'].sum()
+        total_saidas = df_bruto[df_bruto['Sinal'] == '-']['Valor'].sum()
+        saldo_final_calculado = saldo_anterior_informado + total_entradas - total_saidas
 
-    col_aud1, col_aud2, col_aud3, col_aud4 = st.columns(4)
-    col_aud1.metric("Saldo Anterior", formatar_moeda(saldo_anterior_informado))
-    col_aud2.metric("🟢 Total Lido (Entradas)", formatar_moeda(total_entradas))
-    col_aud3.metric("🔴 Total Lido (Saídas)", formatar_moeda(total_saidas))
-    col_aud4.metric("⚖️ Saldo Final Calculado", formatar_moeda(saldo_final_calculado))
+        col_aud1, col_aud2, col_aud3, col_aud4 = st.columns(4)
+        col_aud1.metric("Saldo Anterior", formatar_moeda(saldo_anterior_informado))
+        col_aud2.metric("🟢 Total Lido (Entradas)", formatar_moeda(total_entradas))
+        col_aud3.metric("🔴 Total Lido (Saídas)", formatar_moeda(total_saidas))
+        col_aud4.metric("⚖️ Saldo Final Calculado", formatar_moeda(saldo_final_calculado))
+        st.caption("💡 *Se o **Saldo Final Calculado** for igual ao extrato impresso, a leitura foi 100% perfeita.*")
 
-    st.caption("💡 *Dica: Compare o **Saldo Final Calculado** com o saldo impresso no final do seu extrato PDF. Se forem iguais, 100% das linhas foram lidas com sucesso!*")
+    # ALERTA DE LINHAS IGNORADAS
+    if todas_linhas_ignoradas:
+        st.warning(f"⚠️ Atenção: {len(todas_linhas_ignoradas)} linhas de texto no PDF não puderam ser convertidas em transações.")
+        with st.expander("👀 Ver linhas ignoradas (Verifique se não há operações perdidas aqui)"):
+            for l_ignorada in todas_linhas_ignoradas:
+                st.code(l_ignorada)
+
     st.divider()
-
-    # --- DEBUG ---
-    with st.expander("🔍 Ver dados brutos extraídos"):
-        st.dataframe(df_bruto, use_container_width=True)
 
     # --- CLASSIFICAÇÃO ---
     prontos, pendentes = [], []
-    for idx, row in df_bruto.iterrows():
-        match = False
-        for _, r in regras.iterrows():
-            if (fuzz.partial_ratio(padronizar_texto(r['termo_chave']), row['Descricao']) >= 85
-                    and r['sinal_esperado'] == row['Sinal']):
-                if r['conta_contabil'] != 'IGNORAR':
-                    d = conta_banco_fixa if row['Sinal'] == '+' else r['conta_contabil']
-                    c = r['conta_contabil'] if row['Sinal'] == '+' else conta_banco_fixa
-                    prontos.append({
-                        'Debito': d, 'Credito': c, 'Data': row['Data'],
-                        'Valor': f"{row['Valor']:.2f}".replace('.', ','),
-                        'Historico': r['historico_padrao'] if r['historico_padrao'] else row['Descricao']
-                    })
-                match = True
-                break
-        if not match:
-            pendentes.append({'idx_original': idx, **row})
+    if not df_bruto.empty:
+        for idx, row in df_bruto.iterrows():
+            match = False
+            for _, r in regras.iterrows():
+                if (fuzz.partial_ratio(padronizar_texto(r['termo_chave']), row['Descricao']) >= 85
+                        and r['sinal_esperado'] == row['Sinal']):
+                    if r['conta_contabil'] != 'IGNORAR':
+                        d = conta_banco_fixa if row['Sinal'] == '+' else r['conta_contabil']
+                        c = r['conta_contabil'] if row['Sinal'] == '+' else conta_banco_fixa
+                        prontos.append({
+                            'Debito': d, 'Credito': c, 'Data': row['Data'],
+                            'Valor': f"{row['Valor']:.2f}".replace('.', ','),
+                            'Historico': r['historico_padrao'] if r['historico_padrao'] else row['Descricao']
+                        })
+                    match = True
+                    break
+            if not match:
+                pendentes.append({'idx_original': idx, **row})
 
     # ---------------------------------------------------------
     # FILA DE PENDENTES
