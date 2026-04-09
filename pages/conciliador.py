@@ -6,6 +6,7 @@ import io
 import re
 import unicodedata
 from thefuzz import fuzz
+from ofxparse import OfxParser
 
 # ---------------------------------------------------------
 # 1. UTILITÁRIOS E CONEXÃO
@@ -25,7 +26,7 @@ def padronizar_texto(texto):
     return texto_limpo
 
 # ---------------------------------------------------------
-# 2. MOTOR DE RECINTOS (Extração por Blocos)
+# 2. MOTOR DE RECINTOS (ÂNCORA DE MARGEM ESQUERDA)
 # ---------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def extrair_por_recintos(file_bytes):
@@ -38,43 +39,89 @@ def extrair_por_recintos(file_bytes):
     linhas = texto_completo.split('\n')
     blocos = []
     bloco_atual = None
+    data_memoria = ""
     
     for linha in linhas:
         linha = linha.strip()
-        if not linha or any(x in linha.lower() for x in ["período:", "página", "saldo", "stone institui", "data tipo descri"]):
+        
+        # Filtro Anti-Ruído: Ignora cabeçalhos e rodapés inúteis
+        if not linha or any(x in linha.lower() for x in ["período:", "página", "saldo anterior", "saldo atual", "saldo final", "data tipo descri", "cnpj"]):
             continue
             
-        tem_data = re.search(r'(\d{2}/\d{2}/\d{2,4})', linha)
-        valores = re.findall(r'\b\d{1,3}(?:\.\d{3})*,\d{2}\b', linha)
+        # O GATILHO INFALÍVEL: A linha começa com uma Data ou Hora na margem esquerda?
+        match_inicio = re.match(r'^(\d{2}/\d{2}/\d{2,4}|\d{2}:\d{2})', linha)
         
-        # Início de um Novo Recinto (Sempre que houver um Valor)
-        if valores:
+        if match_inicio:
+            # Se achou uma nova data/hora, empacota o bloco anterior inteiro e guarda
             if bloco_atual:
                 blocos.append(bloco_atual)
             
-            valor_num = float(valores[0].replace('.', '').replace(',', '.'))
-            sinal = '+' if 'Entrada' in linha or valor_num > 0 else '-'
-            data = tem_data.group(1) if tem_data else (blocos[-1]['Data'] if blocos else "")
-            
-            # Limpa a linha do valor para pegar o texto que está nela
-            desc_lin = linha
-            if tem_data: desc_lin = desc_lin.replace(tem_data.group(0), '')
-            for v in valores: desc_lin = desc_lin.replace(v, '')
-            desc_lin = re.sub(r'\b(Entrada|Saída|R\$|-)\b', '', desc_lin, flags=re.IGNORECASE).strip()
-            
-            bloco_atual = {'Data': data, 'Descricao': desc_lin, 'Valor': abs(valor_num), 'Sinal': sinal}
-        else:
-            # Texto flutuante: Adiciona à descrição do bloco atual
-            if bloco_atual:
-                bloco_atual['Descricao'] += " " + linha.replace('R$', '').strip()
+            # Atualiza a memória da data (se for só hora, ele usa a data do dia)
+            marcador = match_inicio.group(1)
+            if "/" in marcador:
+                data_memoria = marcador
                 
-    if bloco_atual: blocos.append(bloco_atual)
-    df = pd.DataFrame(blocos)
-    df['Descricao'] = df['Descricao'].apply(padronizar_texto)
-    return df
+            # Cria a nova caixa blindada
+            bloco_atual = {
+                'Data': data_memoria,
+                'linhas_texto': [linha]
+            }
+        else:
+            # Se não começou com data/hora, é texto flutuante. Pertence à caixa atual.
+            if bloco_atual:
+                bloco_atual['linhas_texto'].append(linha)
+                
+    if bloco_atual: 
+        blocos.append(bloco_atual)
+        
+    # Fase 2: Processar as caixas fechadas
+    dados_extraidos = []
+    for b in blocos:
+        texto_full = " ".join(b['linhas_texto'])
+        valores = re.findall(r'\b\d{1,3}(?:\.\d{3})*,\d{2}\b', texto_full)
+        
+        # Se o bloco não tem nenhum valor monetário, descarta (era sujeira de PDF)
+        if not valores:
+            continue
+            
+        valor_num = float(valores[0].replace('.', '').replace(',', '.'))
+        sinal = '+' if 'Entrada' in texto_full else '-' if 'Saída' in texto_full else '-' if ' - R$' in texto_full else '+'
+        
+        # Limpeza cirúrgica do texto para a Mesa de Treinamento
+        desc_limpa = texto_full
+        # Arranca a data/hora do começo
+        desc_limpa = re.sub(r'^(\d{2}/\d{2}/\d{2,4}|\d{2}:\d{2})', '', desc_limpa).strip()
+        # Arranca os valores e sinais monetários
+        for v in valores:
+            desc_limpa = desc_limpa.replace(v, '')
+        desc_limpa = re.sub(r'\b(Entrada|Saída|R\$|-)\b', '', desc_limpa, flags=re.IGNORECASE).strip()
+        
+        dados_extraidos.append({
+            'Data': b['Data'],
+            'Descricao': padronizar_texto(desc_limpa),
+            'Valor': abs(valor_num),
+            'Sinal': sinal
+        })
+        
+    return pd.DataFrame(dados_extraidos)
+
+@st.cache_data(show_spinner=False)
+def extrair_texto_ofx(file_bytes):
+    dados_extraidos = []
+    ofx = OfxParser.parse(io.BytesIO(file_bytes))
+    for account in ofx.accounts:
+        for tx in account.statement.transactions:
+            valor = float(tx.amount)
+            dados_extraidos.append({
+                'Data': tx.date.strftime('%d/%m/%Y'),
+                'Descricao': padronizar_texto(tx.payee if tx.payee else tx.memo),
+                'Valor': abs(valor),
+                'Sinal': '+' if valor > 0 else '-'
+            })
+    return pd.DataFrame(dados_extraidos)
 
 # ---------------------------------------------------------
-# 3. INTERFACE E LÓGICA DE ESTADO
+# 3. INTERFACE PRINCIPAL E MESA POR CLIQUES
 # ---------------------------------------------------------
 st.set_page_config(page_title="Conciliador Pro", page_icon="🎯", layout="wide")
 
@@ -83,25 +130,30 @@ if 'skipped_indices' not in st.session_state:
 
 st.title("🎯 Conciliador Pro - Mesa por Cliques")
 
-# Setup Empresa
 conn = get_connection()
 empresas = pd.read_sql("SELECT id, nome FROM empresas", conn)
 col_cfg1, col_cfg2 = st.columns([2, 1])
 empresa_sel = col_cfg1.selectbox("Empresa / Filial", empresas['nome'])
 id_empresa = int(empresas[empresas['nome'] == empresa_sel]['id'].values[0])
-conta_banco_fixa = col_cfg2.text_input("Conta Banco (196)", value="196")
+conta_banco_fixa = col_cfg2.text_input("Conta Banco (Âncora)", value="196")
 
-uploaded_files = st.file_uploader("Arraste seus PDFs aqui", type="pdf", accept_multiple_files=True)
+uploaded_files = st.file_uploader("Arraste seus extratos (PDF ou OFX)", type=["pdf", "ofx"], accept_multiple_files=True)
 
 if uploaded_files and conta_banco_fixa:
-    with st.spinner("Escaneando recintos e mapeando dados..."):
-        lista_dfs = [extrair_por_recintos(f.getvalue()) for f in uploaded_files]
+    with st.spinner("Construindo recintos espaciais e processando..."):
+        lista_dfs = []
+        for file in uploaded_files:
+            file_name = file.name.lower()
+            if file_name.endswith('.pdf'):
+                lista_dfs.append(extrair_por_recintos(file.getvalue()))
+            elif file_name.endswith('.ofx'):
+                lista_dfs.append(extrair_texto_ofx(file.getvalue()))
+                
         df_bruto = pd.concat(lista_dfs, ignore_index=True)
         regras = pd.read_sql(f"SELECT * FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn)
 
     prontos, pendentes = [], []
     
-    # Processamento de Regras (Fuzzy 85%)
     for idx, row in df_bruto.iterrows():
         match = False
         for _, r in regras.iterrows():
@@ -118,13 +170,11 @@ if uploaded_files and conta_banco_fixa:
         if not match:
             pendentes.append({'idx_original': idx, **row})
 
-    # Gerenciar Fila de Pendentes (Respeitando os Pulados)
+    # Fila Dinâmica
     df_p = pd.DataFrame(pendentes)
     if not df_p.empty:
-        # Filtra os que não foram pulados nesta rodada
         fila_atual = df_p[~df_p['idx_original'].isin(st.session_state.skipped_indices)]
         
-        # Se a fila atual acabar mas houver pulados, reinicia os pulados no final
         if fila_atual.empty and st.session_state.skipped_indices:
             st.session_state.skipped_indices = []
             st.rerun()
@@ -136,18 +186,17 @@ if uploaded_files and conta_banco_fixa:
             st.divider()
             st.subheader("🎓 Mesa de Treinamento por Cliques")
             
-            # --- INTERFACE DE CLIQUES ---
+            # Pílulas Interativas
             palavras = item['Descricao'].split()
-            st.write("**Selecione as palavras para criar a regra:**")
-            selecionadas = st.pills("Palavras da Descrição", palavras, selection_mode="multi", label_visibility="collapsed")
+            st.write("**Selecione as palavras que definem a regra:**")
+            selecionadas = st.pills("Palavras", palavras, selection_mode="multi", label_visibility="collapsed")
             
             termo_final = " ".join(selecionadas) if selecionadas else ""
-            st.text_input("Termo Chave Gerado", value=termo_final, disabled=True)
+            st.text_input("Sua Regra será:", value=termo_final, disabled=True)
             
-            # Contador de Impacto
             if termo_final:
                 impacto = df_p[df_p['Descricao'].str.contains(termo_final)]['idx_original'].count()
-                st.info(f"💡 Esta regra vai resolver **{impacto}** lançamentos de uma vez.")
+                st.info(f"💡 Esta regra limpa **{impacto}** lançamentos.")
 
             with st.form("form_treino"):
                 c1, c2, c3 = st.columns(3)
@@ -178,13 +227,10 @@ if uploaded_files and conta_banco_fixa:
                     st.session_state.skipped_indices = []
                     st.rerun()
 
-    # 4. DOWNLOAD (TRAVADO)
     if not prontos:
         st.info("Aguardando processamento...")
     elif not pendentes:
         st.success("🎉 Tudo mapeado! Exportação liberada.")
         st.download_button("📥 BAIXAR CSV ALTERDATA", pd.DataFrame(prontos).to_csv(index=False, sep=';', encoding='latin1'), "importar.csv", "text/csv", type="primary")
-    else:
-        st.warning(f"🔒 Bloqueado: Ainda restam {len(pendentes)} itens para conciliar.")
 
 conn.close()
