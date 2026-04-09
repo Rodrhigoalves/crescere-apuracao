@@ -29,19 +29,36 @@ def padronizar_texto(texto):
 # 2. MOTOR DE EXTRAÇÃO PDF (SPLIT POR ÂNCORA DATA+TIPO)
 # ---------------------------------------------------------
 def _extrair_nome_final(chunk: str) -> str:
+    # Remove valores monetários e símbolos
     texto = re.sub(r'\d{1,3}(?:\.\d{3})*,\d{2}', '', chunk)
     texto = re.sub(r'R\$|\bS\.A\b\.?', '', texto)
-    texto = re.sub(r'\b(Parcela|Empréstimo|Transferência|Pix|Maquininha|Débito|Crédito|Tarifa)\b',
-                   '', texto, flags=re.IGNORECASE)
     texto = re.sub(r'[|\-]', ' ', texto)
     texto = re.sub(r'\s+', ' ', texto).strip()
+
+    # Palavras que são subcategorias/ruído — não fazem parte do nome
+    RUIDO_TOKENS = {
+        'parcela', 'emprestimo', 'transferencia', 'pix', 'maquininha',
+        'debito', 'credito', 'tarifa', 'maestro', 'elo', 'visa',
+        'mastercard', 'stone', 'instituicao', 'pagamento', 'sa',
+        'saque', 'deposito', 'ted', 'doc', 'boleto', 'cartao'
+    }
+
     tokens = texto.strip().split()
     nome_tokens = []
     for tok in reversed(tokens):
-        if re.match(r'^[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇÀ]{2,}$', tok):
+        tok_norm = unicodedata.normalize('NFKD', tok).encode('ASCII', 'ignore').decode().lower()
+        # Para se encontrar token muito curto ou ruído conhecido
+        if len(tok_norm) < 2 or tok_norm in RUIDO_TOKENS:
+            if nome_tokens:  # já coletou algo, para aqui
+                break
+            continue        # ainda não coletou nada, pula
+        # Aceita tanto MAIÚSCULAS (nome de pessoa) quanto mixed case (ex: "Recebimento vendas")
+        if re.match(r'^[A-Za-záéíóúâêîôûãõçàÁÉÍÓÚÂÊÎÔÛÃÕÇÀ]{2,}$', tok):
             nome_tokens.insert(0, tok)
         else:
-            break
+            if nome_tokens:
+                break
+
     return " ".join(nome_tokens)
 
 @st.cache_data(show_spinner=False)
