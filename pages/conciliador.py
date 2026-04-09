@@ -13,12 +13,12 @@ from ofxparse import OfxParser
 # ---------------------------------------------------------
 def get_connection():
     return mysql.connector.connect(
-        host=st.secrets["mysql"]["host"], # O host DEVE ser crescere-db.mysql.uhserver.com
+        host=st.secrets["mysql"]["host"],
         user=st.secrets["mysql"]["user"],
         password=st.secrets["mysql"]["password"],
         database=st.secrets["mysql"]["database"],
-        use_pure=True,      # Resolve problemas de conexão com MySQL antigo (UOL)
-        ssl_disabled=True   # Desativa SSL para evitar o InterfaceError no Streamlit Cloud
+        use_pure=True,      
+        ssl_disabled=True   
     )
 
 def padronizar_texto(texto):
@@ -27,17 +27,19 @@ def padronizar_texto(texto):
     texto_limpo = re.sub(r'\s+', ' ', texto_sem_acento.upper().strip())
     return texto_limpo
 
+def formatar_moeda(valor):
+    """Formata float para R$ no padrão brasileiro"""
+    return f"R$ {valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+
 # ---------------------------------------------------------
-# 2. MOTOR DE EXTRAÇÃO PDF (SPLIT POR ÂNCORA DATA+TIPO)
+# 2. MOTOR DE EXTRAÇÃO PDF
 # ---------------------------------------------------------
 def _extrair_nome_final(chunk: str) -> str:
-    # Remove valores monetários e símbolos
     texto = re.sub(r'\d{1,3}(?:\.\d{3})*,\d{2}', '', chunk)
     texto = re.sub(r'R\$|\bS\.A\b\.?', '', texto)
     texto = re.sub(r'[|\-]', ' ', texto)
     texto = re.sub(r'\s+', ' ', texto).strip()
 
-    # Palavras que são subcategorias/ruído — não fazem parte do nome
     RUIDO_TOKENS = {
         'parcela', 'emprestimo', 'transferencia', 'pix', 'maquininha',
         'debito', 'credito', 'tarifa', 'maestro', 'elo', 'visa',
@@ -49,12 +51,10 @@ def _extrair_nome_final(chunk: str) -> str:
     nome_tokens = []
     for tok in reversed(tokens):
         tok_norm = unicodedata.normalize('NFKD', tok).encode('ASCII', 'ignore').decode().lower()
-        # Para se encontrar token muito curto ou ruído conhecido
         if len(tok_norm) < 2 or tok_norm in RUIDO_TOKENS:
-            if nome_tokens:  # já coletou algo, para aqui
+            if nome_tokens:  
                 break
-            continue        # ainda não coletou nada, pula
-        # Aceita tanto MAIÚSCULAS (nome de pessoa) quanto mixed case (ex: "Recebimento vendas")
+            continue        
         if re.match(r'^[A-Za-záéíóúâêîôûãõçàÁÉÍÓÚÂÊÎÔÛÃÕÇÀ]{2,}$', tok):
             nome_tokens.insert(0, tok)
         else:
@@ -68,13 +68,11 @@ def extrair_por_recintos(file_bytes):
     texto_completo = ""
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
-            # Extrai palavras agrupando por posição Y para evitar mistura de linhas
             palavras = page.extract_words(x_tolerance=3, y_tolerance=3)
             linhas_dict = {}
             
             for p in palavras:
                 y = round(float(p['top']))
-                # Procura se já existe uma linha próxima na mesma altura (tolerância 3px)
                 encontrou_y = None
                 for key in linhas_dict.keys():
                     if abs(key - y) <= 3:
@@ -86,7 +84,6 @@ def extrair_por_recintos(file_bytes):
                 else:
                     linhas_dict[y] = [p]
 
-            # Reconstrói a página garantindo a ordem de cima pra baixo, esquerda pra direita
             for y_key in sorted(linhas_dict.keys()):
                 linha_ordenada = sorted(linhas_dict[y_key], key=lambda x: x['x0'])
                 texto_linha = " ".join([w['text'] for w in linha_ordenada])
@@ -164,10 +161,14 @@ st.title("🎯 Conciliador Pro - Mesa por Cliques")
 
 conn = get_connection()
 empresas = pd.read_sql("SELECT id, nome FROM empresas", conn)
-col_cfg1, col_cfg2 = st.columns([2, 1])
+
+# --- CONFIGURAÇÕES INICIAIS ---
+col_cfg1, col_cfg2, col_cfg3 = st.columns([2, 1, 1])
 empresa_sel = col_cfg1.selectbox("Empresa / Filial", empresas['nome'])
 id_empresa = int(empresas[empresas['nome'] == empresa_sel]['id'].values[0])
 conta_banco_fixa = col_cfg2.text_input("Conta Banco (Âncora)", value="196")
+# NOVO: Campo para o usuário informar o saldo inicial
+saldo_anterior_informado = col_cfg3.number_input("Saldo Anterior (R$)", value=0.00, step=100.00, format="%.2f")
 
 uploaded_files = st.file_uploader(
     "Arraste seus extratos (PDF ou OFX)", type=["pdf", "ofx"], accept_multiple_files=True
@@ -188,8 +189,27 @@ if uploaded_files and conta_banco_fixa:
             f"SELECT * FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn
         )
 
+    # ---------------------------------------------------------
+    # NOVO: AUDITORIA DE SALDOS
+    # ---------------------------------------------------------
+    st.divider()
+    st.subheader("📊 Auditoria de Leitura (Prova de Caixa)")
+    
+    total_entradas = df_bruto[df_bruto['Sinal'] == '+']['Valor'].sum()
+    total_saidas = df_bruto[df_bruto['Sinal'] == '-']['Valor'].sum()
+    saldo_final_calculado = saldo_anterior_informado + total_entradas - total_saidas
+
+    col_aud1, col_aud2, col_aud3, col_aud4 = st.columns(4)
+    col_aud1.metric("Saldo Anterior", formatar_moeda(saldo_anterior_informado))
+    col_aud2.metric("🟢 Total Lido (Entradas)", formatar_moeda(total_entradas))
+    col_aud3.metric("🔴 Total Lido (Saídas)", formatar_moeda(total_saidas))
+    col_aud4.metric("⚖️ Saldo Final Calculado", formatar_moeda(saldo_final_calculado))
+
+    st.caption("💡 *Dica: Compare o **Saldo Final Calculado** com o saldo impresso no final do seu extrato PDF. Se forem iguais, 100% das linhas foram lidas com sucesso!*")
+    st.divider()
+
     # --- DEBUG ---
-    with st.expander("🔍 Ver dados extraídos do PDF"):
+    with st.expander("🔍 Ver dados brutos extraídos"):
         st.dataframe(df_bruto, use_container_width=True)
 
     # --- CLASSIFICAÇÃO ---
@@ -227,18 +247,14 @@ if uploaded_files and conta_banco_fixa:
 
         if not fila_atual.empty:
             item = fila_atual.iloc[0]
-            st.divider()
             st.subheader("🎓 Mesa de Treinamento por Cliques")
 
-            # --- CABEÇALHO: DATA, VALOR, TIPO ---
             col_i1, col_i2, col_i3, col_i4 = st.columns(4)
             col_i1.metric("📅 Data", item['Data'])
-            valor_fmt = f"R$ {item['Valor']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-            col_i2.metric("💰 Valor", valor_fmt)
+            col_i2.metric("💰 Valor", formatar_moeda(item['Valor']))
             col_i3.metric("↕️ Tipo", "🟢 Entrada" if item['Sinal'] == '+' else "🔴 Saída")
             col_i4.metric("📝 Descrição completa", item['Descricao'][:40] + ("..." if len(item['Descricao']) > 40 else ""))
 
-            # --- PÍLULAS ---
             palavras = item['Descricao'].split()
             st.write("**Selecione as palavras que definem a regra:**")
             selecionadas = st.pills(
@@ -247,7 +263,6 @@ if uploaded_files and conta_banco_fixa:
             termo_final = " ".join(selecionadas) if selecionadas else ""
             st.text_input("Sua Regra será:", value=termo_final, disabled=True)
 
-            # --- LANÇAMENTOS IMPACTADOS ---
             if termo_final:
                 df_impactados = df_p[df_p['Descricao'].str.contains(re.escape(termo_final), na=False)]
                 impacto = len(df_impactados)
@@ -258,7 +273,6 @@ if uploaded_files and conta_banco_fixa:
                         use_container_width=True
                     )
 
-            # --- FORMULÁRIO ---
             with st.form("form_treino"):
                 c1, c2, c3 = st.columns(3)
                 contra = c1.text_input("Contrapartida")
@@ -305,7 +319,7 @@ if uploaded_files and conta_banco_fixa:
         )
 
 # ---------------------------------------------------------
-# 4. PAINEL DE REGRAS CADASTRADAS (DE/PARA)
+# 4. PAINEL DE REGRAS CADASTRADAS
 # ---------------------------------------------------------
 st.divider()
 st.subheader("📚 Regras Cadastradas no Banco de Dados")
@@ -318,7 +332,6 @@ regras_view = pd.read_sql(
 if regras_view.empty:
     st.info("Nenhuma regra cadastrada para esta empresa ainda.")
 else:
-    # --- MODAL DE EDIÇÃO ---
     if st.session_state.editando_regra_id is not None:
         regra_edit = regras_view[regras_view['id'] == st.session_state.editando_regra_id]
         if not regra_edit.empty:
@@ -352,7 +365,6 @@ else:
                         st.session_state.editando_regra_id = None
                         st.rerun()
 
-    # --- TABELA DE REGRAS ---
     header = st.columns([1, 3, 2, 1, 3, 1, 1])
     for col, label in zip(header, ["ID", "Termo Chave", "Conta Contábil", "Sinal", "Histórico", "", ""]):
         col.markdown(f"**{label}**")
