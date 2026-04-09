@@ -13,10 +13,12 @@ from ofxparse import OfxParser
 # ---------------------------------------------------------
 def get_connection():
     return mysql.connector.connect(
-        host=st.secrets["mysql"]["host"],
+        host=st.secrets["mysql"]["host"], # O host DEVE ser crescere-db.mysql.uhserver.com
         user=st.secrets["mysql"]["user"],
         password=st.secrets["mysql"]["password"],
-        database=st.secrets["mysql"]["database"]
+        database=st.secrets["mysql"]["database"],
+        use_pure=True,      # Resolve problemas de conexão com MySQL antigo (UOL)
+        ssl_disabled=True   # Desativa SSL para evitar o InterfaceError no Streamlit Cloud
     )
 
 def padronizar_texto(texto):
@@ -66,8 +68,29 @@ def extrair_por_recintos(file_bytes):
     texto_completo = ""
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
-            t = page.extract_text()
-            if t: texto_completo += t + "\n"
+            # Extrai palavras agrupando por posição Y para evitar mistura de linhas
+            palavras = page.extract_words(x_tolerance=3, y_tolerance=3)
+            linhas_dict = {}
+            
+            for p in palavras:
+                y = round(float(p['top']))
+                # Procura se já existe uma linha próxima na mesma altura (tolerância 3px)
+                encontrou_y = None
+                for key in linhas_dict.keys():
+                    if abs(key - y) <= 3:
+                        encontrou_y = key
+                        break
+                
+                if encontrou_y is not None:
+                    linhas_dict[encontrou_y].append(p)
+                else:
+                    linhas_dict[y] = [p]
+
+            # Reconstrói a página garantindo a ordem de cima pra baixo, esquerda pra direita
+            for y_key in sorted(linhas_dict.keys()):
+                linha_ordenada = sorted(linhas_dict[y_key], key=lambda x: x['x0'])
+                texto_linha = " ".join([w['text'] for w in linha_ordenada])
+                texto_completo += texto_linha + "\n"
 
     RUIDO = ["período:", "página", "saldo anterior", "saldo atual", "saldo final",
              "data tipo descri", "cnpj", "emitido em", "extrato de conta",
