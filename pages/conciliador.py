@@ -24,14 +24,33 @@ def padronizar_texto(texto):
     texto_sem_acento = unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('utf-8')
     texto_limpo = re.sub(r'\s+', ' ', texto_sem_acento.upper().strip())
     return texto_limpo
-    # Adicione temporariamente um botão no topo da app:
-if st.button("🗑️ Limpar Cache"):
-    st.cache_data.clear()
-    st.rerun()
 
 # ---------------------------------------------------------
-# 2. MOTOR DE RECINTOS (ÂNCORA DE MARGEM ESQUERDA)
+# 2. MOTOR DE EXTRAÇÃO PDF (SPLIT POR ÂNCORA DATA+TIPO)
 # ---------------------------------------------------------
+def _extrair_nome_final(chunk: str) -> str:
+    """
+    Remove valores monetários, palavras-chave e sinais do final do chunk.
+    O que sobra é o nome da contraparte da próxima transação.
+    """
+    texto = re.sub(r'\d{1,3}(?:\.\d{3})*,\d{2}', '', chunk)
+    texto = re.sub(r'R\$|\bS\.A\b\.?', '', texto)
+    texto = re.sub(r'\b(Parcela|Empréstimo|Transferência|Pix|Maquininha|Débito|Crédito|Tarifa)\b',
+                   '', texto, flags=re.IGNORECASE)
+    texto = re.sub(r'[|\-]', ' ', texto)
+    texto = re.sub(r'\s+', ' ', texto).strip()
+
+    # Pega apenas as últimas palavras que parecem um nome (maiúsculas)
+    tokens = texto.strip().split()
+    nome_tokens = []
+    for tok in reversed(tokens):
+        if re.match(r'^[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇÀ]{2,}$', tok):
+            nome_tokens.insert(0, tok)
+        else:
+            break  # Para ao encontrar token que não é nome em maiúsculo
+
+    return " ".join(nome_tokens)
+
 @st.cache_data(show_spinner=False)
 def extrair_por_recintos(file_bytes):
     texto_completo = ""
@@ -39,78 +58,61 @@ def extrair_por_recintos(file_bytes):
         for page in pdf.pages:
             t = page.extract_text()
             if t: texto_completo += t + "\n"
-            
-    linhas = texto_completo.split('\n')
-    blocos = []
-    bloco_atual = None
-    data_memoria = ""
-    
-    for linha in linhas:
-        linha = linha.strip()
-        
-        if not linha or any(x in linha.lower() for x in ["período:", "página", "saldo anterior", "saldo atual", "saldo final", "data tipo descri", "cnpj"]):
-            continue
 
-        # --- GATILHO PRIMÁRIO: linha começa com data ou hora ---
-        match_data = re.match(r'^(\d{2}/\d{2}/\d{2,4}|\d{2}:\d{2})', linha)
-        
-        # --- GATILHO SECUNDÁRIO: linha começa com tipo de transação (sem data) ---
-        # Captura casos onde o PDF agrupa múltiplas transações sob a mesma data
-        match_tipo_sem_data = (
-            not match_data and
-            re.match(r'^(Entrada|Saída)\b', linha, re.IGNORECASE) and
-            bloco_atual is not None
-        )
-        
-        if match_data or match_tipo_sem_data:
-            # Empacota o bloco anterior
-            if bloco_atual:
-                blocos.append(bloco_atual)
-            
-            # Atualiza memória de data (só se for o gatilho primário)
-            if match_data:
-                marcador = match_data.group(1)
-                if "/" in marcador:
-                    data_memoria = marcador
-            
-            # Cria nova caixa blindada, herdando a data da memória
-            bloco_atual = {
-                'Data': data_memoria,
-                'linhas_texto': [linha]
-            }
-        else:
-            if bloco_atual:
-                bloco_atual['linhas_texto'].append(linha)
-                
-    if bloco_atual: 
-        blocos.append(bloco_atual)
-        
-    # Fase 2: Processar as caixas fechadas (inalterada)
-    dados_extraidos = []
-    for b in blocos:
-        texto_full = " ".join(b['linhas_texto'])
-        valores = re.findall(r'\b\d{1,3}(?:\.\d{3})*,\d{2}\b', texto_full)
-        
+    # Junta tudo numa string, removendo cabeçalhos conhecidos
+    RUIDO = ["período:", "página", "saldo anterior", "saldo atual", "saldo final",
+             "data tipo descri", "cnpj", "emitido em", "extrato de conta",
+             "dados da conta", "nome documento", "instituição agência",
+             "contraparte stone"]
+    linhas = [l.strip() for l in texto_completo.split('\n')
+              if l.strip() and not any(x in l.lower() for x in RUIDO)]
+    texto = " ".join(linhas)
+
+    # -------------------------------------------------------
+    # ESTRATÉGIA: Split por âncora DATA + TIPO
+    # O texto fica: [CONTRAPARTE_A] DATA TIPO [valor...] [CONTRAPARTE_B] DATA TIPO ...
+    # Cada fatia entre duas âncoras = 1 transação
+    # -------------------------------------------------------
+    ANCHOR = r'(\d{2}/\d{2}/\d{2,4})\s+(Saída|Entrada|Saque|Depósito)'
+    partes = re.split(ANCHOR, texto)
+    # partes = [lixo_inicial, data1, tipo1, corpo1, data2, tipo2, corpo2, ...]
+
+    n = (len(partes) - 1) // 3
+    dados = []
+
+    for i in range(n):
+        data  = partes[i * 3 + 1]
+        tipo  = partes[i * 3 + 2]
+        corpo = partes[i * 3 + 3].strip()
+
+        # A contraparte desta transação está no FINAL do chunk anterior
+        chunk_anterior = partes[(i - 1) * 3 + 3] if i > 0 else partes[0]
+        contraparte = _extrair_nome_final(chunk_anterior)
+
+        # Valores: primeiro = valor da tx, segundo = saldo (descartamos saldo)
+        valores = re.findall(r'\d{1,3}(?:\.\d{3})*,\d{2}', corpo)
         if not valores:
             continue
-            
         valor_num = float(valores[0].replace('.', '').replace(',', '.'))
-        sinal = '+' if 'Entrada' in texto_full else '-' if 'Saída' in texto_full else '-' if ' - R$' in texto_full else '+'
-        
-        desc_limpa = texto_full
-        desc_limpa = re.sub(r'^(\d{2}/\d{2}/\d{2,4}|\d{2}:\d{2})', '', desc_limpa).strip()
-        for v in valores:
-            desc_limpa = desc_limpa.replace(v, '')
-        desc_limpa = re.sub(r'\b(Entrada|Saída|R\$|-)\b', '', desc_limpa, flags=re.IGNORECASE).strip()
-        
-        dados_extraidos.append({
-            'Data': b['Data'],
-            'Descricao': padronizar_texto(desc_limpa),
-            'Valor': abs(valor_num),
-            'Sinal': sinal
+        sinal = '+' if tipo.lower() == 'entrada' else '-'
+
+        # Subcategoria: padrão "Palavra | Palavra" ou "Tarifa"
+        sub = re.search(r'([A-ZÀ-Úa-zà-ú]+(?:\s+[A-ZÀ-Úa-zà-ú]+)*\s*\|\s*[A-ZÀ-Úa-zà-ú]+(?:\s+[A-ZÀ-Úa-zà-ú]+)*|Tarifa)', corpo)
+        subcategoria = sub.group(1).strip() if sub else ""
+
+        # Descrição final = contraparte + subcategoria
+        desc_parts = [p for p in [contraparte, subcategoria] if p]
+        desc = " ".join(desc_parts) if desc_parts else corpo[:60]
+
+        dados.append({
+            'Data':      data,
+            'Descricao': padronizar_texto(desc),
+            'Valor':     abs(valor_num),
+            'Sinal':     sinal
         })
-        
-    return pd.DataFrame(dados_extraidos)
+
+    return pd.DataFrame(dados)
+
 @st.cache_data(show_spinner=False)
 def extrair_texto_ofx(file_bytes):
     dados_extraidos = []
@@ -156,18 +158,12 @@ if uploaded_files and conta_banco_fixa:
                 lista_dfs.append(extrair_texto_ofx(file.getvalue()))
                 
         df_bruto = pd.concat(lista_dfs, ignore_index=True)
-        df_bruto = pd.concat(lista_dfs, ignore_index=True)
 
-# --- DEBUG TEMPORÁRIO ---
-with st.expander("🔍 Ver texto bruto extraído do PDF"):
-    for file in uploaded_files:
-        if file.name.lower().endswith('.pdf'):
-            import pdfplumber, io
-            with pdfplumber.open(io.BytesIO(file.getvalue())) as pdf:
-                for i, page in enumerate(pdf.pages):
-                    st.text(f"=== PÁGINA {i+1} ===")
-                    st.text(page.extract_text())
-# --- FIM DEBUG ---
+        # --- DEBUG TEMPORÁRIO (remova quando estiver OK) ---
+        with st.expander("🔍 Ver dados extraídos do PDF"):
+            st.dataframe(df_bruto)
+        # --- FIM DEBUG ---
+
         regras = pd.read_sql(f"SELECT * FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn)
 
     prontos, pendentes = [], []
