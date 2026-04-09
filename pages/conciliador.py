@@ -44,54 +44,57 @@ def extrair_por_recintos(file_bytes):
     for linha in linhas:
         linha = linha.strip()
         
-        # Filtro Anti-Ruído: Ignora cabeçalhos e rodapés inúteis
         if not linha or any(x in linha.lower() for x in ["período:", "página", "saldo anterior", "saldo atual", "saldo final", "data tipo descri", "cnpj"]):
             continue
-            
-        # O GATILHO INFALÍVEL: A linha começa com uma Data ou Hora na margem esquerda?
-        match_inicio = re.match(r'^(\d{2}/\d{2}/\d{2,4}|\d{2}:\d{2})', linha)
+
+        # --- GATILHO PRIMÁRIO: linha começa com data ou hora ---
+        match_data = re.match(r'^(\d{2}/\d{2}/\d{2,4}|\d{2}:\d{2})', linha)
         
-        if match_inicio:
-            # Se achou uma nova data/hora, empacota o bloco anterior inteiro e guarda
+        # --- GATILHO SECUNDÁRIO: linha começa com tipo de transação (sem data) ---
+        # Captura casos onde o PDF agrupa múltiplas transações sob a mesma data
+        match_tipo_sem_data = (
+            not match_data and
+            re.match(r'^(Entrada|Saída)\b', linha, re.IGNORECASE) and
+            bloco_atual is not None
+        )
+        
+        if match_data or match_tipo_sem_data:
+            # Empacota o bloco anterior
             if bloco_atual:
                 blocos.append(bloco_atual)
             
-            # Atualiza a memória da data (se for só hora, ele usa a data do dia)
-            marcador = match_inicio.group(1)
-            if "/" in marcador:
-                data_memoria = marcador
-                
-            # Cria a nova caixa blindada
+            # Atualiza memória de data (só se for o gatilho primário)
+            if match_data:
+                marcador = match_data.group(1)
+                if "/" in marcador:
+                    data_memoria = marcador
+            
+            # Cria nova caixa blindada, herdando a data da memória
             bloco_atual = {
                 'Data': data_memoria,
                 'linhas_texto': [linha]
             }
         else:
-            # Se não começou com data/hora, é texto flutuante. Pertence à caixa atual.
             if bloco_atual:
                 bloco_atual['linhas_texto'].append(linha)
                 
     if bloco_atual: 
         blocos.append(bloco_atual)
         
-    # Fase 2: Processar as caixas fechadas
+    # Fase 2: Processar as caixas fechadas (inalterada)
     dados_extraidos = []
     for b in blocos:
         texto_full = " ".join(b['linhas_texto'])
         valores = re.findall(r'\b\d{1,3}(?:\.\d{3})*,\d{2}\b', texto_full)
         
-        # Se o bloco não tem nenhum valor monetário, descarta (era sujeira de PDF)
         if not valores:
             continue
             
         valor_num = float(valores[0].replace('.', '').replace(',', '.'))
         sinal = '+' if 'Entrada' in texto_full else '-' if 'Saída' in texto_full else '-' if ' - R$' in texto_full else '+'
         
-        # Limpeza cirúrgica do texto para a Mesa de Treinamento
         desc_limpa = texto_full
-        # Arranca a data/hora do começo
         desc_limpa = re.sub(r'^(\d{2}/\d{2}/\d{2,4}|\d{2}:\d{2})', '', desc_limpa).strip()
-        # Arranca os valores e sinais monetários
         for v in valores:
             desc_limpa = desc_limpa.replace(v, '')
         desc_limpa = re.sub(r'\b(Entrada|Saída|R\$|-)\b', '', desc_limpa, flags=re.IGNORECASE).strip()
@@ -104,7 +107,6 @@ def extrair_por_recintos(file_bytes):
         })
         
     return pd.DataFrame(dados_extraidos)
-
 @st.cache_data(show_spinner=False)
 def extrair_texto_ofx(file_bytes):
     dados_extraidos = []
