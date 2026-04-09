@@ -27,7 +27,7 @@ def padronizar_texto(texto):
     return texto_limpo
 
 # ---------------------------------------------------------
-# 2. MOTORES DE LEITURA (PDF E OFX)
+# 2. MOTOR DE LEITURA (PDF COM ARQUITETURA DE ÍMÃ E OFX)
 # ---------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def extrair_texto_pdf(file_bytes):
@@ -39,38 +39,70 @@ def extrair_texto_pdf(file_bytes):
             
     linhas_brutas = texto_completo.split('\n')
     dados_extraidos = []
+    
     transacao_atual = None
+    buffer_texto_topo = [] # Guarda o texto que vem ANTES do valor (O Teto)
+    data_memoria = ""      # Lembra a última data vista para transações sequenciais no mesmo dia
     
     for linha in linhas_brutas:
         linha = linha.strip()
         if not linha: continue
         
+        # ZONA PROIBIDA: Ignora cabeçalhos, rodapés e ruídos clássicos do banco
+        linha_lower = linha.lower()
+        if any(x in linha_lower for x in ["período:", "página", "saldo anterior", "saldo final", "stone institui", "data tipo descri", "cnpj"]):
+            continue
+            
         tem_data = re.search(r'(\d{2}/\d{2}/\d{2,4})', linha)
         tem_hora = re.search(r'(\d{2}:\d{2})', linha)
         
-        if tem_data or tem_hora:
-            if transacao_atual: dados_extraidos.append(transacao_atual)
+        # O ÍMÃ: Uma linha só é o núcleo da transação se tiver um valor financeiro (ex: 1.500,00)
+        valores = re.findall(r'\b\d{1,3}(?:\.\d{3})*,\d{2}\b', linha)
+        
+        if tem_data:
+            data_memoria = tem_data.group(1)
             
-            data = tem_data.group(1) if tem_data else (transacao_atual['Data'] if transacao_atual else "")
-            sinal = '+' if 'Entrada' in linha else '-' if 'Saída' in linha else '-' if ' - R$' in linha else '+'
-            
-            valores = re.findall(r'\d{1,3}(?:\.\d{3})*,\d{2}', linha)
-            valor_num = float(valores[0].replace('.', '').replace(',', '.')) if valores else 0.0
-            
-            desc = linha
-            if tem_data: desc = desc.replace(tem_data.group(0), '')
-            if tem_hora: desc = desc.replace(tem_hora.group(0), '')
-            for v in valores: desc = desc.replace(v, '')
-            desc = desc.replace('Entrada', '').replace('Saída', '').replace('R$', '').replace('-', '').strip()
-            
-            transacao_atual = {'Data': data, 'Descricao': padronizar_texto(desc), 'Valor': abs(valor_num), 'Sinal': sinal}
-        else:
-            if transacao_atual and len(linha) > 2 and "Saldo" not in linha and "Página" not in linha:
-                complemento = linha.replace('R$', '').strip()
-                transacao_atual['Descricao'] += f" {padronizar_texto(complemento)}"
-                transacao_atual['Descricao'] = re.sub(r'\s+', ' ', transacao_atual['Descricao'])
+        if valores:
+            # Encontrou um valor! Hora de fechar a transação anterior e criar uma nova.
+            if transacao_atual:
+                transacao_atual['Descricao'] = padronizar_texto(transacao_atual['Descricao'])
+                dados_extraidos.append(transacao_atual)
                 
-    if transacao_atual: dados_extraidos.append(transacao_atual)
+            sinal = '+' if 'Entrada' in linha else '-' if 'Saída' in linha else '-' if ' - R$' in linha else '+'
+            valor_num = float(valores[0].replace('.', '').replace(',', '.'))
+            
+            # Limpa as âncoras para sobrar só o texto útil
+            desc_linha = linha
+            if tem_data: desc_linha = desc_linha.replace(tem_data.group(0), '')
+            if tem_hora: desc_linha = desc_linha.replace(tem_hora.group(0), '')
+            for v in valores: desc_linha = desc_linha.replace(v, '')
+            desc_linha = re.sub(r'\b(Entrada|Saída|R\$|-)\b', '', desc_linha, flags=re.IGNORECASE).strip()
+            
+            # A nova transação nasce unindo o Teto (buffer) com a linha atual
+            desc_completa = " ".join(buffer_texto_topo) + " " + desc_linha
+            buffer_texto_topo = [] # Esvazia o teto, pois já foi usado
+            
+            transacao_atual = {
+                'Data': data_memoria,
+                'Descricao': desc_completa,
+                'Valor': abs(valor_num),
+                'Sinal': sinal
+            }
+        else:
+            # SE NÃO TEM VALOR, é uma descrição flutuante.
+            # Se já temos uma transação aberta, gruda no "Chão" dela (abaixo).
+            # Se não, guarda no "Teto" da próxima que vier.
+            texto_limpo = linha.replace('R$', '').strip()
+            if transacao_atual:
+                transacao_atual['Descricao'] += " " + texto_limpo
+            else:
+                buffer_texto_topo.append(texto_limpo)
+                
+    # Salva a última transação lida ao final do arquivo
+    if transacao_atual:
+        transacao_atual['Descricao'] = padronizar_texto(transacao_atual['Descricao'])
+        dados_extraidos.append(transacao_atual)
+        
     return pd.DataFrame(dados_extraidos)
 
 @st.cache_data(show_spinner=False)
@@ -101,7 +133,6 @@ st.title("🎯 Conciliador de Extratos Pro (Fuzzy AI)")
 
 col_cfg1, col_cfg2 = st.columns([2, 1])
 try:
-    # CONEXÃO 1: Apenas para carregar as empresas. Abre e fecha rápido.
     conn_setup = get_connection()
     empresas = pd.read_sql("SELECT id, nome FROM empresas", conn_setup)
     conn_setup.close()
@@ -110,13 +141,13 @@ try:
     id_empresa = int(empresas[empresas['nome'] == empresa_sel]['id'].values[0])
     conta_banco_fixa = col_cfg2.text_input("Conta Contábil do Banco (Âncora)", value="196")
 except Exception as e:
-    st.error(f"Erro ao carregar dados iniciais: {e}")
+    st.error(f"Erro ao carregar dados iniciais. Verifique a conexão.")
     st.stop()
 
 uploaded_files = st.file_uploader("Suba os arquivos (PDF ou OFX)", type=["pdf", "ofx"], accept_multiple_files=True)
 
 if uploaded_files and conta_banco_fixa:
-    with st.spinner("Lendo arquivos e calculando similaridade neural..."):
+    with st.spinner("Lendo arquivos, separando zonas e calculando similaridade neural..."):
         
         lista_dfs = []
         for file in uploaded_files:
@@ -128,7 +159,6 @@ if uploaded_files and conta_banco_fixa:
         
         df_bruto = pd.concat(lista_dfs, ignore_index=True)
         
-        # CONEXÃO 2: O arquivo já foi processado. Agora abrimos para buscar as regras.
         conn_regras = get_connection()
         regras = pd.read_sql(f"SELECT * FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn_regras)
         conn_regras.close()
@@ -136,7 +166,6 @@ if uploaded_files and conta_banco_fixa:
     prontos_alterdata = []
     pendentes_treinamento = []
 
-    # Motor de Classificação com Inteligência FUZZY
     for _, row in df_bruto.iterrows():
         match_encontrado = False
         ignorar_linha = False
@@ -198,7 +227,7 @@ if uploaded_files and conta_banco_fixa:
         st.subheader(f"🎓 Treinando: {top['Qtd']} operações agrupadas")
         
         with st.form("form_treinamento", clear_on_submit=True):
-            termo = st.text_input("Termo Chave (Corte a sujeira)", value=top['Descricao'])
+            termo = st.text_input("Termo Chave (Corte a sujeira e deixe a raiz)", value=top['Descricao'])
             st.caption(f"Operação lida como **{'🟢 ENTRADA' if top['Sinal'] == '+' else '🔴 SAÍDA'}**. Conta Fixa: {conta_banco_fixa}")
             
             c1, c2, c3 = st.columns([1, 1, 2])
@@ -214,7 +243,6 @@ if uploaded_files and conta_banco_fixa:
                 conta_final = 'IGNORAR' if submit_lixo else conta
                 termo_para_banco = padronizar_texto(termo)
                 
-                # CONEXÃO 3: Abre só para salvar a regra e já fecha
                 conn_save = get_connection()
                 cursor = conn_save.cursor()
                 cursor.execute("""INSERT INTO tb_extratos_regras 
@@ -230,7 +258,6 @@ if uploaded_files and conta_banco_fixa:
     # ---------------------------------------------------------
     st.divider()
     with st.expander("⚙️ Gerenciar Banco de Inteligência (Ver, Editar ou Excluir)"):
-        # CONEXÃO 4: Abre só para popular a tabela do gerenciador
         conn_view = get_connection()
         regras_view = pd.read_sql(f"SELECT id, termo_chave, sinal_esperado, conta_contabil as contrapartida, historico_padrao FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn_view)
         conn_view.close()
