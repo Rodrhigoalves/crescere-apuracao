@@ -264,7 +264,7 @@ def extrair_pdf_itau(file_bytes):
             ano = str(pd.Timestamp.now().year)
             
             for page in pdf.pages:
-                if terminou_leitura: break # Para de ler se já encontrou o Saldo Final
+                if terminou_leitura: break
                 
                 texto = page.extract_text()
                 if not texto: continue
@@ -284,7 +284,7 @@ def extrair_pdf_itau(file_bytes):
                         continue
                     
                     if in_movimento:
-                        # Hard Stop: Encontrou "Saldo Final", desliga a leitura e ignora o resto
+                        # Hard Stop
                         if 'SALDO FINAL' in linha_norm or 'SDO FINAL' in linha_norm:
                             terminou_leitura = True
                             break
@@ -438,11 +438,12 @@ def extrair_texto_ofx(file_bytes):
     return pd.DataFrame(dados_extraidos)
 
 # ==========================================
-# MOTOR ESPECÍFICO BANCO DO BRASIL (UNIÃO ESTRITA)
+# MOTOR ESPECÍFICO BANCO DO BRASIL (SOLUÇÃO DA 3ª COLUNA VIRTUAL)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
     try:
+        # Leitura inicial bruta
         if nome_arquivo.lower().endswith('.csv'):
             try:
                 df_full = pd.read_csv(io.BytesIO(file_bytes), sep=',', header=None, dtype=str)
@@ -453,10 +454,11 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         else:
             df_full = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
         
+        # Caça a linha que tem o cabeçalho correto
         header_idx = -1
         for idx, row in df_full.iterrows():
             row_str = padronizar_texto(" ".join([str(x) for x in row.values]))
-            if 'DATA' in row_str and 'HISTORICO' in row_str and 'VALOR' in row_str:
+            if 'DATA' in row_str and 'VALOR' in row_str:
                 header_idx = idx
                 break
         
@@ -464,59 +466,86 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
             logging.error("Cabeçalho não encontrado na planilha BB.")
             return pd.DataFrame()
 
+        # Isola os dados e limpa os nomes das colunas com precisão
         df_raw = df_full.iloc[header_idx+1:].copy()
-        df_raw.columns = [str(c).strip() for c in df_full.iloc[header_idx].values]
+        colunas_limpas = [str(c).strip().upper() for c in df_full.iloc[header_idx].values]
+        df_raw.columns = colunas_limpas
         
         dados = []
-        # Caçador agressivo: pega parte do nome da coluna para evitar falhas por espaços em branco extras
-        col_data = next((c for c in df_raw.columns if 'DATA' in str(c).upper()), None)
-        col_hist = next((c for c in df_raw.columns if 'HIST' in str(c).upper()), None)
-        col_detalhe = next((c for c in df_raw.columns if 'DETALHAMENTO' in str(c).upper() or 'COMPLEMENTO' in str(c).upper()), None)
-        col_valor = next((c for c in df_raw.columns if 'VALOR' in str(c).upper()), None)
-        col_sinal = next((c for c in df_raw.columns if 'INF' in str(c).upper()), None)
+        
+        # 1. Encontra a coluna DATA
+        col_data = next((c for c in colunas_limpas if 'DATA' in c), None)
+        
+        # 2. Encontra a coluna HISTORICO (EXCLUINDO o COD. HISTORICO)
+        col_hist = 'HISTORICO' if 'HISTORICO' in colunas_limpas else ('HISTÓRICO' if 'HISTÓRICO' in colunas_limpas else None)
+        # Fallback de segurança caso esteja escrito diferente, mas não pegue "COD"
+        if not col_hist:
+            col_hist = next((c for c in colunas_limpas if 'HIST' in c and 'COD' not in c), None)
 
-        if col_hist and col_valor and col_data:
+        # 3. Encontra a coluna DETALHAMENTO
+        col_detalhe = next((c for c in colunas_limpas if 'DETALHAMENTO' in c or 'COMPLEMENTO' in c), None)
+        
+        # 4. Encontra a coluna VALOR
+        col_valor = next((c for c in colunas_limpas if 'VALOR' in c), None)
+        
+        # 5. Encontra a coluna INF (SINAL)
+        col_sinal = next((c for c in colunas_limpas if 'INF' in c), None)
+
+        if col_data and col_valor:
             for _, row in df_raw.iterrows():
                 data_raw = str(row[col_data]).strip()
                 if not re.match(r'\d{2}/\d{2}/\d{2,4}', data_raw):
                     continue 
                 
-                # Extrai Histórico
-                hist_raw = str(row[col_hist]).strip() if pd.notna(row[col_hist]) else ""
-                if hist_raw.lower() == 'nan': hist_raw = ""
+                # --- INÍCIO DA MÁGICA DA 3ª COLUNA VIRTUAL ---
+                # Extrai Histórico Limpo
+                texto_historico = str(row[col_hist]).strip() if (col_hist and pd.notna(row[col_hist])) else ""
+                if texto_historico.lower() == 'nan': texto_historico = ""
 
-                # Extrai Detalhamento
-                detalhe_raw = ""
-                if col_detalhe and pd.notna(row[col_detalhe]):
-                    detalhe_raw = str(row[col_detalhe]).strip()
-                    if detalhe_raw.lower() == 'nan': detalhe_raw = ""
+                # Extrai Detalhamento Limpo
+                texto_detalhe = str(row[col_detalhe]).strip() if (col_detalhe and pd.notna(row[col_detalhe])) else ""
+                if texto_detalhe.lower() == 'nan': texto_detalhe = ""
                 
-                # Regra estrita de união
-                full_desc = f"{hist_raw} {detalhe_raw}".strip()
-                # Remove todos os números
-                desc_sem_numeros = re.sub(r'\d+', '', full_desc)
-                # Remove caracteres especiais preservando espaços
-                desc_sem_especiais = re.sub(r'[^\w\s]', ' ', desc_sem_numeros) 
-                # Remove múltiplos espaços
-                desc_limpa = padronizar_texto(re.sub(r'\s+', ' ', desc_sem_especiais).strip())
+                # Cria a 3ª Coluna Unida
+                terceira_coluna_unida = f"{texto_historico} {texto_detalhe}".strip()
+                
+                # Expurga TODOS os números da união
+                descricao_sem_numeros = re.sub(r'\d+', '', terceira_coluna_unida)
+                # Expurga caracteres especiais
+                descricao_sem_especiais = re.sub(r'[^\w\s]', ' ', descricao_sem_numeros) 
+                # Padroniza espaçamento
+                descricao_final = padronizar_texto(re.sub(r'\s+', ' ', descricao_sem_especiais).strip())
+                # --- FIM DA MÁGICA ---
                     
+                # Leitura de Valor (blindado contra pontos e vírgulas)
                 valor_str = str(row[col_valor]).replace('R$', '').strip()
                 if pd.isna(row[col_valor]) or valor_str.lower() == 'nan' or valor_str == '':
                     continue
                     
                 try:
-                    valor_num = float(valor_str.replace('.', '').replace(',', '.'))
+                    if ',' in valor_str:
+                        valor_num = float(valor_str.replace('.', '').replace(',', '.'))
+                    else:
+                        valor_num = float(valor_str)
                 except ValueError:
                     continue
                 
+                # Leitura de Sinal rigorosa
+                sinal = '+'
                 if col_sinal and pd.notna(row[col_sinal]):
-                    sinal = '+' if str(row[col_sinal]).strip().upper() == 'C' else '-'
+                    marca_sinal = str(row[col_sinal]).strip().upper().replace('"', '')
+                    if marca_sinal == 'C' or marca_sinal == '+':
+                        sinal = '+'
+                    elif marca_sinal == 'D' or marca_sinal == '-':
+                        sinal = '-'
+                    else:
+                        sinal = '+' if valor_num >= 0 else '-'
                 else:
                     sinal = '+' if valor_num >= 0 else '-'
                     
                 dados.append({
                     'Data': data_raw,
-                    'Descricao': desc_limpa,
+                    'Descricao': descricao_final,
                     'Valor': abs(valor_num),
                     'Sinal': sinal
                 })
@@ -630,7 +659,6 @@ if not conta_banco_fixa:
 
 col_cfg2.text_input("Conta Banco (Âncora)", value=conta_banco_fixa, disabled=True)
 
-# Nova Configuração: Saldo Anterior e Saldo Final Esperado
 col_saldos1, col_saldos2 = col_cfg3.columns(2)
 saldo_anterior_informado = col_saldos1.number_input("Saldo Anterior (R$)", value=0.00, step=100.00, format="%.2f")
 saldo_final_informado = col_saldos2.number_input("Saldo Final (Opcional)", value=0.00, step=100.00, format="%.2f", help="Informe o saldo final real do extrato para checagem do sistema.")
@@ -713,20 +741,17 @@ if not st.session_state.df_bruto.empty:
             
             encontrou_pista = False
             
-            # 1. Procura valor exato que foi lido (Pode ser duplicado ou lido a mais)
             suspeitos_bruto = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == diferenca]
             if not suspeitos_bruto.empty:
                 st.info(f"💡 **PISTA 1:** Encontrei {len(suspeitos_bruto)} lançamento(s) na fila com o valor exato da diferença. Pode ser que um deles devesse ter sido ignorado ou o sinal esteja errado.")
                 encontrou_pista = True
                 
-            # 2. Procura metade do valor (Se o sinal estiver invertido, a diferença é o dobro do valor)
             metade = round(diferenca / 2, 2)
             suspeitos_metade = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == metade]
             if not suspeitos_metade.empty:
                 st.info(f"💡 **PISTA 2:** Há um lançamento na fila de **{formatar_moeda(metade)}**. Se o sinal dele estiver invertido (Entrada no lugar de Saída ou vice-versa), ele gera exatamente essa diferença!")
                 encontrou_pista = True
 
-            # 3. Procura o valor no lixo (Pode ser que o sistema ignorou algo importante)
             str_diff_br = f"{diferenca:.2f}".replace('.', ',')
             suspeitos_lixo = [l for l in st.session_state.criticas if str_diff_br in l]
             if suspeitos_lixo:
@@ -734,11 +759,11 @@ if not st.session_state.df_bruto.empty:
                 encontrou_pista = True
 
             if not encontrou_pista:
-                st.info("💡 **PISTA:** Não encontrei um único culpado exato. Essa diferença deve ser a soma de múltiplos lançamentos que faltaram ou vieram a mais.")
+                st.info("💡 **PISTA:** Não encontrei um culpado exato. Essa diferença deve ser a soma de múltiplos lançamentos que faltaram ou vieram a mais.")
         else:
-            st.success("✅ **O Saldo Final Calculado bateu perfeitamente com o Saldo Final Informado! Pode seguir tranquilo.**")
+            st.success("✅ **O Saldo Final Calculado bateu perfeitamente com o Saldo Final Informado!**")
 
-    # PAINEL OCULTO DE AUDITORIA (Conforme solicitado)
+    # PAINEL OCULTO DE AUDITORIA
     with st.expander("🔍 Auditoria: Ver tudo que foi Lido e Ignorado (Bruto)"):
         st.markdown("### 📊 Dados Lidos e Capturados")
         st.dataframe(st.session_state.df_bruto, use_container_width=True)
