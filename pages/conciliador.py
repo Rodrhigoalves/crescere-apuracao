@@ -509,11 +509,10 @@ if not st.session_state.df_bruto.empty:
     # MESA DE TREINAMENTO
     # =========================================================================
     df_p = st.session_state.pendentes
-    if not df_p.empty:
-        fila = df_p[~df_p['idx_original'].isin(st.session_state.skipped_indices)]
+    fila = df_p[~df_p['idx_original'].isin(st.session_state.skipped_indices)] if not df_p.empty else pd.DataFrame()
 
-        if not fila.empty:
-            st.subheader("🎓 Mesa de Treinamento")
+    if not fila.empty:
+        st.subheader("🎓 Mesa de Treinamento")
 
             # -----------------------------------------------------------------
             # FILTRO DE BUSCA NA FILA
