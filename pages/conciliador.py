@@ -98,7 +98,7 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
             termo_padrao = padronizar_texto(r['termo_chave'])
             palavras_chave = termo_padrao.split()
             
-            # Verifica se TODAS as palavras da regra estão contidas na descrição
+            # Verifica se TODAS as palavras da regra estão contidas na descrição (AND logic)
             contem_todas = all(palavra in row['Descricao'] for palavra in palavras_chave)
             
             if (contem_todas or fuzz.ratio(termo_padrao, row['Descricao']) >= 85) and r['sinal_esperado'] == row['Sinal']:
@@ -514,171 +514,171 @@ if not st.session_state.df_bruto.empty:
     if not fila.empty:
         st.subheader("🎓 Mesa de Treinamento")
 
-            # -----------------------------------------------------------------
-            # FILTRO DE BUSCA NA FILA
-            # Opcional — deixe vazio para seguir a ordem natural dos lançamentos.
-            # Use quando precisar tratar um caso específico antes de cadastrar
-            # a regra genérica (ex: buscar "PAULO SERGIO" antes de cadastrar "PIX").
-            # -----------------------------------------------------------------
-            col_busca, col_limpar, col_total = st.columns([3, 1, 1])
+        # -----------------------------------------------------------------
+        # FILTRO DE BUSCA NA FILA
+        # Opcional — deixe vazio para seguir a ordem natural dos lançamentos.
+        # Use quando precisar tratar um caso específico antes de cadastrar
+        # a regra genérica (ex: buscar "PAULO SERGIO" antes de cadastrar "PIX").
+        # -----------------------------------------------------------------
+        col_busca, col_limpar, col_total = st.columns([3, 1, 1])
 
-            busca_fila = col_busca.text_input(
-                "🔍 Buscar na fila (opcional)",
-                value=st.session_state.busca_fila,
-                placeholder="Ex: PAULO SERGIO, NATURAL ALEM...",
-                key="input_busca_fila"
-            )
-            st.session_state.busca_fila = busca_fila
+        busca_fila = col_busca.text_input(
+            "🔍 Buscar na fila (opcional)",
+            value=st.session_state.busca_fila,
+            placeholder="Ex: PAULO SERGIO, NATURAL ALEM...",
+            key="input_busca_fila"
+        )
+        st.session_state.busca_fila = busca_fila
 
-            # Botão para limpar a busca sem precisar apagar manualmente
-            if col_limpar.button("✖ Limpar busca", disabled=not busca_fila):
-                st.session_state.busca_fila = ''
-                st.rerun()
+        # Botão para limpar a busca sem precisar apagar manualmente
+        if col_limpar.button("✖ Limpar busca", disabled=not busca_fila):
+            st.session_state.busca_fila = ''
+            st.rerun()
 
-            fila_filtrada = fila
-            if busca_fila.strip():
-                termo_busca   = padronizar_texto(busca_fila.strip())
-                fila_filtrada = fila[fila['Descricao'].str.contains(re.escape(termo_busca), case=False, na=False)]
+        fila_filtrada = fila
+        if busca_fila.strip():
+            termo_busca   = padronizar_texto(busca_fila.strip())
+            fila_filtrada = fila[fila['Descricao'].str.contains(re.escape(termo_busca), case=False, na=False)]
 
-            col_total.metric(
-                "📋 Pendentes",
-                f"{len(fila_filtrada)} / {len(fila)}" if busca_fila.strip() else len(fila)
-            )
+        col_total.metric(
+            "📋 Pendentes",
+            f"{len(fila_filtrada)} / {len(fila)}" if busca_fila.strip() else len(fila)
+        )
 
-            if fila_filtrada.empty:
-                st.warning(f"Nenhum lançamento pendente encontrado para **'{busca_fila}'**. Limpe a busca para continuar.")
-            else:
-                item = fila_filtrada.iloc[0]
+        if fila_filtrada.empty:
+            st.warning(f"Nenhum lançamento pendente encontrado para **'{busca_fila}'**. Limpe a busca para continuar.")
+        else:
+            item = fila_filtrada.iloc[0]
 
-                m1, m2, m3, m4, m5 = st.columns([1, 1, 1, 3, 1])
-                m1.metric("📅 Data",  item['Data'])
-                m2.metric("💰 Valor", formatar_moeda(item['Valor']))
-                m3.metric("↕️ Tipo",  "🟢 Entrada" if item['Sinal'] == '+' else "🔴 Saída")
-                m4.write(f"**Descrição Extraída:** {item['Descricao']}")
+            m1, m2, m3, m4, m5 = st.columns([1, 1, 1, 3, 1])
+            m1.metric("📅 Data",  item['Data'])
+            m2.metric("💰 Valor", formatar_moeda(item['Valor']))
+            m3.metric("↕️ Tipo",  "🟢 Entrada" if item['Sinal'] == '+' else "🔴 Saída")
+            m4.write(f"**Descrição Extraída:** {item['Descricao']}")
 
-                # BOTÃO DESFAZER
-                if not undo_manager.is_empty():
-                    if m5.button("↩️ Desfazer Ação", type="primary"):
-                        ultima_acao = undo_manager.pop()
-                        conn = None
-                        try:
-                            conn = get_connection()
-                            cursor = conn.cursor()
-                            t, d   = ultima_acao['type'], ultima_acao['data']
+            # BOTÃO DESFAZER
+            if not undo_manager.is_empty():
+                if m5.button("↩️ Desfazer Ação", type="primary"):
+                    ultima_acao = undo_manager.pop()
+                    conn = None
+                    try:
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        t, d   = ultima_acao['type'], ultima_acao['data']
 
-                            if t in ('salvar_regra', 'ignorar_lixo'):
-                                cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (d['id_regra'],))
-                                conn.commit()
-                                aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                                st.toast("Ação desfeita! Lançamento voltou para a fila.")
-                            elif t == 'pular':
-                                if d['idx'] in st.session_state.skipped_indices:
-                                    st.session_state.skipped_indices.remove(d['idx'])
-                                st.toast("Pulo desfeito! Lançamento voltou para a fila.")
-                        except mysql.connector.Error as err: st.error(f"Erro ao desfazer: {err}")
-                        finally:
-                            if conn: conn.close()
-                        st.rerun()
+                        if t in ('salvar_regra', 'ignorar_lixo'):
+                            cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (d['id_regra'],))
+                            conn.commit()
+                            aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                            st.toast("Ação desfeita! Lançamento voltou para a fila.")
+                        elif t == 'pular':
+                            if d['idx'] in st.session_state.skipped_indices:
+                                st.session_state.skipped_indices.remove(d['idx'])
+                            st.toast("Pulo desfeito! Lançamento voltou para a fila.")
+                    except mysql.connector.Error as err: st.error(f"Erro ao desfazer: {err}")
+                    finally:
+                        if conn: conn.close()
+                    st.rerun()
 
-                palavras_desc = item['Descricao'].split()
-                selecionadas  = st.pills("Selecione os termos-chave:", palavras_desc, selection_mode="multi")
-                termo_final = " ".join(selecionadas) if selecionadas else item['Descricao']
+            palavras_desc = item['Descricao'].split()
+            selecionadas  = st.pills("Selecione os termos-chave:", palavras_desc, selection_mode="multi")
+            termo_final = " ".join(selecionadas) if selecionadas else item['Descricao']
 
-                # PAINEL DE IMPACTO — busca por cada palavra individualmente (lógica AND)
-                if termo_final:
-                    palavras_busca = termo_final.split()
-                    
-                    # Filtra linhas que contenham TODAS as palavras selecionadas
-                    mascara = pd.Series([True] * len(df_p), index=df_p.index)
-                    for palavra in palavras_busca:
-                        mascara &= df_p['Descricao'].str.contains(re.escape(palavra), case=False, na=False)
-                    
-                    df_impactados = df_p[mascara]
-                    impacto = len(df_impactados)
-                    
-                    st.caption(f"A regra atuará sobre o termo: **{termo_final}**")
-                    
-                    if impacto > 0:
-                        st.info(f"💡 Esta regra resolverá **{impacto}** lançamento(s) desta fila.")
-                        with st.expander(f"📋 Ver lançamentos impactados ({impacto})", expanded=False):
-                            st.dataframe(
-                                df_impactados[['Data', 'Descricao', 'Valor', 'Sinal']].reset_index(drop=True),
-                                use_container_width=True
-                            )
+            # PAINEL DE IMPACTO — busca por cada palavra individualmente (lógica AND)
+            if termo_final:
+                palavras_busca = termo_final.split()
+                
+                # Filtra linhas que contenham TODAS as palavras selecionadas
+                mascara = pd.Series([True] * len(df_p), index=df_p.index)
+                for palavra in palavras_busca:
+                    mascara &= df_p['Descricao'].str.contains(re.escape(palavra), case=False, na=False)
+                
+                df_impactados = df_p[mascara]
+                impacto = len(df_impactados)
+                
+                st.caption(f"A regra atuará sobre o termo: **{termo_final}**")
+                
+                if impacto > 0:
+                    st.info(f"💡 Esta regra resolverá **{impacto}** lançamento(s) desta fila.")
+                    with st.expander(f"📋 Ver lançamentos impactados ({impacto})", expanded=False):
+                        st.dataframe(
+                            df_impactados[['Data', 'Descricao', 'Valor', 'Sinal']].reset_index(drop=True),
+                            use_container_width=True
+                        )
 
-                # FORMULÁRIO DE CADASTRO
-                with st.form("form_treino"):
-                    f1, f2, f3 = st.columns(3)
-                    contra = f1.text_input("Contrapartida (Conta Contábil)")
-                    cod_h  = f2.text_input("Cód. Hist. Alterdata (Opcional)")
-                    txt_h  = f3.text_input("Histórico Padrão (Opcional)")
-                    b1, b2, b3, b4 = st.columns(4)
+            # FORMULÁRIO DE CADASTRO
+            with st.form("form_treino"):
+                f1, f2, f3 = st.columns(3)
+                contra = f1.text_input("Contrapartida (Conta Contábil)")
+                cod_h  = f2.text_input("Cód. Hist. Alterdata (Opcional)")
+                txt_h  = f3.text_input("Histórico Padrão (Opcional)")
+                b1, b2, b3, b4 = st.columns(4)
 
-                    if b1.form_submit_button("✅ Salvar Regra"):
-                        if contra:
-                            conn = None
-                            try:
-                                conn = get_connection()
-                                cursor = conn.cursor()
-                                cursor.execute(
-                                    "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil, cod_historico_erp, historico_padrao) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                                    (id_empresa, banco_selecionado, termo_final, item['Sinal'], contra, cod_h, txt_h)
-                                )
-                                id_inserido = cursor.lastrowid
-                                conn.commit()
-                                undo_manager.push('salvar_regra', {'id_regra': id_inserido})
-                                aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                                st.success("Regra salva!")
-                            except mysql.connector.Error as err: st.error(f"Erro ao salvar regra: {err}")
-                            finally:
-                                if conn: conn.close()
-                            st.rerun()
-                        else:
-                            st.error("Preencha a conta de contrapartida.")
-
-                    if b2.form_submit_button("🗑️ Ignorar Lixo"):
+                if b1.form_submit_button("✅ Salvar Regra"):
+                    if contra:
                         conn = None
                         try:
                             conn = get_connection()
                             cursor = conn.cursor()
                             cursor.execute(
-                                "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil) VALUES (%s,%s,%s,%s,%s)",
-                                (id_empresa, banco_selecionado, termo_final, item['Sinal'], 'IGNORAR')
+                                "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil, cod_historico_erp, historico_padrao) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                                (id_empresa, banco_selecionado, termo_final, item['Sinal'], contra, cod_h, txt_h)
                             )
                             id_inserido = cursor.lastrowid
                             conn.commit()
-                            undo_manager.push('ignorar_lixo', {'id_regra': id_inserido})
+                            undo_manager.push('salvar_regra', {'id_regra': id_inserido})
                             aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                            st.success("Lançamento ignorado! Saldo atualizado.")
-                        except mysql.connector.Error as err: st.error(f"Erro ao ignorar: {err}")
+                            st.success("Regra salva!")
+                        except mysql.connector.Error as err: st.error(f"Erro ao salvar regra: {err}")
                         finally:
                             if conn: conn.close()
                         st.rerun()
+                    else:
+                        st.error("Preencha a conta de contrapartida.")
 
-                    if b3.form_submit_button("⏭️ Pular"):
-                        st.session_state.skipped_indices.append(item['idx_original'])
-                        undo_manager.push('pular', {'idx': item['idx_original']})
-                        st.info("Lançamento pulado.")
-                        st.rerun()
+                if b2.form_submit_button("🗑️ Ignorar Lixo"):
+                    conn = None
+                    try:
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil) VALUES (%s,%s,%s,%s,%s)",
+                            (id_empresa, banco_selecionado, termo_final, item['Sinal'], 'IGNORAR')
+                        )
+                        id_inserido = cursor.lastrowid
+                        conn.commit()
+                        undo_manager.push('ignorar_lixo', {'id_regra': id_inserido})
+                        aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                        st.success("Lançamento ignorado! Saldo atualizado.")
+                    except mysql.connector.Error as err: st.error(f"Erro ao ignorar: {err}")
+                    finally:
+                        if conn: conn.close()
+                    st.rerun()
 
-                    if b4.form_submit_button("🔄 Resetar Fila"):
-                        st.session_state.skipped_indices = []
-                        st.session_state.busca_fila      = ''
-                        undo_manager.clear()
-                        st.info("Fila de pulados, busca e histórico de desfazer resetados.")
-                        st.rerun()
+                if b3.form_submit_button("⏭️ Pular"):
+                    st.session_state.skipped_indices.append(item['idx_original'])
+                    undo_manager.push('pular', {'idx': item['idx_original']})
+                    st.info("Lançamento pulado.")
+                    st.rerun()
 
-        # SE A FILA ESTIVER VAZIA, MOSTRA O EXPORT
-        else:
-            st.success("🎉 Todos os lançamentos pendentes foram mapeados! Exportação liberada.")
-            if st.session_state.prontos:
-                df_prontos = pd.DataFrame(st.session_state.prontos)
-                st.download_button(
-                    "📥 BAIXAR CSV ALTERDATA",
-                    df_prontos.to_csv(index=False, sep=';', encoding='latin1'),
-                    f"conciliacao_{empresa_data['apelido_unidade']}_{banco_selecionado}_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.csv",
-                    "text/csv"
-                )
+                if b4.form_submit_button("🔄 Resetar Fila"):
+                    st.session_state.skipped_indices = []
+                    st.session_state.busca_fila      = ''
+                    undo_manager.clear()
+                    st.info("Fila de pulados, busca e histórico de desfazer resetados.")
+                    st.rerun()
+
+    # SE A FILA ESTIVER VAZIA, MOSTRA O EXPORT
+    else:
+        st.success("🎉 Todos os lançamentos pendentes foram mapeados! Exportação liberada.")
+        if st.session_state.prontos:
+            df_prontos = pd.DataFrame(st.session_state.prontos)
+            st.download_button(
+                "📥 BAIXAR CSV ALTERDATA",
+                df_prontos.to_csv(index=False, sep=';', encoding='latin1'),
+                f"conciliacao_{empresa_data['apelido_unidade']}_{banco_selecionado}_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.csv",
+                "text/csv"
+            )
 
 # =============================================================================
 # GERENCIAMENTO DE REGRAS
