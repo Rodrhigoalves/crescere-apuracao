@@ -216,18 +216,18 @@ def extrair_por_recintos(file_bytes):
             valor_bruto = valores[0]
             is_negativo = '-' in valor_bruto or bool(re.search(r'\sD$', linha.strip(), re.IGNORECASE))
             is_positivo = '+' in valor_bruto or bool(re.search(r'\sC$', linha.strip(), re.IGNORECASE))
-            
+
             valor_str_limpo = re.search(r'\d{1,3}(?:\.\d{3})*,\d{2}', valor_bruto).group(0)
             valor_num = float(valor_str_limpo.replace('.', '').replace(',', '.'))
-            
+
             desc_limpa = linha.replace(data, '')
             for v in valores: desc_limpa = desc_limpa.replace(v, '')
-                
+
             desc_limpa = re.sub(r'\b[DC]\b', '', desc_limpa, flags=re.IGNORECASE)
             desc_limpa = padronizar_texto(desc_limpa.strip())
-            
+
             if not desc_limpa or len(desc_limpa) < 2: desc_limpa = "SEM DESCRICAO"
-                
+
             desc_upper = desc_limpa.upper()
             if is_negativo: sinal = '-'
             elif is_positivo: sinal = '+'
@@ -244,34 +244,117 @@ def extrair_por_recintos(file_bytes):
     return pd.DataFrame(dados), {"criticas": ignoradas_com_valor, "comuns": ignoradas_texto}
 
 
+# =============================================================================
+# EXTRAÇÃO OFX MELHORADA — leitura direta do texto bruto por bloco
+# =============================================================================
 @st.cache_data(show_spinner=False)
 def extrair_texto_ofx(file_bytes):
+    """
+    Extrai transações de arquivos OFX lendo diretamente os blocos <STMTTRN>
+    para capturar NAME, MEMO e TRNTYPE de forma fiel e completa,
+    sem depender das abstrações do ofxparse que costumam colapsar campos.
+    """
     dados_extraidos = []
     try:
-        try: texto_ofx = file_bytes.decode('utf-8')
-        except UnicodeDecodeError: texto_ofx = file_bytes.decode('latin-1', errors='ignore')
+        # Detecta encoding
+        try:
+            texto_ofx = file_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            texto_ofx = file_bytes.decode('latin-1', errors='ignore')
 
-        ofx = OfxParser.parse(io.StringIO(texto_ofx))
-        for account in ofx.accounts:
-            for tx in account.statement.transactions:
-                valor = float(tx.amount)
-                texto_memo = str(tx.memo).strip() if tx.memo else ""
-                texto_payee = str(tx.payee).strip() if tx.payee else ""
-                
-                if texto_memo and texto_payee and texto_payee not in texto_memo:
-                    descricao_final = f"{texto_memo} {texto_payee}"
-                elif texto_memo: descricao_final = texto_memo
-                else: descricao_final = texto_payee
-                    
-                dados_extraidos.append({
-                    'Data':     tx.date.strftime('%d/%m/%Y'),
-                    'Descricao': padronizar_texto(descricao_final),
-                    'Valor':    abs(valor),
-                    'Sinal':    '+' if valor > 0 else '-'
-                })
+        # Extrai cada bloco de transação individualmente
+        blocos = re.findall(r'<STMTTRN>(.*?)</STMTTRN>', texto_ofx, re.DOTALL | re.IGNORECASE)
+
+        # Fallback: alguns OFX não fecham com </STMTTRN>, usa abertura como delimitador
+        if not blocos:
+            blocos = re.split(r'<STMTTRN>', texto_ofx, flags=re.IGNORECASE)[1:]
+
+        def get_campo(campo, texto):
+            """Extrai o valor de uma tag OFX no formato <TAG>valor"""
+            match = re.search(rf'<{campo}>\s*([^\n<]+)', texto, re.IGNORECASE)
+            return match.group(1).strip() if match else ""
+
+        for bloco in blocos:
+            data_raw  = get_campo('DTPOSTED', bloco)
+            valor_raw = get_campo('TRNAMT',   bloco)
+            memo      = get_campo('MEMO',     bloco)
+            name      = get_campo('NAME',     bloco)
+            trntype   = get_campo('TRNTYPE',  bloco)
+            fitid     = get_campo('FITID',    bloco)  # ID único, útil para debug
+
+            # --- Formata a data (YYYYMMDD ou YYYYMMDDHHMMSS) ---
+            data_fmt = re.sub(r'[^\d]', '', data_raw)[:8]  # Pega só os 8 primeiros dígitos numéricos
+            try:
+                data_fmt = pd.to_datetime(data_fmt, format='%Y%m%d').strftime('%d/%m/%Y')
+            except Exception:
+                data_fmt = data_raw  # Mantém o original se falhar
+
+            # --- Formata o valor ---
+            try:
+                valor = float(valor_raw.replace(',', '.'))
+            except (ValueError, AttributeError):
+                logging.warning(f"OFX: valor inválido no bloco FITID={fitid}, ignorando.")
+                continue  # Linha sem valor válido, ignora
+
+            # --- Monta a descrição priorizando riqueza de informação ---
+            # Remove valores genéricos que o banco às vezes coloca
+            VALORES_GENERICOS = {'', 'NONE', 'NULL', '-', 'N/A', 'NAO INFORMADO', 'NAO IDENTIFICADO'}
+
+            name_pad = padronizar_texto(name)
+            memo_pad = padronizar_texto(memo)
+
+            partes = []
+            if name_pad and name_pad not in VALORES_GENERICOS:
+                partes.append(name_pad)
+            # Adiciona MEMO apenas se trouxer informação nova (não duplicar o NAME)
+            if memo_pad and memo_pad not in VALORES_GENERICOS and memo_pad != name_pad:
+                # Evita também substrings — se o memo já está contido no name, não duplica
+                if name_pad not in memo_pad and memo_pad not in name_pad:
+                    partes.append(memo_pad)
+                elif len(memo_pad) > len(name_pad):
+                    # O memo é mais rico, substitui o name
+                    partes = [memo_pad]
+
+            # Fallback para o tipo de transação caso os campos estejam vazios
+            if not partes:
+                tipo_legivel = {
+                    'CREDIT': 'CREDITO',
+                    'DEBIT':  'DEBITO',
+                    'INT':    'JUROS',
+                    'DIV':    'DIVIDENDO',
+                    'FEE':    'TARIFA',
+                    'SRVCHG': 'ENCARGO',
+                    'DEP':    'DEPOSITO',
+                    'ATM':    'SAQUE ATM',
+                    'POS':    'COMPRA POS',
+                    'XFER':   'TRANSFERENCIA',
+                    'CHECK':  'CHEQUE',
+                    'PAYMENT':'PAGAMENTO',
+                    'CASH':   'SAQUE',
+                    'DIRECTDEP': 'DEPOSITO DIRETO',
+                    'DIRECTDEBIT': 'DEBITO DIRETO',
+                    'OTHER':  'OUTROS',
+                }.get(trntype.upper(), trntype.upper() if trntype else 'SEM DESCRICAO')
+                partes.append(tipo_legivel)
+
+            descricao_final = " | ".join(partes) if partes else "SEM DESCRICAO"
+
+            dados_extraidos.append({
+                'Data':      data_fmt,
+                'Descricao': descricao_final,
+                'Valor':     abs(valor),
+                'Sinal':     '+' if valor > 0 else '-'
+            })
+
+        if not dados_extraidos:
+            st.warning("Nenhuma transação encontrada no OFX. Verifique se o arquivo está no formato padrão.")
+
     except Exception as e:
         st.error(f"Erro ao processar OFX: {e}")
+        logging.exception("Erro na extração OFX")
+
     return pd.DataFrame(dados_extraidos)
+
 
 # =============================================================================
 # 4. CARGA DE DADOS DO BANCO
@@ -411,7 +494,7 @@ elif conta_banco_fixa == 'N/A':
 # =============================================================================
 if not st.session_state.df_bruto.empty:
     st.divider()
-    
+
     # O Saldo é calculado dinamicamente
     df_validos = st.session_state.df_bruto[
         ~st.session_state.df_bruto.index.isin(st.session_state.linhas_ignoradas_regras)
@@ -436,7 +519,7 @@ if not st.session_state.df_bruto.empty:
                 for l in list(dict.fromkeys(st.session_state.comuns))[:20]: st.text(l)
 
     # =========================================================================
-    # MESA DE TREINAMENTO 
+    # MESA DE TREINAMENTO
     # =========================================================================
     df_p = st.session_state.pendentes
     if not df_p.empty:
@@ -460,7 +543,7 @@ if not st.session_state.df_bruto.empty:
                         conn = get_connection()
                         cursor = conn.cursor()
                         t, d  = ultima_acao['type'], ultima_acao['data']
-                        
+
                         if t in ('salvar_regra', 'ignorar_lixo'):
                             cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (d['id_regra'],))
                             conn.commit()
@@ -480,7 +563,7 @@ if not st.session_state.df_bruto.empty:
             selecionadas  = st.pills("Selecione os termos-chave:", palavras_desc, selection_mode="multi")
             termo_final = " ".join(selecionadas) if selecionadas else item['Descricao']
 
-            # PAINEL DE IMPACTO RESTAURADO
+            # PAINEL DE IMPACTO
             if termo_final:
                 df_impactados = df_p[df_p['Descricao'].str.contains(re.escape(termo_final), case=False, na=False)]
                 impacto = len(df_impactados)
@@ -514,8 +597,8 @@ if not st.session_state.df_bruto.empty:
                             id_inserido = cursor.lastrowid
                             conn.commit()
                             undo_manager.push('salvar_regra', {'id_regra': id_inserido})
-                            
-                            # MAGIA AQUI: Recalcula na hora para tirar da fila
+
+                            # Recalcula na hora para tirar da fila
                             aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
                             st.success("Regra salva!")
                         except mysql.connector.Error as err: st.error(f"Erro ao salvar regra: {err}")
@@ -537,7 +620,7 @@ if not st.session_state.df_bruto.empty:
                         id_inserido = cursor.lastrowid
                         conn.commit()
                         undo_manager.push('ignorar_lixo', {'id_regra': id_inserido})
-                        
+
                         # Recalcula na hora para abater do saldo e tirar da fila
                         aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
                         st.success("Lançamento ignorado! Saldo atualizado.")
