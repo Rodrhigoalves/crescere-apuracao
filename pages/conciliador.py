@@ -200,34 +200,62 @@ def extrair_por_recintos(file_bytes):
     linhas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
     dados, ignoradas_raw = [], []
 
+    # Padrões de busca independentes da ordem na linha
+    regex_data = r'\d{2}/\d{2}/\d{2,4}'
+    regex_valor = r'-?\s*(?:R\$?\s*)?\d{1,3}(?:\.\d{3})*,\d{2}'
+
     for linha in linhas:
         if any(x in linha.lower() for x in RUIDO_CABECALHO):
             continue
 
-        match = re.search(
-            r'(?P<data>\d{2}/\d{2}/\d{2,4})\s+'
-            r'(?P<descricao>.+?)\s+'
-            r'(?:R\$?\s*)?'
-            r'(?P<valor_op>\d{1,3}(?:\.\d{3})*,\d{2})',
-            linha,
-            re.IGNORECASE
-        )
+        match_data = re.search(regex_data, linha)
+        valores = re.findall(regex_valor, linha)
 
-        if match:
-            data      = match.group('data')
-            desc_limpa = match.group('descricao').strip()
-            valor_num  = float(match.group('valor_op').replace('.', '').replace(',', '.'))
-            desc_upper = desc_limpa.upper()
-            sinal = '+' if any(w in desc_upper for w in ['ENTRADA', 'DEPOSITO', 'DEPÓSITO', 'RECEBIMENTO', 'CREDITO', 'CRÉDITO']) else '-'
+        # Se a linha tem uma data e pelo menos um valor monetário, é uma transação
+        if match_data and valores:
+            data = match_data.group(0)
+            
+            # O primeiro valor da linha costuma ser o da operação (o segundo é o saldo)
+            valor_bruto = valores[0]
+            
+            # Verifica se é uma saída identificando sinal de menos ou um 'D' no final da linha
+            is_negativo = '-' in valor_bruto or bool(re.search(r'\sD$', linha.strip(), re.IGNORECASE))
+            is_positivo = '+' in valor_bruto or bool(re.search(r'\sC$', linha.strip(), re.IGNORECASE))
+            
+            # Limpa a formatação para converter para número
+            valor_str_limpo = re.search(r'\d{1,3}(?:\.\d{3})*,\d{2}', valor_bruto).group(0)
+            valor_num = float(valor_str_limpo.replace('.', '').replace(',', '.'))
+            
+            # A MÁGICA: Removemos a data e todos os valores monetários da linha. 
+            # O que sobrar é a descrição completa (Tipo + Descrição real).
+            desc_limpa = linha.replace(data, '')
+            for v in valores:
+                desc_limpa = desc_limpa.replace(v, '')
+                
+            # Removemos os sufixos D e C isolados que possam ter sobrado no texto
+            desc_limpa = re.sub(r'\b[DC]\b', '', desc_limpa, flags=re.IGNORECASE)
+            desc_limpa = padronizar_texto(desc_limpa.strip())
+            
             if not desc_limpa or len(desc_limpa) < 2:
                 desc_limpa = "SEM DESCRICAO"
+                
+            # Definição fina do sinal do lançamento
+            desc_upper = desc_limpa.upper()
+            if is_negativo:
+                sinal = '-'
+            elif is_positivo:
+                sinal = '+'
+            else:
+                sinal = '+' if any(w in desc_upper for w in ['ENTRADA', 'DEPOSITO', 'DEPÓSITO', 'RECEBIMENTO', 'CREDITO', 'CRÉDITO', 'PIX RECEBIDO', 'RESGATE']) else '-'
+
             dados.append({
-                'Data':     data,
-                'Descricao': padronizar_texto(desc_limpa),
-                'Valor':    abs(valor_num),
-                'Sinal':    sinal
+                'Data':      data,
+                'Descricao': desc_limpa,
+                'Valor':     abs(valor_num),
+                'Sinal':     sinal
             })
         elif len(linha) > 8:
+            # Linhas que não deram match vão para auditoria (possível lixo ou erro do PDF)
             ignoradas_raw.append(linha)
 
     ignoradas_unicas    = list(dict.fromkeys(ignoradas_raw))
@@ -242,7 +270,16 @@ def extrair_por_recintos(file_bytes):
 def extrair_texto_ofx(file_bytes):
     dados_extraidos = []
     try:
-        ofx = OfxParser.parse(io.BytesIO(file_bytes))
+        # 1. Tenta ler o arquivo no padrão moderno (UTF-8)
+        try:
+            texto_ofx = file_bytes.decode('utf-8')
+        # 2. Se o banco mandou caracteres quebrados, força a leitura ignorando o erro
+        except UnicodeDecodeError:
+            texto_ofx = file_bytes.decode('latin-1', errors='ignore')
+
+        # Transforma o texto corrigido em um arquivo na memória para o parser
+        ofx = OfxParser.parse(io.StringIO(texto_ofx))
+        
         for account in ofx.accounts:
             for tx in account.statement.transactions:
                 valor = float(tx.amount)
@@ -268,7 +305,7 @@ def extrair_texto_ofx(file_bytes):
                 })
     except Exception as e:
         logging.error(f"Erro ao extrair OFX: {e}")
-        st.error(f"Erro ao processar OFX: {e}")
+        st.error(f"Erro ao processar OFX: O arquivo contém formatação inválida. Detalhe: {e}")
     return pd.DataFrame(dados_extraidos)
 
 
