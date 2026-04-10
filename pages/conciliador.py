@@ -267,7 +267,7 @@ def carregar_empresas():
     try:
         conn = get_connection()
         df = pd.read_sql(
-            "SELECT id, nome, fantasia, cnpj, tipo, apelido_unidade, conta_contabil FROM empresas WHERE status = 'Ativo'",
+            "SELECT id, nome, fantasia, cnpj, tipo, apelido_unidade, conta_contabil FROM empresas",
             conn
         )
         df['tipo']       = df['tipo'].fillna('Matriz')
