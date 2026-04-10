@@ -76,7 +76,6 @@ def formatar_cnpj(cnpj_limpo):
 # 2. MOTOR DE RECÁLCULO EM TEMPO REAL
 # =============================================================================
 def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_banco_fixa):
-    """Recalcula toda a fila e os saldos baseados nas regras atuais do banco."""
     if df_bruto.empty:
         return
 
@@ -98,7 +97,6 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
             termo_padrao = padronizar_texto(r['termo_chave'])
             palavras_chave = termo_padrao.split()
             
-            # Verifica se TODAS as palavras da regra estão contidas na descrição (AND logic)
             contem_todas = all(palavra in row['Descricao'] for palavra in palavras_chave)
             
             if (contem_todas or fuzz.ratio(termo_padrao, row['Descricao']) >= 85) and r['sinal_esperado'] == row['Sinal']:
@@ -190,6 +188,9 @@ def buscar_conta_por_banco(id_empresa, nome_banco):
     finally:
         if conn: conn.close()
 
+# ==========================================
+# MOTOR GENÉRICO PDF
+# ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_por_recintos(file_bytes):
     texto_completo = ""
@@ -248,7 +249,91 @@ def extrair_por_recintos(file_bytes):
 
     return pd.DataFrame(dados), {"criticas": ignoradas_com_valor, "comuns": ignoradas_texto}
 
+# ==========================================
+# MOTOR ESPECÍFICO ITAÚ (COM LEITURA ESPACIAL)
+# ==========================================
+@st.cache_data(show_spinner=False)
+def extrair_pdf_itau(file_bytes):
+    dados, ignoradas_raw = [], []
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                # O layout=True preserva os espaços em branco entre as colunas do PDF
+                texto = page.extract_text(layout=True)
+                if not texto: continue
+                linhas = texto.split('\n')
+                in_movimento = False
+                
+                # Busca o ano no cabeçalho do documento (ex: "mar 2026")
+                match_ano = re.search(r'\b(20[2-9]\d)\b', texto)
+                ano = match_ano.group(1) if match_ano else str(pd.Timestamp.now().year)
 
+                pos_entradas = 0
+                pos_saidas = 0
+
+                for linha in linhas:
+                    # Detecta onde a tabela de lançamentos começa e mapeia a posição (X) das colunas
+                    if 'Data' in linha and 'Descrição' in linha and 'Entradas' in linha:
+                        in_movimento = True
+                        pos_entradas = linha.find('Entradas')
+                        pos_saidas = linha.find('Saídas')
+                        continue
+                    
+                    if in_movimento:
+                        # Para de ler se chegar no saldo final
+                        if 'SALDO' in linha.upper() and not re.search(r'\d{2}/\d{2}', linha):
+                            continue
+
+                        # O Itaú usa datas no formato DD/MM
+                        match_data = re.search(r'^(\s*\d{2}/\d{2})\b', linha)
+                        if match_data:
+                            data_raw = match_data.group(1).strip()
+                            data_fmt = f"{data_raw}/{ano}"
+                            
+                            # Busca o valor monetário na linha
+                            valores = re.finditer(r'-?\s*\d{1,3}(?:\.\d{3})*,\d{2}\s*-?', linha)
+                            v_list = list(valores)
+                            
+                            if v_list:
+                                v_match = v_list[-1]
+                                valor_str = v_match.group().strip()
+                                pos_valor = v_match.start()
+                                
+                                valor_num = float(re.sub(r'[^\d,]', '', valor_str).replace(',', '.'))
+                                
+                                # Define o sinal baseado na presença do "-" ou na COLUNA (posição X do texto)
+                                sinal = '+'
+                                if '-' in valor_str or linha.endswith('-'):
+                                    sinal = '-'
+                                elif pos_saidas > 0 and pos_valor >= (pos_saidas - 15):
+                                    sinal = '-'
+                                elif pos_entradas > 0 and pos_valor < (pos_saidas - 15):
+                                    sinal = '+'
+                                else:
+                                    # Fallback caso a coluna falhe
+                                    sinal = '-' if any(w in linha.upper() for w in ['SISPAG', 'TAR ', 'TARIFA', 'PAG', 'PGTO', 'SAQUE', 'DÉBITO']) else '+'
+                                    
+                                # Extrai a descrição limpando a data e o valor da frase original
+                                desc = linha[:v_match.start()].replace(match_data.group(), '').strip()
+                                desc_limpa = padronizar_texto(desc)
+                                if not desc_limpa or len(desc_limpa) < 2: desc_limpa = "SEM DESCRICAO"
+                                
+                                dados.append({
+                                    'Data': data_fmt,
+                                    'Descricao': desc_limpa,
+                                    'Valor': abs(valor_num),
+                                    'Sinal': sinal
+                                })
+                            else:
+                                ignoradas_raw.append(linha.strip())
+    except Exception as e:
+        logging.exception(f"Erro no Itaú: {e}")
+        
+    return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
+
+# ==========================================
+# MOTOR GENÉRICO OFX
+# ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_texto_ofx(file_bytes):
     dados_extraidos = []
@@ -339,19 +424,23 @@ def extrair_texto_ofx(file_bytes):
 
     return pd.DataFrame(dados_extraidos)
 
+# ==========================================
+# MOTOR ESPECÍFICO BANCO DO BRASIL (PLANILHAS)
+# ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
     """Lê extratos em Excel ou CSV (Padrão Banco do Brasil)"""
     try:
+        # Pula as 2 primeiras linhas (skiprows=2) para começar a ler a partir da linha 3
         if nome_arquivo.lower().endswith('.csv'):
             try:
-                df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=',', skiprows=0)
+                df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=',', skiprows=2)
                 if 'Valor R$ ' not in df_raw.columns and 'Valor' not in df_raw.columns:
-                    df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=';', skiprows=0)
+                    df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=';', skiprows=2)
             except:
-                df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=';')
+                df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=';', skiprows=2)
         else:
-            df_raw = pd.read_excel(io.BytesIO(file_bytes))
+            df_raw = pd.read_excel(io.BytesIO(file_bytes), skiprows=2)
         
         df_raw.columns = [str(c).strip() for c in df_raw.columns]
         
@@ -369,8 +458,16 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                     continue 
                 
                 desc = str(row[col_hist]).strip()
+                
+                # Mescla o campo Detalhamento Hist. filtrando 100% dos números
                 if col_detalhe and pd.notna(row[col_detalhe]) and str(row[col_detalhe]).strip() != 'nan':
-                    desc += " " + str(row[col_detalhe]).strip()
+                    detalhe_str = str(row[col_detalhe]).strip()
+                    detalhe_sem_numeros = re.sub(r'\d+', '', detalhe_str)
+                    detalhe_limpo = re.sub(r'[^\w\s]', ' ', detalhe_sem_numeros) 
+                    detalhe_limpo = re.sub(r'\s+', ' ', detalhe_limpo).strip()
+                    
+                    if detalhe_limpo:
+                        desc += " " + detalhe_limpo
                     
                 valor_str = str(row[col_valor]).replace('R$', '').strip()
                 if pd.isna(row[col_valor]) or valor_str == 'nan':
@@ -378,6 +475,7 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                     
                 valor_num = float(valor_str.replace('.', '').replace(',', '.'))
                 
+                # A coluna "Inf." define estritamente se é Entrada ou Saída (C ou D)
                 if col_sinal and pd.notna(row[col_sinal]):
                     sinal = '+' if str(row[col_sinal]).strip().upper() == 'C' else '-'
                 else:
@@ -394,6 +492,7 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         st.error(f"Erro ao processar a planilha {nome_arquivo}: {e}")
         logging.exception("Erro na extração Planilha BB")
         return pd.DataFrame()
+
 
 # =============================================================================
 # 4. CARGA DE DADOS DO BANCO
@@ -501,7 +600,7 @@ col_cfg2.text_input("Conta Banco (Âncora)", value=conta_banco_fixa, disabled=Tr
 saldo_anterior_informado = col_cfg3.number_input("Saldo Anterior (R$)", value=0.00, step=100.00, format="%.2f")
 
 # =============================================================================
-# PASSO 4: PROCESSAMENTO
+# PASSO 4: PROCESSAMENTO (ROTEAMENTO INTELIGENTE)
 # =============================================================================
 if uploaded_files and conta_banco_fixa != 'N/A':
     if st.button("⚙️ Processar Extratos"):
@@ -509,15 +608,25 @@ if uploaded_files and conta_banco_fixa != 'N/A':
             lista_dfs, criticas, comuns = [], [], []
             for file in uploaded_files:
                 extensao = file.name.lower()
+                
+                # Se for PDF, verifica se é Itaú para usar o motor espacial
                 if extensao.endswith('.pdf'):
-                    df_ex, ign = extrair_por_recintos(file.getvalue())
+                    if banco_selecionado == 'ITAU':
+                        df_ex, ign = extrair_pdf_itau(file.getvalue())
+                    else:
+                        df_ex, ign = extrair_por_recintos(file.getvalue())
+                    
                     lista_dfs.append(df_ex)
                     criticas.extend(ign['criticas'])
                     comuns.extend(ign['comuns'])
+                    
+                # Se for Planilha (BB)
                 elif extensao.endswith('.xlsx') or extensao.endswith('.csv'):
                     df_ex = extrair_planilha_bb(file.getvalue(), extensao)
                     if not df_ex.empty:
                         lista_dfs.append(df_ex)
+                        
+                # Se for OFX
                 elif extensao.endswith('.ofx'):
                     df_ex = extrair_texto_ofx(file.getvalue())
                     if not df_ex.empty:
@@ -573,12 +682,6 @@ if not st.session_state.df_bruto.empty:
     if not fila.empty:
         st.subheader("🎓 Mesa de Treinamento")
 
-        # -----------------------------------------------------------------
-        # FILTRO DE BUSCA NA FILA
-        # Opcional — deixe vazio para seguir a ordem natural dos lançamentos.
-        # Use quando precisar tratar um caso específico antes de cadastrar
-        # a regra genérica (ex: buscar "PAULO SERGIO" antes de cadastrar "PIX").
-        # -----------------------------------------------------------------
         col_busca, col_limpar, col_total = st.columns([3, 1, 1])
 
         busca_fila = col_busca.text_input(
@@ -589,7 +692,6 @@ if not st.session_state.df_bruto.empty:
         )
         st.session_state.busca_fila = busca_fila
 
-        # Botão para limpar a busca sem precisar apagar manualmente
         if col_limpar.button("✖ Limpar busca", disabled=not busca_fila):
             st.session_state.busca_fila = ''
             st.rerun()
@@ -643,11 +745,9 @@ if not st.session_state.df_bruto.empty:
             selecionadas  = st.pills("Selecione os termos-chave:", palavras_desc, selection_mode="multi")
             termo_final = " ".join(selecionadas) if selecionadas else item['Descricao']
 
-            # PAINEL DE IMPACTO — busca por cada palavra individualmente (lógica AND)
             if termo_final:
                 palavras_busca = termo_final.split()
                 
-                # Filtra linhas que contenham TODAS as palavras selecionadas
                 mascara = pd.Series([True] * len(df_p), index=df_p.index)
                 for palavra in palavras_busca:
                     mascara &= df_p['Descricao'].str.contains(re.escape(palavra), case=False, na=False)
@@ -665,7 +765,6 @@ if not st.session_state.df_bruto.empty:
                             use_container_width=True
                         )
 
-            # FORMULÁRIO DE CADASTRO
             with st.form("form_treino"):
                 f1, f2, f3 = st.columns(3)
                 contra = f1.text_input("Contrapartida (Conta Contábil)")
@@ -727,7 +826,6 @@ if not st.session_state.df_bruto.empty:
                     st.info("Fila de pulados, busca e histórico de desfazer resetados.")
                     st.rerun()
 
-    # SE A FILA ESTIVER VAZIA, MOSTRA O EXPORT
     else:
         st.success("🎉 Todos os lançamentos pendentes foram mapeados! Exportação liberada.")
         if st.session_state.prontos:
@@ -740,7 +838,7 @@ if not st.session_state.df_bruto.empty:
             )
 
 # =============================================================================
-# GERENCIAMENTO DE REGRAS
+# GERENCIAMENTO DE REGRAS E CONTAS
 # =============================================================================
 st.divider()
 with st.expander("📚 Gerenciar Regras Cadastradas", expanded=False):
@@ -814,9 +912,6 @@ with st.expander("📚 Gerenciar Regras Cadastradas", expanded=False):
                     st.session_state.editando_regra_id = None
                     st.rerun()
 
-# =============================================================================
-# GERENCIAMENTO DE CONTAS POR BANCO
-# =============================================================================
 st.divider()
 with st.expander("📊 Gerenciar Contas Contábeis por Banco", expanded=False):
     df_contas_banco = carregar_contas_por_banco(id_empresa)
