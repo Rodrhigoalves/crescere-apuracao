@@ -270,6 +270,20 @@ if uploaded_files and conta_banco_fixa:
             selecionadas = st.pills("Selecione os termos-chave (ou deixe vazio para a frase inteira):", palavras_desc, selection_mode="multi")
             termo_final = " ".join(selecionadas) if selecionadas else item['Descricao']
             
+            # --- RESTAURADO: LANÇAMENTOS IMPACTADOS ---
+            if termo_final:
+                # Usa case=False para garantir que ache independente de maiúsculas/minúsculas
+                df_impactados = df_p[df_p['Descricao'].str.contains(re.escape(termo_final), case=False, na=False)]
+                impacto = len(df_impactados)
+                if impacto > 0:
+                    st.info(f"💡 Esta regra resolverá **{impacto}** lançamentos desta fila.")
+                    with st.expander(f"📋 Ver lançamentos impactados ({impacto})", expanded=False):
+                        st.dataframe(
+                            df_impactados[['Data', 'Descricao', 'Valor', 'Sinal']].reset_index(drop=True),
+                            use_container_width=True
+                        )
+            # ------------------------------------------
+
             with st.form("form_treino"):
                 st.caption(f"A regra atuará sobre: **{termo_final}**")
                 f1, f2, f3 = st.columns(3)
