@@ -119,18 +119,16 @@ if 'editando_regra_id' not in st.session_state: st.session_state.editando_regra_
 st.title("🏦 Conciliação Bancária")
 
 conn = get_connection()
-# Busca empresas e suas respectivas contas padrão (ajuste o nome da coluna se for diferente no seu banco)
-df_empresas = pd.read_sql("SELECT id, nome, conta_contabil FROM empresas", conn)
+
+# Ajustado para carregar apenas colunas existentes
+df_empresas = pd.read_sql("SELECT id, nome FROM empresas", conn)
 
 col_cfg1, col_cfg2, col_cfg3 = st.columns([2, 1, 1])
 empresa_sel = col_cfg1.selectbox("Empresa / Filial", df_empresas['nome'])
+id_empresa = int(df_empresas[df_empresas['nome'] == empresa_sel]['id'].values[0])
 
-# Lógica de vínculo: Busca a conta da empresa selecionada
-empresa_data = df_empresas[df_empresas['nome'] == empresa_sel].iloc[0]
-id_empresa = int(empresa_data['id'])
-conta_sugerida = str(empresa_data['conta_contabil']) if empresa_data['conta_contabil'] else "196"
-
-conta_banco_fixa = col_cfg2.text_input("Conta Banco (Âncora)", value=conta_sugerida)
+# Como a coluna não existe no banco, mantemos o padrão 196 manual
+conta_banco_fixa = col_cfg2.text_input("Conta Banco (Âncora)", value="196")
 saldo_anterior_informado = col_cfg3.number_input("Saldo Anterior (R$)", value=0.00, step=100.00, format="%.2f")
 
 uploaded_files = st.file_uploader("Arraste seus extratos (PDF ou OFX)", type=["pdf", "ofx"], accept_multiple_files=True)
@@ -162,11 +160,11 @@ if uploaded_files and conta_banco_fixa:
     if criticas or comuns:
         with st.expander(f"⚠️ Alertas de Leitura ({len(criticas)} críticas / {len(comuns)} informativas)"):
             if criticas:
-                st.error("Linhas com valores que o sistema não conseguiu processar:")
-                for l in list(set(criticas)): st.code(l)
+                st.error("Linhas com valores suspeitos (possíveis transações não lidas):")
+                for l in list(dict.fromkeys(criticas)): st.code(l)
             if comuns:
-                st.info("Outras linhas ignoradas (cabeçalhos/textos):")
-                for l in list(set(comuns))[:20]: st.text(l)
+                st.info("Ruídos e textos informativos ignorados (Top 20 únicos):")
+                for l in list(dict.fromkeys(comuns))[:20]: st.text(l)
 
     # --- CLASSIFICAÇÃO ---
     prontos, pendentes = [], []
@@ -215,19 +213,23 @@ if uploaded_files and conta_banco_fixa:
                 if b4.form_submit_button("🔄 Reset"): st.session_state.skipped_indices = []; st.rerun()
 
     if prontos and not pendentes:
-        st.success("🎉 Concluído!")
+        st.success("🎉 Processamento concluído!")
         st.download_button("📥 BAIXAR CSV ALTERDATA", pd.DataFrame(prontos).to_csv(index=False, sep=';', encoding='latin1'), "importar.csv", "text/csv")
 
-# --- GERENCIAMENTO DE REGRAS ---
+# --- GERENCIAMENTO DE REGRAS (RETRACTABLE) ---
 st.divider()
 with st.expander("📚 Gerenciar Regras Cadastradas", expanded=False):
     regras_v = pd.read_sql(f"SELECT * FROM tb_extratos_regras WHERE id_empresa = {id_empresa} ORDER BY id DESC", conn)
-    busca = st.text_input("🔍 Buscar termo ou conta nas regras...")
+    
+    # Campo de busca dentro do expander
+    busca = st.text_input("🔍 Buscar por termo chave ou conta contábil...")
     if busca:
-        regras_v = regras_v[regras_v['termo_chave'].str.contains(busca, case=False) | regras_v['conta_contabil'].str.contains(busca, case=False)]
+        regras_v = regras_v[
+            regras_v['termo_chave'].str.contains(busca, case=False, na=False) | 
+            regras_v['conta_contabil'].str.contains(busca, case=False, na=False)
+        ]
     
     if not regras_v.empty:
-        # Exibição simplificada para caber no expander
         for _, r in regras_v.iterrows():
             col_r = st.columns([3, 2, 1, 1, 1])
             col_r[0].write(f"**{r['termo_chave']}**")
@@ -237,6 +239,7 @@ with st.expander("📚 Gerenciar Regras Cadastradas", expanded=False):
             if col_r[3].button("🗑️", key=f"d_{r['id']}"):
                 cursor = conn.cursor(); cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (int(r['id']),))
                 conn.commit(); st.rerun()
-    else: st.info("Nenhuma regra encontrada.")
+    else:
+        st.info("Nenhuma regra encontrada para os critérios informados.")
 
 conn.close()
