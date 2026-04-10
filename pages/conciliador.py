@@ -171,7 +171,7 @@ def buscar_conta_por_banco(id_empresa, nome_banco):
 
 
 # =============================================================================
-# 3. MOTOR DE EXTRAÇÃO PDF
+# 3. MOTOR DE EXTRAÇÃO PDF E OFX
 # =============================================================================
 @st.cache_data(show_spinner=False)
 def extrair_por_recintos(file_bytes):
@@ -246,9 +246,23 @@ def extrair_texto_ofx(file_bytes):
         for account in ofx.accounts:
             for tx in account.statement.transactions:
                 valor = float(tx.amount)
+                
+                # Extrai os dados garantindo que não venham como None
+                texto_memo = str(tx.memo).strip() if tx.memo else ""
+                texto_payee = str(tx.payee).strip() if tx.payee else ""
+                
+                # Lógica de extração: Prioriza a DESCRIÇÃO (memo), mas aproveita 
+                # o TIPO (payee) se ele contiver informações adicionais.
+                if texto_memo and texto_payee and texto_payee not in texto_memo:
+                    descricao_final = f"{texto_memo} {texto_payee}"
+                elif texto_memo:
+                    descricao_final = texto_memo
+                else:
+                    descricao_final = texto_payee
+                    
                 dados_extraidos.append({
                     'Data':     tx.date.strftime('%d/%m/%Y'),
-                    'Descricao': padronizar_texto(tx.payee if tx.payee else tx.memo),
+                    'Descricao': padronizar_texto(descricao_final),
                     'Valor':    abs(valor),
                     'Sinal':    '+' if valor > 0 else '-'
                 })
@@ -700,7 +714,7 @@ with st.expander("📚 Gerenciar Regras Cadastradas", expanded=False):
                 novo_termo    = col_er1.text_input("Termo Chave",    value=regra_para_editar['termo_chave'])
                 nova_conta    = col_er2.text_input("Conta Contábil", value=regra_para_editar['conta_contabil'])
                 novo_sinal    = st.selectbox("Sinal", ['+', '-'], index=0 if regra_para_editar['sinal_esperado'] == '+' else 1)
-                novo_cod_hist = st.text_input("Cód. Histórico ERP", value=str(regra_para_editar.get('cod_historico_erp', '') or ''))
+                novo_cod_hist = st.text_input("Cód. Histórico Alterdata", value=str(regra_para_editar.get('cod_historico_erp', '') or ''))
                 novo_hist     = st.text_area("Histórico Padrão",    value=str(regra_para_editar.get('historico_padrao', '') or ''))
                 if st.form_submit_button("Salvar Edição"):
                     conn = None
