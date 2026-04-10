@@ -126,7 +126,7 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
 
 
 # =============================================================================
-# 3. INTELIGÊNCIA: AUTO-LEITURA E EXTRAÇÃO (PDF e OFX)
+# 3. INTELIGÊNCIA: AUTO-LEITURA E EXTRAÇÃO (PDF, OFX e PLANILHAS)
 # =============================================================================
 BBOX_HEADER_AREA    = (0, 0, 600, 150)
 BBOX_BANK_NAME_AREA = (50, 0, 550, 150)
@@ -249,9 +249,6 @@ def extrair_por_recintos(file_bytes):
     return pd.DataFrame(dados), {"criticas": ignoradas_com_valor, "comuns": ignoradas_texto}
 
 
-# =============================================================================
-# EXTRAÇÃO OFX MELHORADA — leitura direta do texto bruto por bloco
-# =============================================================================
 @st.cache_data(show_spinner=False)
 def extrair_texto_ofx(file_bytes):
     dados_extraidos = []
@@ -342,6 +339,61 @@ def extrair_texto_ofx(file_bytes):
 
     return pd.DataFrame(dados_extraidos)
 
+@st.cache_data(show_spinner=False)
+def extrair_planilha_bb(file_bytes, nome_arquivo):
+    """Lê extratos em Excel ou CSV (Padrão Banco do Brasil)"""
+    try:
+        if nome_arquivo.lower().endswith('.csv'):
+            try:
+                df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=',', skiprows=0)
+                if 'Valor R$ ' not in df_raw.columns and 'Valor' not in df_raw.columns:
+                    df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=';', skiprows=0)
+            except:
+                df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=';')
+        else:
+            df_raw = pd.read_excel(io.BytesIO(file_bytes))
+        
+        df_raw.columns = [str(c).strip() for c in df_raw.columns]
+        
+        dados = []
+        col_data = 'Data' if 'Data' in df_raw.columns else df_raw.columns[0]
+        col_hist = 'Historico' if 'Historico' in df_raw.columns else None
+        col_detalhe = 'Detalhamento Hist.' if 'Detalhamento Hist.' in df_raw.columns else None
+        col_valor = 'Valor R$' if 'Valor R$' in df_raw.columns else ('Valor' if 'Valor' in df_raw.columns else None)
+        col_sinal = 'Inf.' if 'Inf.' in df_raw.columns else None
+
+        if col_hist and col_valor:
+            for _, row in df_raw.iterrows():
+                data_raw = str(row[col_data]).strip()
+                if not re.match(r'\d{2}/\d{2}/\d{2,4}', data_raw):
+                    continue 
+                
+                desc = str(row[col_hist]).strip()
+                if col_detalhe and pd.notna(row[col_detalhe]) and str(row[col_detalhe]).strip() != 'nan':
+                    desc += " " + str(row[col_detalhe]).strip()
+                    
+                valor_str = str(row[col_valor]).replace('R$', '').strip()
+                if pd.isna(row[col_valor]) or valor_str == 'nan':
+                    continue
+                    
+                valor_num = float(valor_str.replace('.', '').replace(',', '.'))
+                
+                if col_sinal and pd.notna(row[col_sinal]):
+                    sinal = '+' if str(row[col_sinal]).strip().upper() == 'C' else '-'
+                else:
+                    sinal = '+' if valor_num >= 0 else '-'
+                    
+                dados.append({
+                    'Data': data_raw,
+                    'Descricao': padronizar_texto(desc),
+                    'Valor': abs(valor_num),
+                    'Sinal': sinal
+                })
+        return pd.DataFrame(dados)
+    except Exception as e:
+        st.error(f"Erro ao processar a planilha {nome_arquivo}: {e}")
+        logging.exception("Erro na extração Planilha BB")
+        return pd.DataFrame()
 
 # =============================================================================
 # 4. CARGA DE DADOS DO BANCO
@@ -405,7 +457,7 @@ if df_empresas.empty:
 # =============================================================================
 # PASSO 1 E 2: UPLOAD E PRÉ-SELEÇÃO
 # =============================================================================
-uploaded_files  = st.file_uploader("1. Arraste seus extratos (PDF ou OFX)", type=["pdf", "ofx"], accept_multiple_files=True)
+uploaded_files  = st.file_uploader("1. Arraste seus extratos (PDF, OFX, XLSX, CSV)", type=["pdf", "ofx", "xlsx", "csv"], accept_multiple_files=True)
 indice_sugerido = 0
 
 if uploaded_files:
@@ -456,13 +508,20 @@ if uploaded_files and conta_banco_fixa != 'N/A':
         with st.spinner("Lendo e classificando extratos..."):
             lista_dfs, criticas, comuns = [], [], []
             for file in uploaded_files:
-                if file.name.lower().endswith('.pdf'):
+                extensao = file.name.lower()
+                if extensao.endswith('.pdf'):
                     df_ex, ign = extrair_por_recintos(file.getvalue())
                     lista_dfs.append(df_ex)
                     criticas.extend(ign['criticas'])
                     comuns.extend(ign['comuns'])
-                else:
-                    lista_dfs.append(extrair_texto_ofx(file.getvalue()))
+                elif extensao.endswith('.xlsx') or extensao.endswith('.csv'):
+                    df_ex = extrair_planilha_bb(file.getvalue(), extensao)
+                    if not df_ex.empty:
+                        lista_dfs.append(df_ex)
+                elif extensao.endswith('.ofx'):
+                    df_ex = extrair_texto_ofx(file.getvalue())
+                    if not df_ex.empty:
+                        lista_dfs.append(df_ex)
 
             st.session_state.df_bruto        = pd.concat(lista_dfs, ignore_index=True) if lista_dfs else pd.DataFrame()
             st.session_state.skipped_indices = []
