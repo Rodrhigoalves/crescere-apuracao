@@ -31,7 +31,28 @@ def formatar_moeda(valor):
     return f"R$ {valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
 
 # ---------------------------------------------------------
-# 2. MOTOR DE EXTRAÇÃO PDF
+# 2. INTELIGÊNCIA: AUTO-LEITURA DE CNPJ
+# ---------------------------------------------------------
+def buscar_cnpj_no_pdf(file_bytes):
+    """Lê apenas a primeira página do PDF para encontrar o CNPJ rapidamente"""
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            if len(pdf.pages) > 0:
+                texto = pdf.pages[0].extract_text()
+                if texto:
+                    # Remove tudo que não for número, ponto, barra ou traço
+                    t_limpo = re.sub(r'[^0-9/.\-]', '', texto)
+                    # Busca o padrão de CNPJ
+                    match = re.search(r'\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}', t_limpo)
+                    if match:
+                        # Retorna o CNPJ apenas com números
+                        return re.sub(r'[^0-9]', '', match.group(0))
+    except Exception:
+        pass
+    return None
+
+# ---------------------------------------------------------
+# 3. MOTOR DE EXTRAÇÃO PDF
 # ---------------------------------------------------------
 def _extrair_nome_final(chunk: str) -> str:
     texto = re.sub(r'\d{1,3}(?:\.\d{3})*,\d{2}', '', chunk)
@@ -91,7 +112,6 @@ def extrair_por_recintos(file_bytes):
             else: ignoradas_raw.append(linha)
         elif len(linha) > 8: ignoradas_raw.append(linha)
 
-    # Filtro Pente-fino nos ignorados
     ignoradas_unicas = list(dict.fromkeys(ignoradas_raw))
     ignoradas_com_valor = [l for l in ignoradas_unicas if re.search(r'\d,\d{2}', l)]
     ignoradas_texto = [l for l in ignoradas_unicas if not re.search(r'\d,\d{2}', l)]
@@ -109,7 +129,29 @@ def extrair_texto_ofx(file_bytes):
     return pd.DataFrame(dados_extraidos)
 
 # ---------------------------------------------------------
-# 3. INTERFACE PRINCIPAL
+# 4. CARGA DE DADOS DO BANCO (RESILIENTE)
+# ---------------------------------------------------------
+@st.cache_data(ttl=60, show_spinner=False)
+def carregar_empresas():
+    conn = get_connection()
+    try:
+        # Tenta buscar com a nova coluna e com CNPJ (se existir)
+        df = pd.read_sql("SELECT id, nome, cnpj, conta_contabil FROM empresas", conn)
+    except Exception:
+        try:
+            # Fallback caso a coluna cnpj não exista, mas conta_contabil sim
+            df = pd.read_sql("SELECT id, nome, conta_contabil FROM empresas", conn)
+            df['cnpj'] = "" # Cria vazia pra não quebrar a inteligência
+        except Exception:
+            # Fallback de segurança máxima
+            df = pd.read_sql("SELECT id, nome FROM empresas", conn)
+            df['conta_contabil'] = "196"
+            df['cnpj'] = ""
+    conn.close()
+    return df
+
+# ---------------------------------------------------------
+# 5. INTERFACE PRINCIPAL
 # ---------------------------------------------------------
 st.set_page_config(page_title="Conciliação Bancária", page_icon="🏦", layout="wide")
 
@@ -118,44 +160,70 @@ if 'editando_regra_id' not in st.session_state: st.session_state.editando_regra_
 
 st.title("🏦 Conciliação Bancária")
 
-conn = get_connection()
+df_empresas = carregar_empresas()
 
-# Ajustado para carregar apenas colunas existentes
-df_empresas = pd.read_sql("SELECT id, nome FROM empresas", conn)
+# 1º PASSO: UPLOAD DOS ARQUIVOS (Mova para cima para a inteligência funcionar)
+uploaded_files = st.file_uploader("1. Arraste seus extratos (PDF ou OFX)", type=["pdf", "ofx"], accept_multiple_files=True)
 
+# 2º PASSO: INTELIGÊNCIA DE PRÉ-SELEÇÃO
+indice_sugerido = 0
+if uploaded_files:
+    for file in uploaded_files:
+        if file.name.lower().endswith('.pdf'):
+            cnpj_lido = buscar_cnpj_no_pdf(file.getvalue())
+            if cnpj_lido and 'cnpj' in df_empresas.columns:
+                # Limpa os CNPJs do banco para comparar só os números
+                df_empresas['cnpj_limpo'] = df_empresas['cnpj'].astype(str).apply(lambda x: re.sub(r'[^0-9]', '', x))
+                match_df = df_empresas[df_empresas['cnpj_limpo'] == cnpj_lido]
+                if not match_df.empty:
+                    indice_sugerido = int(match_df.index[0])
+                    st.toast(f"✅ Extrato reconhecido: {match_df.iloc[0]['nome']}")
+                    break # Achou o primeiro, já basta
+
+# 3º PASSO: PAINEL DE CONFIGURAÇÕES AUTO-PREENCHIDO
+st.markdown("### 2. Confirme os Dados")
 col_cfg1, col_cfg2, col_cfg3 = st.columns([2, 1, 1])
-empresa_sel = col_cfg1.selectbox("Empresa / Filial", df_empresas['nome'])
-id_empresa = int(df_empresas[df_empresas['nome'] == empresa_sel]['id'].values[0])
 
-# Como a coluna não existe no banco, mantemos o padrão 196 manual
-conta_banco_fixa = col_cfg2.text_input("Conta Banco (Âncora)", value="196")
+# Seleciona a empresa (usando o índice descoberto pela inteligência)
+empresa_sel = col_cfg1.selectbox("Empresa / Filial", df_empresas['nome'], index=indice_sugerido)
+empresa_data = df_empresas[df_empresas['nome'] == empresa_sel].iloc[0]
+id_empresa = int(empresa_data['id'])
+
+# Busca a conta contábil cadastrada para a empresa selecionada
+conta_sugerida = "196"
+if pd.notna(empresa_data.get('conta_contabil')) and str(empresa_data.get('conta_contabil')).strip() != "":
+    conta_sugerida = str(empresa_data['conta_contabil'])
+
+conta_banco_fixa = col_cfg2.text_input("Conta Banco (Âncora)", value=conta_sugerida)
 saldo_anterior_informado = col_cfg3.number_input("Saldo Anterior (R$)", value=0.00, step=100.00, format="%.2f")
 
-uploaded_files = st.file_uploader("Arraste seus extratos (PDF ou OFX)", type=["pdf", "ofx"], accept_multiple_files=True)
-
+# 4º PASSO: PROCESSAMENTO REAL
 if uploaded_files and conta_banco_fixa:
-    with st.spinner("Processando..."):
+    with st.spinner("Lendo e classificando extratos..."):
         lista_dfs, criticas, comuns = [], [], []
         for file in uploaded_files:
             if file.name.lower().endswith('.pdf'):
                 df_ex, ign = extrair_por_recintos(file.getvalue())
                 lista_dfs.append(df_ex)
                 criticas.extend(ign['criticas']); comuns.extend(ign['comuns'])
-            else: lista_dfs.append(extrair_texto_ofx(file.getvalue()))
+            else: 
+                lista_dfs.append(extrair_texto_ofx(file.getvalue()))
 
         df_bruto = pd.concat(lista_dfs, ignore_index=True) if lista_dfs else pd.DataFrame()
+        conn = get_connection()
         regras = pd.read_sql(f"SELECT * FROM tb_extratos_regras WHERE id_empresa = {id_empresa}", conn)
+        conn.close()
 
-    # --- AUDITORIA ---
+    # --- AUDITORIA DE SALDOS ---
     st.divider()
     if not df_bruto.empty:
         total_e = df_bruto[df_bruto['Sinal'] == '+']['Valor'].sum()
         total_s = df_bruto[df_bruto['Sinal'] == '-']['Valor'].sum()
         c_aud1, c_aud2, c_aud3, c_aud4 = st.columns(4)
         c_aud1.metric("Saldo Anterior", formatar_moeda(saldo_anterior_informado))
-        c_aud2.metric("🟢 Entradas", formatar_moeda(total_e))
-        c_aud3.metric("🔴 Saídas", formatar_moeda(total_s))
-        c_aud4.metric("⚖️ Saldo Final", formatar_moeda(saldo_anterior_informado + total_e - total_s))
+        c_aud2.metric("🟢 Entradas Lidas", formatar_moeda(total_e))
+        c_aud3.metric("🔴 Saídas Lidas", formatar_moeda(total_s))
+        c_aud4.metric("⚖️ Saldo Final Calculado", formatar_moeda(saldo_anterior_informado + total_e - total_s))
 
     if criticas or comuns:
         with st.expander(f"⚠️ Alertas de Leitura ({len(criticas)} críticas / {len(comuns)} informativas)"):
@@ -166,7 +234,7 @@ if uploaded_files and conta_banco_fixa:
                 st.info("Ruídos e textos informativos ignorados (Top 20 únicos):")
                 for l in list(dict.fromkeys(comuns))[:20]: st.text(l)
 
-    # --- CLASSIFICAÇÃO ---
+    # --- CLASSIFICAÇÃO PELAS REGRAS ---
     prontos, pendentes = [], []
     for idx, row in df_bruto.iterrows():
         match = False
@@ -199,29 +267,29 @@ if uploaded_files and conta_banco_fixa:
                 contra = f1.text_input("Contrapartida")
                 cod_h, txt_h = f2.text_input("Cód. Hist."), f3.text_input("Histórico Padrão")
                 b1, b2, b3, b4 = st.columns(4)
-                if b1.form_submit_button("✅ Salvar"):
+                if b1.form_submit_button("✅ Salvar Regra"):
                     if termo_final and contra:
-                        cursor = conn.cursor()
+                        conn = get_connection(); cursor = conn.cursor()
                         cursor.execute("INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil, cod_historico_erp, historico_padrao) VALUES (%s, %s, %s, %s, %s, %s, %s)", (id_empresa, 'PADRAO', termo_final, item['Sinal'], contra, cod_h, txt_h))
-                        conn.commit(); st.rerun()
-                if b2.form_submit_button("🗑️ Ignorar"):
+                        conn.commit(); conn.close(); st.rerun()
+                if b2.form_submit_button("🗑️ Ignorar Lixo"):
                     if termo_final:
-                        cursor = conn.cursor()
+                        conn = get_connection(); cursor = conn.cursor()
                         cursor.execute("INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil) VALUES (%s, %s, %s, %s, %s)", (id_empresa, 'PADRAO', termo_final, item['Sinal'], 'IGNORAR'))
-                        conn.commit(); st.rerun()
+                        conn.commit(); conn.close(); st.rerun()
                 if b3.form_submit_button("⏭️ Pular"): st.session_state.skipped_indices.append(item['idx_original']); st.rerun()
-                if b4.form_submit_button("🔄 Reset"): st.session_state.skipped_indices = []; st.rerun()
+                if b4.form_submit_button("🔄 Resetar Fila"): st.session_state.skipped_indices = []; st.rerun()
 
     if prontos and not pendentes:
-        st.success("🎉 Processamento concluído!")
+        st.success("🎉 Todos os lançamentos foram mapeados! Exportação liberada.")
         st.download_button("📥 BAIXAR CSV ALTERDATA", pd.DataFrame(prontos).to_csv(index=False, sep=';', encoding='latin1'), "importar.csv", "text/csv")
 
-# --- GERENCIAMENTO DE REGRAS (RETRACTABLE) ---
+# --- GERENCIAMENTO DE REGRAS ---
 st.divider()
 with st.expander("📚 Gerenciar Regras Cadastradas", expanded=False):
+    conn = get_connection()
     regras_v = pd.read_sql(f"SELECT * FROM tb_extratos_regras WHERE id_empresa = {id_empresa} ORDER BY id DESC", conn)
     
-    # Campo de busca dentro do expander
     busca = st.text_input("🔍 Buscar por termo chave ou conta contábil...")
     if busca:
         regras_v = regras_v[
@@ -240,6 +308,5 @@ with st.expander("📚 Gerenciar Regras Cadastradas", expanded=False):
                 cursor = conn.cursor(); cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (int(r['id']),))
                 conn.commit(); st.rerun()
     else:
-        st.info("Nenhuma regra encontrada para os critérios informados.")
-
-conn.close()
+        st.info("Nenhuma regra encontrada.")
+    conn.close()
