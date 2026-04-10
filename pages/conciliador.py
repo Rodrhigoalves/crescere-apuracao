@@ -251,7 +251,7 @@ def extrair_por_recintos(file_bytes):
 
 
 # ==========================================
-# MOTOR ESPECÍFICO ITAÚ (PROTEÇÃO SALDO x VALOR)
+# MOTOR ESPECÍFICO ITAÚ (PARADA OBRIGATÓRIA NO SALDO FINAL)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_pdf_itau(file_bytes):
@@ -259,10 +259,13 @@ def extrair_pdf_itau(file_bytes):
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             in_movimento = False
+            terminou_leitura = False
             current_date = None
             ano = str(pd.Timestamp.now().year)
             
             for page in pdf.pages:
+                if terminou_leitura: break # Para de ler se já encontrou o Saldo Final
+                
                 texto = page.extract_text()
                 if not texto: continue
                 
@@ -281,7 +284,12 @@ def extrair_pdf_itau(file_bytes):
                         continue
                     
                     if in_movimento:
-                        if any(k in linha_norm for k in ['SALDO EM', 'SALDO FINAL', 'CHEQUE ESPECIAL', 'LIMITE', 'SDO CT']):
+                        # Hard Stop: Encontrou "Saldo Final", desliga a leitura e ignora o resto
+                        if 'SALDO FINAL' in linha_norm or 'SDO FINAL' in linha_norm:
+                            terminou_leitura = True
+                            break
+
+                        if any(k in linha_norm for k in ['SALDO EM', 'CHEQUE ESPECIAL', 'LIMITE', 'SDO CT']):
                             continue
 
                         match_data = re.search(r'^(\d{2}/\d{2})\b', linha_strip)
@@ -292,11 +300,9 @@ def extrair_pdf_itau(file_bytes):
                         if not current_date:
                             continue
 
-                        # Procura todos os valores monetários no final da linha
                         matches = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})(-?)', linha_strip))
                         if matches:
                             v_match = None
-                            # Lógica para evitar pegar o Saldo no lugar do Valor
                             if len(matches) >= 2:
                                 m_last = matches[-1]
                                 m_penult = matches[-2]
@@ -304,10 +310,8 @@ def extrair_pdf_itau(file_bytes):
                                 distancia = m_last.start() - m_penult.end()
                                 ta_no_fim = (len(linha_strip) - m_last.end()) <= 10
                                 
-                                # Se tem dois números colados no final, o último é o saldo.
                                 if ta_no_fim and distancia <= 25:
                                     v_match = m_penult
-                                    # Limpa o saldo para não sujar a descrição
                                     linha_strip = linha_strip[:m_last.start()].strip()
                                 else:
                                     v_match = m_last
@@ -434,7 +438,7 @@ def extrair_texto_ofx(file_bytes):
     return pd.DataFrame(dados_extraidos)
 
 # ==========================================
-# MOTOR ESPECÍFICO BANCO DO BRASIL (UNIÃO TOTAL)
+# MOTOR ESPECÍFICO BANCO DO BRASIL (UNIÃO ESTRITA)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
@@ -464,11 +468,12 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         df_raw.columns = [str(c).strip() for c in df_full.iloc[header_idx].values]
         
         dados = []
-        col_data = next((c for c in df_raw.columns if 'DATA' in padronizar_texto(c)), None)
-        col_hist = next((c for c in df_raw.columns if 'HISTORICO' in padronizar_texto(c)), None)
-        col_detalhe = next((c for c in df_raw.columns if 'DETALHAMENTO' in padronizar_texto(c)), None)
-        col_valor = next((c for c in df_raw.columns if 'VALOR' in padronizar_texto(c)), None)
-        col_sinal = next((c for c in df_raw.columns if 'INF' in padronizar_texto(c)), None)
+        # Caçador agressivo: pega parte do nome da coluna para evitar falhas por espaços em branco extras
+        col_data = next((c for c in df_raw.columns if 'DATA' in str(c).upper()), None)
+        col_hist = next((c for c in df_raw.columns if 'HIST' in str(c).upper()), None)
+        col_detalhe = next((c for c in df_raw.columns if 'DETALHAMENTO' in str(c).upper() or 'COMPLEMENTO' in str(c).upper()), None)
+        col_valor = next((c for c in df_raw.columns if 'VALOR' in str(c).upper()), None)
+        col_sinal = next((c for c in df_raw.columns if 'INF' in str(c).upper()), None)
 
         if col_hist and col_valor and col_data:
             for _, row in df_raw.iterrows():
@@ -476,15 +481,23 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 if not re.match(r'\d{2}/\d{2}/\d{2,4}', data_raw):
                     continue 
                 
-                # Extração bruta
+                # Extrai Histórico
                 hist_raw = str(row[col_hist]).strip() if pd.notna(row[col_hist]) else ""
-                detalhe_raw = str(row[col_detalhe]).strip() if (col_detalhe and pd.notna(row[col_detalhe])) else ""
-                if detalhe_raw.lower() == 'nan': detalhe_raw = ""
+                if hist_raw.lower() == 'nan': hist_raw = ""
+
+                # Extrai Detalhamento
+                detalhe_raw = ""
+                if col_detalhe and pd.notna(row[col_detalhe]):
+                    detalhe_raw = str(row[col_detalhe]).strip()
+                    if detalhe_raw.lower() == 'nan': detalhe_raw = ""
                 
-                # Regra estrita de união e remoção de QUALQUER número
+                # Regra estrita de união
                 full_desc = f"{hist_raw} {detalhe_raw}".strip()
+                # Remove todos os números
                 desc_sem_numeros = re.sub(r'\d+', '', full_desc)
+                # Remove caracteres especiais preservando espaços
                 desc_sem_especiais = re.sub(r'[^\w\s]', ' ', desc_sem_numeros) 
+                # Remove múltiplos espaços
                 desc_limpa = padronizar_texto(re.sub(r'\s+', ' ', desc_sem_especiais).strip())
                     
                 valor_str = str(row[col_valor]).replace('R$', '').strip()
@@ -616,7 +629,11 @@ if not conta_banco_fixa:
     conta_banco_fixa = empresa_data.get('conta_contabil', 'N/A')
 
 col_cfg2.text_input("Conta Banco (Âncora)", value=conta_banco_fixa, disabled=True)
-saldo_anterior_informado = col_cfg3.number_input("Saldo Anterior (R$)", value=0.00, step=100.00, format="%.2f")
+
+# Nova Configuração: Saldo Anterior e Saldo Final Esperado
+col_saldos1, col_saldos2 = col_cfg3.columns(2)
+saldo_anterior_informado = col_saldos1.number_input("Saldo Anterior (R$)", value=0.00, step=100.00, format="%.2f")
+saldo_final_informado = col_saldos2.number_input("Saldo Final (Opcional)", value=0.00, step=100.00, format="%.2f", help="Informe o saldo final real do extrato para checagem do sistema.")
 
 # =============================================================================
 # PASSO 4: PROCESSAMENTO
@@ -670,7 +687,7 @@ elif conta_banco_fixa == 'N/A':
     st.error("Configure a conta contábil antes de processar.")
 
 # =============================================================================
-# PASSO 5: RESULTADOS + MESA DE TREINAMENTO
+# PASSO 5: RESULTADOS + DETETIVE + AUDITORIA
 # =============================================================================
 if not st.session_state.df_bruto.empty:
     st.divider()
@@ -687,6 +704,55 @@ if not st.session_state.df_bruto.empty:
     c2.metric("🟢 Entradas Válidas",      formatar_moeda(total_e))
     c3.metric("🔴 Saídas Válidas",        formatar_moeda(total_s))
     c4.metric("⚖️ Saldo Final Calculado", formatar_moeda(saldo_final_calculado))
+
+    # O DETETIVE: Verificação Inteligente de Saldo
+    if saldo_final_informado != 0.00:
+        diferenca = round(abs(saldo_final_calculado - saldo_final_informado), 2)
+        if diferenca > 0.01:
+            st.error(f"⚠️ **Atenção!** Há uma diferença de **{formatar_moeda(diferenca)}** entre o saldo calculado e o que você informou.")
+            
+            encontrou_pista = False
+            
+            # 1. Procura valor exato que foi lido (Pode ser duplicado ou lido a mais)
+            suspeitos_bruto = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == diferenca]
+            if not suspeitos_bruto.empty:
+                st.info(f"💡 **PISTA 1:** Encontrei {len(suspeitos_bruto)} lançamento(s) na fila com o valor exato da diferença. Pode ser que um deles devesse ter sido ignorado ou o sinal esteja errado.")
+                encontrou_pista = True
+                
+            # 2. Procura metade do valor (Se o sinal estiver invertido, a diferença é o dobro do valor)
+            metade = round(diferenca / 2, 2)
+            suspeitos_metade = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == metade]
+            if not suspeitos_metade.empty:
+                st.info(f"💡 **PISTA 2:** Há um lançamento na fila de **{formatar_moeda(metade)}**. Se o sinal dele estiver invertido (Entrada no lugar de Saída ou vice-versa), ele gera exatamente essa diferença!")
+                encontrou_pista = True
+
+            # 3. Procura o valor no lixo (Pode ser que o sistema ignorou algo importante)
+            str_diff_br = f"{diferenca:.2f}".replace('.', ',')
+            suspeitos_lixo = [l for l in st.session_state.criticas if str_diff_br in l]
+            if suspeitos_lixo:
+                st.info(f"💡 **PISTA 3:** O valor de {formatar_moeda(diferenca)} aparece nas linhas que o sistema ignorou. Talvez um lançamento válido tenha se perdido por falta de cabeçalho. Vá na auditoria abaixo e verifique!")
+                encontrou_pista = True
+
+            if not encontrou_pista:
+                st.info("💡 **PISTA:** Não encontrei um único culpado exato. Essa diferença deve ser a soma de múltiplos lançamentos que faltaram ou vieram a mais.")
+        else:
+            st.success("✅ **O Saldo Final Calculado bateu perfeitamente com o Saldo Final Informado! Pode seguir tranquilo.**")
+
+    # PAINEL OCULTO DE AUDITORIA (Conforme solicitado)
+    with st.expander("🔍 Auditoria: Ver tudo que foi Lido e Ignorado (Bruto)"):
+        st.markdown("### 📊 Dados Lidos e Capturados")
+        st.dataframe(st.session_state.df_bruto, use_container_width=True)
+        
+        st.markdown("### 🗑️ Linhas Ignoradas (Lixo)")
+        if st.session_state.criticas or st.session_state.comuns:
+            if st.session_state.criticas:
+                st.error("Linhas descartadas que possuíam valores (Podem conter erros de leitura):")
+                for l in list(dict.fromkeys(st.session_state.criticas)): st.code(l)
+            if st.session_state.comuns:
+                st.info("Linhas de texto descartadas (Ruído de cabeçalho):")
+                for l in list(dict.fromkeys(st.session_state.comuns))[:30]: st.text(l)
+        else:
+            st.write("Nenhuma linha foi descartada.")
 
     # =========================================================================
     # MESA DE TREINAMENTO
@@ -745,7 +811,6 @@ if not st.session_state.df_bruto.empty:
                         if conn: conn.close()
                     st.rerun()
 
-            # PAINEL DE CORREÇÃO MANUAL
             with st.expander("🛠️ Corrigir Leitura (Caso o extrator tenha confundido saldo/valor/texto)", expanded=False):
                 st.caption("Altere os dados abaixo e clique em Salvar para corrigir este lançamento definitivamente na fila.")
                 ce1, ce2, ce3 = st.columns([3, 1, 1])
@@ -789,7 +854,6 @@ if not st.session_state.df_bruto.empty:
                     if contra:
                         conn = None
                         try:
-                            # Conversão para aceitar opcionais como Nulos no banco de dados (Corrige o erro de salvar vazio)
                             cod_h_val = cod_h if cod_h.strip() else None
                             txt_h_val = txt_h if txt_h.strip() else None
 
