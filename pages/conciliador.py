@@ -578,13 +578,22 @@ if not st.session_state.df_bruto.empty:
 
                 palavras_desc = item['Descricao'].split()
                 selecionadas  = st.pills("Selecione os termos-chave:", palavras_desc, selection_mode="multi")
-                termo_final   = " ".join(selecionadas) if selecionadas else item['Descricao']
+                termo_final = " ".join(selecionadas) if selecionadas else item['Descricao']
 
-                # PAINEL DE IMPACTO — calcula sobre a fila completa (sem filtro de busca)
-                # para mostrar o alcance real da regra que será cadastrada
+                # PAINEL DE IMPACTO — busca por cada palavra individualmente (lógica AND)
                 if termo_final:
-                    df_impactados = df_p[df_p['Descricao'].str.contains(re.escape(termo_final), case=False, na=False)]
+                    palavras_busca = termo_final.split()
+                    
+                    # Filtra linhas que contenham TODAS as palavras selecionadas
+                    mascara = pd.Series([True] * len(df_p), index=df_p.index)
+                    for palavra in palavras_busca:
+                        mascara &= df_p['Descricao'].str.contains(re.escape(palavra), case=False, na=False)
+                    
+                    df_impactados = df_p[mascara]
                     impacto = len(df_impactados)
+                    
+                    st.caption(f"A regra atuará sobre o termo: **{termo_final}**")
+                    
                     if impacto > 0:
                         st.info(f"💡 Esta regra resolverá **{impacto}** lançamento(s) desta fila.")
                         with st.expander(f"📋 Ver lançamentos impactados ({impacto})", expanded=False):
@@ -595,7 +604,6 @@ if not st.session_state.df_bruto.empty:
 
                 # FORMULÁRIO DE CADASTRO
                 with st.form("form_treino"):
-                    st.caption(f"A regra atuará sobre: **{termo_final}**")
                     f1, f2, f3 = st.columns(3)
                     contra = f1.text_input("Contrapartida (Conta Contábil)")
                     cod_h  = f2.text_input("Cód. Hist. Alterdata (Opcional)")
