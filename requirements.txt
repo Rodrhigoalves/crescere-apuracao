@@ -8,3 +8,4 @@ bcrypt
 pdfplumber
 thefuzz  
 ofxparse
+ofxtools
