@@ -96,7 +96,12 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
         match = False
         for _, r in regras.iterrows():
             termo_padrao = padronizar_texto(r['termo_chave'])
-            if (termo_padrao in row['Descricao'] or fuzz.ratio(termo_padrao, row['Descricao']) >= 85) and r['sinal_esperado'] == row['Sinal']:
+            palavras_chave = termo_padrao.split()
+            
+            # Verifica se TODAS as palavras da regra estão contidas na descrição
+            contem_todas = all(palavra in row['Descricao'] for palavra in palavras_chave)
+            
+            if (contem_todas or fuzz.ratio(termo_padrao, row['Descricao']) >= 85) and r['sinal_esperado'] == row['Sinal']:
                 if r['conta_contabil'] == 'IGNORAR':
                     linhas_ignoradas_regras.append(idx)
                 else:
