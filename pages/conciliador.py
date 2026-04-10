@@ -82,7 +82,9 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
 
     conn = get_connection()
     regras = pd.read_sql(
-        "SELECT * FROM tb_extratos_regras WHERE id_empresa = %s AND banco_nome = %s",
+        """SELECT * FROM tb_extratos_regras
+           WHERE id_empresa = %s AND banco_nome = %s
+           ORDER BY LENGTH(termo_chave) DESC""",
         conn,
         params=(id_empresa, banco_selecionado)
     )
@@ -94,7 +96,6 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
         match = False
         for _, r in regras.iterrows():
             termo_padrao = padronizar_texto(r['termo_chave'])
-            # Verifica se o termo está contido (Substring) OU se a similaridade é >= 85
             if (termo_padrao in row['Descricao'] or fuzz.ratio(termo_padrao, row['Descricao']) >= 85) and r['sinal_esperado'] == row['Sinal']:
                 if r['conta_contabil'] == 'IGNORAR':
                     linhas_ignoradas_regras.append(idx)
@@ -144,7 +145,7 @@ def identificar_cnpj_no_pdf(file_bytes):
                 if not header_text: return None
                 cnpj_match = re.search(r'\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}', header_text)
                 if cnpj_match: return cnpj_match.group(0)
-    except Exception as e: pass
+    except Exception: pass
     return None
 
 def identificar_banco_no_pdf(file_bytes):
@@ -157,7 +158,7 @@ def identificar_banco_no_pdf(file_bytes):
                 for banco, keywords in BANCOS_KEYWORDS.items():
                     for kw in keywords:
                         if padronizar_texto(kw) in header_upper: return banco
-    except Exception as e: pass
+    except Exception: pass
     return "DESCONHECIDO"
 
 @st.cache_data(show_spinner=False)
@@ -203,16 +204,16 @@ def extrair_por_recintos(file_bytes):
     RUIDO_CABECALHO = ["período:", "página", "saldo anterior", "saldo atual", "saldo final", "cnpj", "emitido em", "extrato de conta", "dados da conta", "nome documento", "instituição agência", "contraparte stone"]
     linhas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
     dados, ignoradas_raw = [], []
-    regex_data = r'\d{2}/\d{2}/\d{2,4}'
+    regex_data  = r'\d{2}/\d{2}/\d{2,4}'
     regex_valor = r'-?\s*(?:R\$?\s*)?\d{1,3}(?:\.\d{3})*,\d{2}'
 
     for linha in linhas:
         if any(x in linha.lower() for x in RUIDO_CABECALHO): continue
         match_data = re.search(regex_data, linha)
-        valores = re.findall(regex_valor, linha)
+        valores    = re.findall(regex_valor, linha)
 
         if match_data and valores:
-            data = match_data.group(0)
+            data        = match_data.group(0)
             valor_bruto = valores[0]
             is_negativo = '-' in valor_bruto or bool(re.search(r'\sD$', linha.strip(), re.IGNORECASE))
             is_positivo = '+' in valor_bruto or bool(re.search(r'\sC$', linha.strip(), re.IGNORECASE))
@@ -222,14 +223,13 @@ def extrair_por_recintos(file_bytes):
 
             desc_limpa = linha.replace(data, '')
             for v in valores: desc_limpa = desc_limpa.replace(v, '')
-
             desc_limpa = re.sub(r'\b[DC]\b', '', desc_limpa, flags=re.IGNORECASE)
             desc_limpa = padronizar_texto(desc_limpa.strip())
 
             if not desc_limpa or len(desc_limpa) < 2: desc_limpa = "SEM DESCRICAO"
 
             desc_upper = desc_limpa.upper()
-            if is_negativo: sinal = '-'
+            if is_negativo:   sinal = '-'
             elif is_positivo: sinal = '+'
             else: sinal = '+' if any(w in desc_upper for w in ['ENTRADA', 'DEPOSITO', 'DEPÓSITO', 'RECEBIMENTO', 'CREDITO', 'CRÉDITO', 'PIX RECEBIDO', 'RESGATE']) else '-'
 
@@ -249,28 +249,18 @@ def extrair_por_recintos(file_bytes):
 # =============================================================================
 @st.cache_data(show_spinner=False)
 def extrair_texto_ofx(file_bytes):
-    """
-    Extrai transações de arquivos OFX lendo diretamente os blocos <STMTTRN>
-    para capturar NAME, MEMO e TRNTYPE de forma fiel e completa,
-    sem depender das abstrações do ofxparse que costumam colapsar campos.
-    """
     dados_extraidos = []
     try:
-        # Detecta encoding
         try:
             texto_ofx = file_bytes.decode('utf-8')
         except UnicodeDecodeError:
             texto_ofx = file_bytes.decode('latin-1', errors='ignore')
 
-        # Extrai cada bloco de transação individualmente
         blocos = re.findall(r'<STMTTRN>(.*?)</STMTTRN>', texto_ofx, re.DOTALL | re.IGNORECASE)
-
-        # Fallback: alguns OFX não fecham com </STMTTRN>, usa abertura como delimitador
         if not blocos:
             blocos = re.split(r'<STMTTRN>', texto_ofx, flags=re.IGNORECASE)[1:]
 
         def get_campo(campo, texto):
-            """Extrai o valor de uma tag OFX no formato <TAG>valor"""
             match = re.search(rf'<{campo}>\s*([^\n<]+)', texto, re.IGNORECASE)
             return match.group(1).strip() if match else ""
 
@@ -280,24 +270,20 @@ def extrair_texto_ofx(file_bytes):
             memo      = get_campo('MEMO',     bloco)
             name      = get_campo('NAME',     bloco)
             trntype   = get_campo('TRNTYPE',  bloco)
-            fitid     = get_campo('FITID',    bloco)  # ID único, útil para debug
+            fitid     = get_campo('FITID',    bloco)
 
-            # --- Formata a data (YYYYMMDD ou YYYYMMDDHHMMSS) ---
-            data_fmt = re.sub(r'[^\d]', '', data_raw)[:8]  # Pega só os 8 primeiros dígitos numéricos
+            data_fmt = re.sub(r'[^\d]', '', data_raw)[:8]
             try:
                 data_fmt = pd.to_datetime(data_fmt, format='%Y%m%d').strftime('%d/%m/%Y')
             except Exception:
-                data_fmt = data_raw  # Mantém o original se falhar
+                data_fmt = data_raw
 
-            # --- Formata o valor ---
             try:
                 valor = float(valor_raw.replace(',', '.'))
             except (ValueError, AttributeError):
                 logging.warning(f"OFX: valor inválido no bloco FITID={fitid}, ignorando.")
-                continue  # Linha sem valor válido, ignora
+                continue
 
-            # --- Monta a descrição priorizando riqueza de informação ---
-            # Remove valores genéricos que o banco às vezes coloca
             VALORES_GENERICOS = {'', 'NONE', 'NULL', '-', 'N/A', 'NAO INFORMADO', 'NAO IDENTIFICADO'}
 
             name_pad = padronizar_texto(name)
@@ -306,34 +292,30 @@ def extrair_texto_ofx(file_bytes):
             partes = []
             if name_pad and name_pad not in VALORES_GENERICOS:
                 partes.append(name_pad)
-            # Adiciona MEMO apenas se trouxer informação nova (não duplicar o NAME)
             if memo_pad and memo_pad not in VALORES_GENERICOS and memo_pad != name_pad:
-                # Evita também substrings — se o memo já está contido no name, não duplica
                 if name_pad not in memo_pad and memo_pad not in name_pad:
                     partes.append(memo_pad)
                 elif len(memo_pad) > len(name_pad):
-                    # O memo é mais rico, substitui o name
                     partes = [memo_pad]
 
-            # Fallback para o tipo de transação caso os campos estejam vazios
             if not partes:
                 tipo_legivel = {
-                    'CREDIT': 'CREDITO',
-                    'DEBIT':  'DEBITO',
-                    'INT':    'JUROS',
-                    'DIV':    'DIVIDENDO',
-                    'FEE':    'TARIFA',
-                    'SRVCHG': 'ENCARGO',
-                    'DEP':    'DEPOSITO',
-                    'ATM':    'SAQUE ATM',
-                    'POS':    'COMPRA POS',
-                    'XFER':   'TRANSFERENCIA',
-                    'CHECK':  'CHEQUE',
-                    'PAYMENT':'PAGAMENTO',
-                    'CASH':   'SAQUE',
-                    'DIRECTDEP': 'DEPOSITO DIRETO',
+                    'CREDIT':      'CREDITO',
+                    'DEBIT':       'DEBITO',
+                    'INT':         'JUROS',
+                    'DIV':         'DIVIDENDO',
+                    'FEE':         'TARIFA',
+                    'SRVCHG':      'ENCARGO',
+                    'DEP':         'DEPOSITO',
+                    'ATM':         'SAQUE ATM',
+                    'POS':         'COMPRA POS',
+                    'XFER':        'TRANSFERENCIA',
+                    'CHECK':       'CHEQUE',
+                    'PAYMENT':     'PAGAMENTO',
+                    'CASH':        'SAQUE',
+                    'DIRECTDEP':   'DEPOSITO DIRETO',
                     'DIRECTDEBIT': 'DEBITO DIRETO',
-                    'OTHER':  'OUTROS',
+                    'OTHER':       'OUTROS',
                 }.get(trntype.upper(), trntype.upper() if trntype else 'SEM DESCRICAO')
                 partes.append(tipo_legivel)
 
@@ -365,9 +347,9 @@ def carregar_empresas():
     try:
         conn = get_connection()
         df = pd.read_sql("SELECT id, nome, fantasia, cnpj, tipo, apelido_unidade, conta_contabil FROM empresas", conn)
-        df['tipo']       = df['tipo'].fillna('Matriz')
-        df['cnpj']       = df['cnpj'].fillna('Sem CNPJ')
-        df['cnpj_limpo'] = df['cnpj'].astype(str).apply(limpar_cnpj)
+        df['tipo']         = df['tipo'].fillna('Matriz')
+        df['cnpj']         = df['cnpj'].fillna('Sem CNPJ')
+        df['cnpj_limpo']   = df['cnpj'].astype(str).apply(limpar_cnpj)
         df['display_nome'] = df['nome'] + ' | ' + df['tipo'] + ' | ' + df['cnpj']
         return df
     except mysql.connector.Error: return pd.DataFrame()
@@ -402,6 +384,7 @@ defaults = {
     'criticas':                [],
     'comuns':                  [],
     'undo_stack':              [],
+    'busca_fila':              '',
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -417,7 +400,7 @@ if df_empresas.empty:
 # =============================================================================
 # PASSO 1 E 2: UPLOAD E PRÉ-SELEÇÃO
 # =============================================================================
-uploaded_files = st.file_uploader("1. Arraste seus extratos (PDF ou OFX)", type=["pdf", "ofx"], accept_multiple_files=True)
+uploaded_files  = st.file_uploader("1. Arraste seus extratos (PDF ou OFX)", type=["pdf", "ofx"], accept_multiple_files=True)
 indice_sugerido = 0
 
 if uploaded_files:
@@ -427,7 +410,7 @@ if uploaded_files:
             if cnpj_lido:
                 empresa_detectada_data = buscar_empresa_por_cnpj_otimizado(cnpj_lido, df_empresas)
                 if empresa_detectada_data:
-                    idx_encontrado = df_empresas[df_empresas['id'] == empresa_detectada_data['id']].index[0]
+                    idx_encontrado  = df_empresas[df_empresas['id'] == empresa_detectada_data['id']].index[0]
                     indice_sugerido = int(idx_encontrado)
                     st.toast(f"✅ Empresa '{empresa_detectada_data['nome']}' reconhecida pelo CNPJ!")
                     st.session_state.empresa_detectada_data = empresa_detectada_data
@@ -445,13 +428,13 @@ st.markdown("### 2. Confirme os Dados")
 col_cfg1, col_cfg2, col_cfg3 = st.columns([2, 1, 1])
 
 empresa_sel_display = col_cfg1.selectbox("Empresa / Filial", df_empresas['display_nome'], index=indice_sugerido)
-empresa_data = df_empresas[df_empresas['display_nome'] == empresa_sel_display].iloc[0].to_dict()
-id_empresa   = int(empresa_data['id'])
+empresa_data        = df_empresas[df_empresas['display_nome'] == empresa_sel_display].iloc[0].to_dict()
+id_empresa          = int(empresa_data['id'])
 
 bancos_disponiveis = sorted(list(BANCOS_KEYWORDS.keys()) + [st.session_state.banco_detectado])
 bancos_disponiveis = list(dict.fromkeys([b for b in bancos_disponiveis if b != "DESCONHECIDO"]))
-banco_index = (bancos_disponiveis.index(st.session_state.banco_detectado) if st.session_state.banco_detectado in bancos_disponiveis else 0)
-banco_selecionado = col_cfg2.selectbox("Banco do Extrato", bancos_disponiveis, index=banco_index)
+banco_index        = (bancos_disponiveis.index(st.session_state.banco_detectado) if st.session_state.banco_detectado in bancos_disponiveis else 0)
+banco_selecionado  = col_cfg2.selectbox("Banco do Extrato", bancos_disponiveis, index=banco_index)
 
 conta_banco_fixa = buscar_conta_por_banco(id_empresa, banco_selecionado)
 if not conta_banco_fixa:
@@ -476,13 +459,13 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                 else:
                     lista_dfs.append(extrair_texto_ofx(file.getvalue()))
 
-            st.session_state.df_bruto = pd.concat(lista_dfs, ignore_index=True) if lista_dfs else pd.DataFrame()
+            st.session_state.df_bruto        = pd.concat(lista_dfs, ignore_index=True) if lista_dfs else pd.DataFrame()
             st.session_state.skipped_indices = []
-            st.session_state.criticas = criticas
-            st.session_state.comuns = comuns
+            st.session_state.criticas        = criticas
+            st.session_state.comuns          = comuns
+            st.session_state.busca_fila      = ''
             undo_manager.clear()
 
-            # Processa as regras pela primeira vez e cria fila
             aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
             st.success("Processamento concluído!")
             st.rerun()
@@ -495,13 +478,12 @@ elif conta_banco_fixa == 'N/A':
 if not st.session_state.df_bruto.empty:
     st.divider()
 
-    # O Saldo é calculado dinamicamente
     df_validos = st.session_state.df_bruto[
         ~st.session_state.df_bruto.index.isin(st.session_state.linhas_ignoradas_regras)
     ]
-    total_e                = df_validos[df_validos['Sinal'] == '+']['Valor'].sum()
-    total_s                = df_validos[df_validos['Sinal'] == '-']['Valor'].sum()
-    saldo_final_calculado  = saldo_anterior_informado + total_e - total_s
+    total_e               = df_validos[df_validos['Sinal'] == '+']['Valor'].sum()
+    total_s               = df_validos[df_validos['Sinal'] == '-']['Valor'].sum()
+    saldo_final_calculado = saldo_anterior_informado + total_e - total_s
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Saldo Anterior",           formatar_moeda(saldo_anterior_informado))
@@ -524,122 +506,155 @@ if not st.session_state.df_bruto.empty:
     df_p = st.session_state.pendentes
     if not df_p.empty:
         fila = df_p[~df_p['idx_original'].isin(st.session_state.skipped_indices)]
+
         if not fila.empty:
-            item = fila.iloc[0]
             st.subheader("🎓 Mesa de Treinamento")
 
-            m1, m2, m3, m4, m5 = st.columns([1, 1, 1, 3, 1])
-            m1.metric("📅 Data",  item['Data'])
-            m2.metric("💰 Valor", formatar_moeda(item['Valor']))
-            m3.metric("↕️ Tipo",  "🟢 Entrada" if item['Sinal'] == '+' else "🔴 Saída")
-            m4.write(f"**Descrição Extraída:** {item['Descricao']}")
+            # -----------------------------------------------------------------
+            # FILTRO DE BUSCA NA FILA
+            # Opcional — deixe vazio para seguir a ordem natural dos lançamentos.
+            # Use quando precisar tratar um caso específico antes de cadastrar
+            # a regra genérica (ex: buscar "PAULO SERGIO" antes de cadastrar "PIX").
+            # -----------------------------------------------------------------
+            col_busca, col_limpar, col_total = st.columns([3, 1, 1])
 
-            # BOTÃO DESFAZER
-            if not undo_manager.is_empty():
-                if m5.button("↩️ Desfazer Ação", type="primary"):
-                    ultima_acao = undo_manager.pop()
-                    conn = None
-                    try:
-                        conn = get_connection()
-                        cursor = conn.cursor()
-                        t, d  = ultima_acao['type'], ultima_acao['data']
+            busca_fila = col_busca.text_input(
+                "🔍 Buscar na fila (opcional)",
+                value=st.session_state.busca_fila,
+                placeholder="Ex: PAULO SERGIO, NATURAL ALEM...",
+                key="input_busca_fila"
+            )
+            st.session_state.busca_fila = busca_fila
 
-                        if t in ('salvar_regra', 'ignorar_lixo'):
-                            cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (d['id_regra'],))
-                            conn.commit()
-                            # RECALCULA EM TEMPO REAL APÓS DESFAZER
-                            aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                            st.toast(f"Ação desfeita! Lançamento voltou para a fila.")
-                        elif t == 'pular':
-                            if d['idx'] in st.session_state.skipped_indices:
-                                st.session_state.skipped_indices.remove(d['idx'])
-                            st.toast("Pulo desfeito! Lançamento voltou para a fila.")
-                    except mysql.connector.Error as err: st.error(f"Erro ao desfazer: {err}")
-                    finally:
-                        if conn: conn.close()
-                    st.rerun()
+            # Botão para limpar a busca sem precisar apagar manualmente
+            if col_limpar.button("✖ Limpar busca", disabled=not busca_fila):
+                st.session_state.busca_fila = ''
+                st.rerun()
 
-            palavras_desc = item['Descricao'].split()
-            selecionadas  = st.pills("Selecione os termos-chave:", palavras_desc, selection_mode="multi")
-            termo_final = " ".join(selecionadas) if selecionadas else item['Descricao']
+            fila_filtrada = fila
+            if busca_fila.strip():
+                termo_busca   = padronizar_texto(busca_fila.strip())
+                fila_filtrada = fila[fila['Descricao'].str.contains(re.escape(termo_busca), case=False, na=False)]
 
-            # PAINEL DE IMPACTO
-            if termo_final:
-                df_impactados = df_p[df_p['Descricao'].str.contains(re.escape(termo_final), case=False, na=False)]
-                impacto = len(df_impactados)
-                if impacto > 0:
-                    st.info(f"💡 Esta regra resolverá **{impacto}** lançamento(s) desta fila.")
-                    with st.expander(f"📋 Ver lançamentos impactados ({impacto})", expanded=False):
-                        st.dataframe(
-                            df_impactados[['Data', 'Descricao', 'Valor', 'Sinal']].reset_index(drop=True),
-                            use_container_width=True
-                        )
+            col_total.metric(
+                "📋 Pendentes",
+                f"{len(fila_filtrada)} / {len(fila)}" if busca_fila.strip() else len(fila)
+            )
 
-            # FORMULÁRIO DE CADASTRO
-            with st.form("form_treino"):
-                st.caption(f"A regra atuará sobre: **{termo_final}**")
-                f1, f2, f3 = st.columns(3)
-                contra = f1.text_input("Contrapartida (Conta Contábil)")
-                cod_h  = f2.text_input("Cód. Hist. Alterdata (Opcional)")
-                txt_h  = f3.text_input("Histórico Padrão (Opcional)")
-                b1, b2, b3, b4 = st.columns(4)
+            if fila_filtrada.empty:
+                st.warning(f"Nenhum lançamento pendente encontrado para **'{busca_fila}'**. Limpe a busca para continuar.")
+            else:
+                item = fila_filtrada.iloc[0]
 
-                if b1.form_submit_button("✅ Salvar Regra"):
-                    if contra:
+                m1, m2, m3, m4, m5 = st.columns([1, 1, 1, 3, 1])
+                m1.metric("📅 Data",  item['Data'])
+                m2.metric("💰 Valor", formatar_moeda(item['Valor']))
+                m3.metric("↕️ Tipo",  "🟢 Entrada" if item['Sinal'] == '+' else "🔴 Saída")
+                m4.write(f"**Descrição Extraída:** {item['Descricao']}")
+
+                # BOTÃO DESFAZER
+                if not undo_manager.is_empty():
+                    if m5.button("↩️ Desfazer Ação", type="primary"):
+                        ultima_acao = undo_manager.pop()
+                        conn = None
+                        try:
+                            conn = get_connection()
+                            cursor = conn.cursor()
+                            t, d   = ultima_acao['type'], ultima_acao['data']
+
+                            if t in ('salvar_regra', 'ignorar_lixo'):
+                                cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (d['id_regra'],))
+                                conn.commit()
+                                aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                                st.toast("Ação desfeita! Lançamento voltou para a fila.")
+                            elif t == 'pular':
+                                if d['idx'] in st.session_state.skipped_indices:
+                                    st.session_state.skipped_indices.remove(d['idx'])
+                                st.toast("Pulo desfeito! Lançamento voltou para a fila.")
+                        except mysql.connector.Error as err: st.error(f"Erro ao desfazer: {err}")
+                        finally:
+                            if conn: conn.close()
+                        st.rerun()
+
+                palavras_desc = item['Descricao'].split()
+                selecionadas  = st.pills("Selecione os termos-chave:", palavras_desc, selection_mode="multi")
+                termo_final   = " ".join(selecionadas) if selecionadas else item['Descricao']
+
+                # PAINEL DE IMPACTO — calcula sobre a fila completa (sem filtro de busca)
+                # para mostrar o alcance real da regra que será cadastrada
+                if termo_final:
+                    df_impactados = df_p[df_p['Descricao'].str.contains(re.escape(termo_final), case=False, na=False)]
+                    impacto = len(df_impactados)
+                    if impacto > 0:
+                        st.info(f"💡 Esta regra resolverá **{impacto}** lançamento(s) desta fila.")
+                        with st.expander(f"📋 Ver lançamentos impactados ({impacto})", expanded=False):
+                            st.dataframe(
+                                df_impactados[['Data', 'Descricao', 'Valor', 'Sinal']].reset_index(drop=True),
+                                use_container_width=True
+                            )
+
+                # FORMULÁRIO DE CADASTRO
+                with st.form("form_treino"):
+                    st.caption(f"A regra atuará sobre: **{termo_final}**")
+                    f1, f2, f3 = st.columns(3)
+                    contra = f1.text_input("Contrapartida (Conta Contábil)")
+                    cod_h  = f2.text_input("Cód. Hist. Alterdata (Opcional)")
+                    txt_h  = f3.text_input("Histórico Padrão (Opcional)")
+                    b1, b2, b3, b4 = st.columns(4)
+
+                    if b1.form_submit_button("✅ Salvar Regra"):
+                        if contra:
+                            conn = None
+                            try:
+                                conn = get_connection()
+                                cursor = conn.cursor()
+                                cursor.execute(
+                                    "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil, cod_historico_erp, historico_padrao) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                                    (id_empresa, banco_selecionado, termo_final, item['Sinal'], contra, cod_h, txt_h)
+                                )
+                                id_inserido = cursor.lastrowid
+                                conn.commit()
+                                undo_manager.push('salvar_regra', {'id_regra': id_inserido})
+                                aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                                st.success("Regra salva!")
+                            except mysql.connector.Error as err: st.error(f"Erro ao salvar regra: {err}")
+                            finally:
+                                if conn: conn.close()
+                            st.rerun()
+                        else:
+                            st.error("Preencha a conta de contrapartida.")
+
+                    if b2.form_submit_button("🗑️ Ignorar Lixo"):
                         conn = None
                         try:
                             conn = get_connection()
                             cursor = conn.cursor()
                             cursor.execute(
-                                "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil, cod_historico_erp, historico_padrao) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                                (id_empresa, banco_selecionado, termo_final, item['Sinal'], contra, cod_h, txt_h)
+                                "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil) VALUES (%s,%s,%s,%s,%s)",
+                                (id_empresa, banco_selecionado, termo_final, item['Sinal'], 'IGNORAR')
                             )
                             id_inserido = cursor.lastrowid
                             conn.commit()
-                            undo_manager.push('salvar_regra', {'id_regra': id_inserido})
-
-                            # Recalcula na hora para tirar da fila
+                            undo_manager.push('ignorar_lixo', {'id_regra': id_inserido})
                             aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                            st.success("Regra salva!")
-                        except mysql.connector.Error as err: st.error(f"Erro ao salvar regra: {err}")
+                            st.success("Lançamento ignorado! Saldo atualizado.")
+                        except mysql.connector.Error as err: st.error(f"Erro ao ignorar: {err}")
                         finally:
                             if conn: conn.close()
                         st.rerun()
-                    else:
-                        st.error("Preencha a conta de contrapartida.")
 
-                if b2.form_submit_button("🗑️ Ignorar Lixo"):
-                    conn = None
-                    try:
-                        conn = get_connection()
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil) VALUES (%s,%s,%s,%s,%s)",
-                            (id_empresa, banco_selecionado, termo_final, item['Sinal'], 'IGNORAR')
-                        )
-                        id_inserido = cursor.lastrowid
-                        conn.commit()
-                        undo_manager.push('ignorar_lixo', {'id_regra': id_inserido})
+                    if b3.form_submit_button("⏭️ Pular"):
+                        st.session_state.skipped_indices.append(item['idx_original'])
+                        undo_manager.push('pular', {'idx': item['idx_original']})
+                        st.info("Lançamento pulado.")
+                        st.rerun()
 
-                        # Recalcula na hora para abater do saldo e tirar da fila
-                        aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                        st.success("Lançamento ignorado! Saldo atualizado.")
-                    except mysql.connector.Error as err: st.error(f"Erro ao ignorar: {err}")
-                    finally:
-                        if conn: conn.close()
-                    st.rerun()
-
-                if b3.form_submit_button("⏭️ Pular"):
-                    st.session_state.skipped_indices.append(item['idx_original'])
-                    undo_manager.push('pular', {'idx': item['idx_original']})
-                    st.info("Lançamento pulado.")
-                    st.rerun()
-
-                if b4.form_submit_button("🔄 Resetar Fila"):
-                    st.session_state.skipped_indices = []
-                    undo_manager.clear()
-                    st.info("Fila de pulados e histórico de desfazer resetados.")
-                    st.rerun()
+                    if b4.form_submit_button("🔄 Resetar Fila"):
+                        st.session_state.skipped_indices = []
+                        st.session_state.busca_fila      = ''
+                        undo_manager.clear()
+                        st.info("Fila de pulados, busca e histórico de desfazer resetados.")
+                        st.rerun()
 
         # SE A FILA ESTIVER VAZIA, MOSTRA O EXPORT
         else:
@@ -789,8 +804,8 @@ with st.expander("📊 Gerenciar Contas Contábeis por Banco", expanded=False):
                     if st.session_state.editando_conta_banco_id:
                         old = df_contas_banco[df_contas_banco['id'] == st.session_state.editando_conta_banco_id].iloc[0]
                         undo_manager.push('editar_conta_banco', {
-                            'id_conta': st.session_state.editando_conta_banco_id,
-                            'old_nome_banco': old['nome_banco'],
+                            'id_conta':          st.session_state.editando_conta_banco_id,
+                            'old_nome_banco':     old['nome_banco'],
                             'old_conta_contabil': old['conta_contabil']
                         })
                         cursor.execute(
