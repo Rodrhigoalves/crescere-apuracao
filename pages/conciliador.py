@@ -251,20 +251,20 @@ def extrair_por_recintos(file_bytes):
 
 
 # ==========================================
-# MOTOR ESPECÍFICO ITAÚ (CORRIGIDO)
+# MOTOR ESPECÍFICO ITAÚ (BLINDADO - TEXTO BRUTO)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_pdf_itau(file_bytes):
     dados, ignoradas_raw = [], []
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            # 1. Variáveis de controle declaradas FORA do loop de páginas (Resolve bug de resetar a leitura)
             in_movimento = False
             current_date = None
             ano = str(pd.Timestamp.now().year)
             
             for page in pdf.pages:
-                texto = page.extract_text(layout=True)
+                # Usar extração padrão (sem layout) evita espaços fantasmas gerados por coordenadas
+                texto = page.extract_text()
                 if not texto: continue
                 
                 match_ano = re.search(r'\b(20[2-9]\d)\b', texto)
@@ -274,46 +274,39 @@ def extrair_pdf_itau(file_bytes):
                 linhas = texto.split('\n')
                 
                 for linha in linhas:
-                    if 'Data' in linha and 'Descrição' in linha and 'Entradas' in linha:
+                    linha_strip = linha.strip()
+                    linha_norm = padronizar_texto(linha_strip)
+                    
+                    # Gatilho inicial seguro: normalizado e sem depender de espaços
+                    if 'DATA' in linha_norm and 'DESCRICAO' in linha_norm and ('ENTRADA' in linha_norm or 'SAIDA' in linha_norm or 'CREDITO' in linha_norm):
                         in_movimento = True
                         continue
                     
                     if in_movimento:
-                        linha_upper = linha.upper()
-                        
-                        # 3. Ignora linhas de saldo e limite que sujavam o totalizador
-                        if any(k in linha_upper for k in ['SALDO EM', 'SALDO FINAL', 'CHEQUE ESPECIAL', 'LIMITE', 'SDO CT']):
+                        # Ignora totalizadores e informativos
+                        if any(k in linha_norm for k in ['SALDO EM', 'SALDO FINAL', 'CHEQUE ESPECIAL', 'LIMITE', 'SDO CT']):
                             continue
 
-                        # 2. Carry-forward de data: se achar a data, atualiza. Se não, usa a da iteração anterior.
-                        match_data = re.search(r'^(\s*\d{2}/\d{2})\b', linha)
+                        # Busca data estritamente no início da linha
+                        match_data = re.search(r'^(\d{2}/\d{2})\b', linha_strip)
                         if match_data:
-                            data_raw = match_data.group(1).strip()
-                            current_date = f"{data_raw}/{ano}"
-                            desc_start = match_data.end()
-                        else:
-                            desc_start = 0
+                            current_date = f"{match_data.group(1)}/{ano}"
+                            linha_strip = linha_strip[match_data.end():].strip()
 
                         if not current_date:
                             continue
 
-                        # Encontra o último valor monetário na linha
-                        valores = re.finditer(r'\d{1,3}(?:\.\d{3})*,\d{2}', linha)
-                        v_list = list(valores)
-                        
-                        if v_list:
-                            v_match = v_list[-1]
-                            valor_str = v_match.group()
-                            pos_valor = v_match.start()
+                        # O Itaú encosta o valor negativo no fim. Busca o valor e se há um "-" no final.
+                        match_valor = re.search(r'\s(\d{1,3}(?:\.\d{3})*,\d{2})(-?)$', linha_strip)
+                        if match_valor:
+                            valor_str = match_valor.group(1)
+                            sinal_str = match_valor.group(2)
                             
-                            # 4. Determinação de sinal precisa pelo sufixo '-' 
-                            trecho_final = linha[pos_valor:].strip()
-                            sinal = '-' if '-' in trecho_final else '+'
-                            
+                            sinal = '-' if sinal_str == '-' else '+'
                             valor_num = float(valor_str.replace('.', '').replace(',', '.'))
                             
-                            # Extração limpa da descrição até o começo do valor monetário
-                            desc = linha[desc_start:pos_valor].strip()
+                            # A descrição é tudo que sobrou antes do valor
+                            desc = linha_strip[:match_valor.start()].strip()
                             desc_limpa = padronizar_texto(desc)
                             
                             if desc_limpa and len(desc_limpa) >= 2:
@@ -324,9 +317,9 @@ def extrair_pdf_itau(file_bytes):
                                     'Sinal': sinal
                                 })
                             else:
-                                ignoradas_raw.append(linha.strip())
+                                ignoradas_raw.append(linha_strip)
                         else:
-                            ignoradas_raw.append(linha.strip())
+                            ignoradas_raw.append(linha_strip)
     except Exception as e:
         logging.exception(f"Erro no Itaú: {e}")
         
@@ -426,32 +419,47 @@ def extrair_texto_ofx(file_bytes):
     return pd.DataFrame(dados_extraidos)
 
 # ==========================================
-# MOTOR ESPECÍFICO BANCO DO BRASIL (PLANILHAS)
+# MOTOR ESPECÍFICO BANCO DO BRASIL (CAÇADOR DE CABEÇALHO)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
-    """Lê extratos em Excel ou CSV (Padrão Banco do Brasil)"""
     try:
+        # Lê tudo como string sem assumir a linha inicial para não se perder
         if nome_arquivo.lower().endswith('.csv'):
             try:
-                df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=',', skiprows=2)
-                if 'Valor R$ ' not in df_raw.columns and 'Valor' not in df_raw.columns:
-                    df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=';', skiprows=2)
+                df_full = pd.read_csv(io.BytesIO(file_bytes), sep=',', header=None, dtype=str)
+                if len(df_full.columns) < 3:
+                    df_full = pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str)
             except:
-                df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=';', skiprows=2)
+                df_full = pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str)
         else:
-            df_raw = pd.read_excel(io.BytesIO(file_bytes), skiprows=2)
+            df_full = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
         
-        df_raw.columns = [str(c).strip() for c in df_raw.columns]
+        # Caçador Dinâmico: Varre as linhas procurando onde a tabela realmente começa
+        header_idx = -1
+        for idx, row in df_full.iterrows():
+            row_str = padronizar_texto(" ".join([str(x) for x in row.values]))
+            if 'DATA' in row_str and 'HISTORICO' in row_str and 'VALOR' in row_str:
+                header_idx = idx
+                break
+        
+        if header_idx == -1:
+            logging.error("Cabeçalho não encontrado na planilha BB.")
+            return pd.DataFrame()
+
+        # Define as colunas e corta o lixo superior
+        df_raw = df_full.iloc[header_idx+1:].copy()
+        df_raw.columns = [str(c).strip() for c in df_full.iloc[header_idx].values]
         
         dados = []
-        col_data = 'Data' if 'Data' in df_raw.columns else df_raw.columns[0]
-        col_hist = 'Historico' if 'Historico' in df_raw.columns else None
-        col_detalhe = 'Detalhamento Hist.' if 'Detalhamento Hist.' in df_raw.columns else None
-        col_valor = 'Valor R$' if 'Valor R$' in df_raw.columns else ('Valor' if 'Valor' in df_raw.columns else None)
-        col_sinal = 'Inf.' if 'Inf.' in df_raw.columns else None
+        # Encontra as colunas ignorando diferenças de espaços ("Valor R$ ", "Valor", etc)
+        col_data = next((c for c in df_raw.columns if 'DATA' in padronizar_texto(c)), None)
+        col_hist = next((c for c in df_raw.columns if 'HISTORICO' in padronizar_texto(c)), None)
+        col_detalhe = next((c for c in df_raw.columns if 'DETALHAMENTO' in padronizar_texto(c)), None)
+        col_valor = next((c for c in df_raw.columns if 'VALOR' in padronizar_texto(c)), None)
+        col_sinal = next((c for c in df_raw.columns if 'INF' in padronizar_texto(c)), None)
 
-        if col_hist and col_valor:
+        if col_hist and col_valor and col_data:
             for _, row in df_raw.iterrows():
                 data_raw = str(row[col_data]).strip()
                 if not re.match(r'\d{2}/\d{2}/\d{2,4}', data_raw):
@@ -459,7 +467,8 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 
                 desc = str(row[col_hist]).strip()
                 
-                if col_detalhe and pd.notna(row[col_detalhe]) and str(row[col_detalhe]).strip() != 'nan':
+                # Regra estrita de mescla do detalhamento sem números
+                if col_detalhe and pd.notna(row[col_detalhe]) and str(row[col_detalhe]).strip().lower() != 'nan':
                     detalhe_str = str(row[col_detalhe]).strip()
                     detalhe_sem_numeros = re.sub(r'\d+', '', detalhe_str)
                     detalhe_limpo = re.sub(r'[^\w\s]', ' ', detalhe_sem_numeros) 
@@ -469,11 +478,15 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                         desc += " " + detalhe_limpo
                     
                 valor_str = str(row[col_valor]).replace('R$', '').strip()
-                if pd.isna(row[col_valor]) or valor_str == 'nan':
+                if pd.isna(row[col_valor]) or valor_str.lower() == 'nan' or valor_str == '':
                     continue
                     
-                valor_num = float(valor_str.replace('.', '').replace(',', '.'))
+                try:
+                    valor_num = float(valor_str.replace('.', '').replace(',', '.'))
+                except ValueError:
+                    continue
                 
+                # Regra de Entrada e Saída
                 if col_sinal and pd.notna(row[col_sinal]):
                     sinal = '+' if str(row[col_sinal]).strip().upper() == 'C' else '-'
                 else:
@@ -487,8 +500,7 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 })
         return pd.DataFrame(dados)
     except Exception as e:
-        st.error(f"Erro ao processar a planilha {nome_arquivo}: {e}")
-        logging.exception("Erro na extração Planilha BB")
+        logging.exception(f"Erro na extração Planilha BB: {e}")
         return pd.DataFrame()
 
 
@@ -608,24 +620,33 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                 extensao = file.name.lower()
                 
                 if extensao.endswith('.pdf'):
-                    if banco_selecionado == 'ITAU':
+                    # Identifica auto-magicamente para não depender apenas do selectbox
+                    banco_pdf = identificar_banco_no_pdf(file.getvalue())
+                    if banco_pdf == 'ITAU' or banco_selecionado == 'ITAU':
                         df_ex, ign = extrair_pdf_itau(file.getvalue())
                     else:
                         df_ex, ign = extrair_por_recintos(file.getvalue())
                     
-                    lista_dfs.append(df_ex)
-                    criticas.extend(ign['criticas'])
-                    comuns.extend(ign['comuns'])
-                    
-                elif extensao.endswith('.xlsx') or extensao.endswith('.csv'):
-                    df_ex = extrair_planilha_bb(file.getvalue(), extensao)
                     if not df_ex.empty:
                         lista_dfs.append(df_ex)
+                        criticas.extend(ign['criticas'])
+                        comuns.extend(ign['comuns'])
+                    else:
+                        st.warning(f"⚠️ Extrator PDF não encontrou transações em: {file.name}")
+                        
+                elif extensao.endswith('.xlsx') or extensao.endswith('.csv'):
+                    df_ex = extrair_planilha_bb(file.getvalue(), file.name)
+                    if not df_ex.empty:
+                        lista_dfs.append(df_ex)
+                    else:
+                        st.warning(f"⚠️ Extrator BB não encontrou transações na planilha: {file.name}")
                         
                 elif extensao.endswith('.ofx'):
                     df_ex = extrair_texto_ofx(file.getvalue())
                     if not df_ex.empty:
                         lista_dfs.append(df_ex)
+                    else:
+                        st.warning(f"⚠️ Extrator OFX não encontrou transações em: {file.name}")
 
             st.session_state.df_bruto        = pd.concat(lista_dfs, ignore_index=True) if lista_dfs else pd.DataFrame()
             st.session_state.skipped_indices = []
