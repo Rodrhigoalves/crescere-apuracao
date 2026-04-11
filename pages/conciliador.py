@@ -73,7 +73,6 @@ def formatar_cnpj(cnpj_limpo):
         return cnpj_limpo
     return f"{cnpj_limpo[:2]}.{cnpj_limpo[2:5]}.{cnpj_limpo[5:8]}/{cnpj_limpo[8:12]}-{cnpj_limpo[12:]}"
 
-# FILTRO GLOBAL: BARREIRA ANTI-SALDO
 def eh_linha_de_saldo(descricao):
     d = padronizar_texto(descricao)
     if 'SALDO' in d or 'SDO' in d:
@@ -139,6 +138,41 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
     st.session_state.pendentes               = pd.DataFrame(pendentes)
     st.session_state.linhas_ignoradas_regras = linhas_ignoradas_regras
 
+# =============================================================================
+# DEFESAS CONTRA EXCEL BANCÁRIO (O Conversor e o Leitor Robusto)
+# =============================================================================
+def converter_data_excel(data_raw):
+    data_raw = str(data_raw).strip()
+    match = re.search(r'^(\d{2})/(\d{2})/(\d{2,4})', data_raw)
+    if match:
+        ano = match.group(3)
+        if len(ano) == 2: ano = '20' + ano
+        return f"{match.group(1)}/{match.group(2)}/{ano}"
+    
+    match = re.search(r'^(\d{4})-(\d{2})-(\d{2})', data_raw)
+    if match:
+        return f"{match.group(3)}/{match.group(2)}/{match.group(1)}"
+        
+    return None
+
+def ler_planilha_robusto(file_bytes, nome_arquivo):
+    nome_min = nome_arquivo.lower()
+    if nome_min.endswith('.csv'):
+        try: return pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str, encoding='utf-8')
+        except: return pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str, encoding='latin1')
+    else:
+        try: 
+            return pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+        except Exception:
+            try:
+                dfs = pd.read_html(io.BytesIO(file_bytes), encoding='utf-8', decimal=',', thousands='.')
+                return dfs[0].astype(str) if dfs else pd.DataFrame()
+            except:
+                try:
+                    dfs = pd.read_html(io.BytesIO(file_bytes), encoding='latin1', decimal=',', thousands='.')
+                    return dfs[0].astype(str) if dfs else pd.DataFrame()
+                except:
+                    return pd.DataFrame()
 
 # =============================================================================
 # 3. INTELIGÊNCIA: AUTO-LEITURA E EXTRAÇÃO
@@ -271,19 +305,16 @@ def extrair_por_recintos(file_bytes):
 
 
 # ==========================================
-# MOTOR ESPECÍFICO SICOOB (LÓGICA DE BLOCOS)
+# MOTOR ESPECÍFICO SICOOB (LÓGICA DE BLOCOS + TRAVA RIGOROSA)
 # ==========================================
 def processar_bloco_sicoob(bloco, ano, dados):
     texto_bloco = " ".join(bloco)
-    
     match_data = re.search(r'^(\d{2}/\d{2})\b', texto_bloco)
     if not match_data: return
     data_ext = f"{match_data.group(1)}/{ano}"
     
-    # Procura o valor que fica espremido no final do bloco "1.500,00 C"
     matches_valor = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]?)\s*[\*]*$', texto_bloco, re.IGNORECASE))
     if not matches_valor:
-        # Tenta em qualquer lugar da string caso não esteja no exato final
         matches_valor = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]?)', texto_bloco, re.IGNORECASE))
         if not matches_valor: return
         
@@ -291,13 +322,10 @@ def processar_bloco_sicoob(bloco, ano, dados):
     valor_str = match_v.group(1)
     sinal_str = match_v.group(2).upper()
     
-    # A descrição é tudo entre a data e o valor capturado
     desc_raw = texto_bloco[match_data.end():match_v.start()].strip()
-    
-    # Faxina agressiva Sicoob
-    desc_junta = re.sub(r'\*+\.\d{3}\.\d{3}-\*+', '', desc_raw) # Mata CPF oculto
+    desc_junta = re.sub(r'\*+\.\d{3}\.\d{3}-\*+', '', desc_raw)
     desc_junta = re.sub(r'\bDOC\.?:?\b', '', desc_junta, flags=re.IGNORECASE)
-    desc_junta = re.sub(r'\d+', '', desc_junta) # Mata numeros
+    desc_junta = re.sub(r'\d+', '', desc_junta)
     desc_junta = re.sub(r'[.\-\/]', ' ', desc_junta)
     desc_junta = padronizar_texto(re.sub(r'\s+', ' ', desc_junta).strip())
     
@@ -308,16 +336,11 @@ def processar_bloco_sicoob(bloco, ano, dados):
     if sinal_str == 'C': sinal = '+'
     elif sinal_str == 'D': sinal = '-'
     else:
-        sinal = '-' # Padrão sicoob
+        sinal = '-'
         if any(x in desc_junta for x in ['RECEB', 'CREDIT', 'DEPOSIT', 'RESGATE', 'ESTORNO', 'DEVOLUCAO', 'PIX A FAVOR']):
             sinal = '+'
             
-    dados.append({
-        'Data': data_ext,
-        'Descricao': desc_junta,
-        'Valor': abs(valor_num),
-        'Sinal': sinal
-    })
+    dados.append({'Data': data_ext, 'Descricao': desc_junta, 'Valor': abs(valor_num), 'Sinal': sinal})
 
 @st.cache_data(show_spinner=False)
 def extrair_pdf_sicoob(file_bytes):
@@ -325,10 +348,11 @@ def extrair_pdf_sicoob(file_bytes):
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             ano = str(pd.Timestamp.now().year)
-            in_table = False
             bloco_atual = []
 
             for page in pdf.pages:
+                in_table = False 
+                
                 texto = page.extract_text()
                 if not texto: continue
                 
@@ -341,42 +365,34 @@ def extrair_pdf_sicoob(file_bytes):
                     linha_strip = linha.strip()
                     linha_norm = padronizar_texto(linha_strip)
                     
-                    # Identifica onde a tabela de movimentação começa e termina
-                    if 'DATA' in linha_norm and 'HISTORICO' in linha_norm:
+                    if 'HISTORICO DE MOVIMENTACAO' in linha_norm or ('DATA' in linha_norm and 'HISTORICO' in linha_norm):
                         in_table = True
-                        continue
-                    
+                        continue 
+                        
                     if in_table and any(x in linha_norm for x in ['RESUMO', 'SALDOS', 'TOTAIS', 'OUVIDORIA']):
-                        if any(x in linha_norm for x in ['RESUMO', 'SALDOS', 'TOTAIS']):
-                            in_table = False
-                            if bloco_atual:
-                                processar_bloco_sicoob(bloco_atual, ano, dados)
-                                bloco_atual = []
+                        in_table = False
+                        if bloco_atual:
+                            processar_bloco_sicoob(bloco_atual, ano, dados)
+                            bloco_atual = []
                         continue
                         
-                    # Pula cabeçalhos que se repetem no meio das páginas
-                    if in_table and ('SICOOB' in linha_norm or 'HISTORICO DE MOVIMENTACAO' in linha_norm):
+                    if not in_table:
                         continue
-
-                    if not in_table: continue
+                        
                     if eh_linha_de_saldo(linha_norm): continue
                     if len(linha_strip) < 3: continue
 
-                    # Se a linha começa com DD/MM, é um novo lançamento
                     match_data = re.search(r'^(\d{2}/\d{2})\b', linha_strip)
                     if match_data:
-                        if bloco_atual:
-                            processar_bloco_sicoob(bloco_atual, ano, dados)
+                        if bloco_atual: processar_bloco_sicoob(bloco_atual, ano, dados)
                         bloco_atual = [linha_strip]
                     elif bloco_atual:
-                        # Se não tem data, faz parte da descrição da data atual
                         bloco_atual.append(linha_strip)
 
-            # Processa o último bloco que ficou pendente no final do PDF
             if bloco_atual:
                 processar_bloco_sicoob(bloco_atual, ano, dados)
 
-    except Exception as e:
+    except Exception as e: 
         logging.exception(f"Erro no Sicoob: {e}")
         
     return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
@@ -610,17 +626,9 @@ def extrair_texto_ofx(file_bytes):
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
     try:
-        if nome_arquivo.lower().endswith('.csv'):
-            try:
-                df_full = pd.read_csv(io.BytesIO(file_bytes), sep=',', header=None, dtype=str)
-                if len(df_full.columns) < 3:
-                    df_full = pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str)
-            except:
-                df_full = pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str)
-        else:
-            df_full = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+        df_full = ler_planilha_robusto(file_bytes, nome_arquivo)
+        if df_full.empty: return pd.DataFrame()
         
-        # Encontrar dinamicamente o cabeçalho
         header_idx = -1
         for idx, row in df_full.iterrows():
             row_str = padronizar_texto(" ".join([str(x) for x in row.values if pd.notna(x)]))
@@ -628,8 +636,7 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 header_idx = idx
                 break
         
-        if header_idx == -1:
-            return pd.DataFrame()
+        if header_idx == -1: return pd.DataFrame()
 
         df_raw = df_full.iloc[header_idx+1:].copy()
         colunas_limpas = [padronizar_texto(str(c)) for c in df_full.iloc[header_idx].values]
@@ -639,16 +646,13 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         col_hist = next((c for c in colunas_limpas if 'HIST' in c and 'COD' not in c), None)
         col_valor = next((c for c in colunas_limpas if 'VALOR' in c), None)
 
-        if not col_data or not col_valor:
-            return pd.DataFrame()
+        if not col_data or not col_valor: return pd.DataFrame()
 
         dados = []
         for _, row in df_raw.iterrows():
-            data_raw = str(row[col_data]).strip()
-            if not re.match(r'\d{2}/\d{2}/\d{2,4}', data_raw):
-                continue
+            data_raw = converter_data_excel(str(row[col_data]))
+            if not data_raw: continue
             
-            # Montagem da Descrição
             texto_historico = str(row[col_hist]).strip() if (col_hist and pd.notna(row[col_hist])) else ""
             if texto_historico.upper() == 'NAN': texto_historico = ""
 
@@ -657,46 +661,34 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
             if texto_detalhe.upper() == 'NAN': texto_detalhe = ""
             
             desc_raw = f"{texto_historico} {texto_detalhe}".strip()
-            desc_junta = re.sub(r'\d+', '', desc_raw) # Remove números 
+            desc_junta = re.sub(r'\d+', '', desc_raw) 
             desc_junta = padronizar_texto(re.sub(r'[^\w\s]', ' ', desc_junta).strip())
                 
-            if eh_linha_de_saldo(desc_junta):
-                continue
+            if eh_linha_de_saldo(desc_junta): continue
 
-            # Processamento de Valor e Sinal
             valor_bruto = str(row[col_valor]).upper().strip()
-            if pd.isna(row[col_valor]) or valor_bruto == 'NAN' or valor_bruto == '':
-                continue
+            if pd.isna(row[col_valor]) or valor_bruto == 'NAN' or valor_bruto == '': continue
 
             is_credit = False
             is_debit = False
 
-            # Avalia a intenção do sinal ANTES de limpar os caracteres
             if 'C' in valor_bruto or '+' in valor_bruto: is_credit = True
             elif 'D' in valor_bruto or '-' in valor_bruto: is_debit = True
 
-            # Limpa o valor para float
             valor_limpo = re.sub(r'[^\d.,]', '', valor_bruto)
             if not valor_limpo: continue
 
-            if ',' in valor_limpo and '.' in valor_limpo:
-                valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
-            elif ',' in valor_limpo:
-                valor_limpo = valor_limpo.replace(',', '.')
+            if ',' in valor_limpo and '.' in valor_limpo: valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
+            elif ',' in valor_limpo: valor_limpo = valor_limpo.replace(',', '.')
 
-            try:
-                valor_num = float(valor_limpo)
-            except ValueError:
-                continue
+            try: valor_num = float(valor_limpo)
+            except ValueError: continue
 
             if valor_num == 0: continue
-
-            # Se não tiver letra C ou D e nem sinal de menos, o BB trata como entrada (positivo)
-            if not is_credit and not is_debit:
-                is_credit = True
+            if not is_credit and not is_debit: is_credit = True
 
             dados.append({
-                'Data': data_raw[:10],
+                'Data': data_raw,
                 'Descricao': desc_junta if desc_junta else "SEM DESCRICAO",
                 'Valor': abs(valor_num),
                 'Sinal': '+' if is_credit else '-'
@@ -714,22 +706,13 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bradesco(file_bytes, nome_arquivo):
     try:
-        # Lê tudo sem cabeçalho para achar a linha correta dinamicamente
-        if nome_arquivo.lower().endswith('.csv'):
-            try:
-                df_full = pd.read_csv(io.BytesIO(file_bytes), sep=',', header=None, dtype=str)
-                if len(df_full.columns) < 3:
-                    df_full = pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str)
-            except:
-                df_full = pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str)
-        else:
-            df_full = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+        df_full = ler_planilha_robusto(file_bytes, nome_arquivo)
+        if df_full.empty: return pd.DataFrame()
         
-        # Desce a planilha até achar "DATA" e alguma coluna de identificação
         header_idx = -1
         for idx, row in df_full.iterrows():
             row_str = padronizar_texto(" ".join([str(x) for x in row.values if pd.notna(x)]))
-            if 'DATA' in row_str and any(w in row_str for w in ['LANCAMENTO', 'HISTORICO', 'DESCRICAO', 'DOCTO']):
+            if 'DATA' in row_str and any(w in row_str for w in ['LANCAM', 'HIST', 'DESCR', 'DCTO', 'DOCTO']):
                 header_idx = idx
                 break
         
@@ -738,7 +721,6 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
         df_raw = df_full.iloc[header_idx+1:].copy()
         colunas_limpas = [padronizar_texto(str(c)) for c in df_full.iloc[header_idx].values]
         
-        # Resolve nomes duplicados do pandas
         colunas_unicas = []
         for i, col in enumerate(colunas_limpas):
             base = col if col and col != 'NAN' else f"COLUNA_VAZIA_{i}"
@@ -748,18 +730,18 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
         df_raw.columns = colunas_unicas
         
         col_data = next((c for c in colunas_unicas if 'DATA' in c), colunas_unicas[0])
-        col_lanc = next((c for c in colunas_unicas if any(w in c for w in ['LANCAMENTO', 'HIST', 'DESCR'])), colunas_unicas[1])
+        col_lanc = next((c for c in colunas_unicas if any(w in c for w in ['LANCAM', 'HIST', 'DESCR'])), colunas_unicas[1])
         col_cred = next((c for c in colunas_unicas if 'CRED' in c), None)
         col_deb  = next((c for c in colunas_unicas if 'DEB' in c), None)
         col_valor = next((c for c in colunas_unicas if 'VALOR' in c), None)
         
         dados = []
         for idx, row in df_raw.iterrows():
-            data_val = str(row[col_data]).strip()
-            
-            # Corta a leitura assim que achar TOTAL ou SALDO FINAL na data
-            if 'TOTAL' in data_val.upper() or 'SALDO' in data_val.upper(): break
-            if not re.match(r'\d{2}/\d{2}/\d{2,4}', data_val): continue
+            check_end = str(row[col_data]) + " " + str(row[col_lanc])
+            if 'TOTAL' in check_end.upper() or 'SALDO' in check_end.upper(): break
+                
+            data_val = converter_data_excel(str(row[col_data]))
+            if not data_val: continue
                 
             desc = padronizar_texto(str(row[col_lanc]).strip())
             if eh_linha_de_saldo(desc): continue
@@ -767,7 +749,6 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
             valor_final = 0.0
             sinal_final = '+'
             
-            # Checa se o Bradesco exportou com colunas de Crédito e Débito separadas
             if col_cred and col_deb:
                 v_cred = str(row[col_cred]).strip() if pd.notna(row[col_cred]) else ""
                 v_deb = str(row[col_deb]).strip() if pd.notna(row[col_deb]) else ""
@@ -789,7 +770,6 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
                         sinal_final = '-'
                     except ValueError: pass
 
-            # Checa se exportou com uma coluna unificada de "Valor"
             elif col_valor:
                 v_val = str(row[col_valor]).strip()
                 if v_val and v_val.upper() != 'NAN':
@@ -804,7 +784,7 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
             
             if valor_final > 0:
                 dados.append({
-                    'Data': data_val[:10],
+                    'Data': data_val,
                     'Descricao': desc,
                     'Valor': abs(valor_final),
                     'Sinal': sinal_final
@@ -903,7 +883,6 @@ if uploaded_files:
                     mensagens_auto.append(f"Banco '{banco_detectado}' identificado")
             break
             
-    # Avisos fixos ao invés do pop-up chato (toast)
     if mensagens_auto:
         st.success("✅ " + " | ".join(mensagens_auto))
 
