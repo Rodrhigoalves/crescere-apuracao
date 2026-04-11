@@ -309,38 +309,54 @@ def extrair_por_recintos(file_bytes):
 # ==========================================
 def processar_bloco_sicoob(bloco, ano, dados):
     texto_bloco = " ".join(bloco)
+    
+    # 1. Extrair Data
     match_data = re.search(r'^(\d{2}/\d{2})\b', texto_bloco)
     if not match_data: return
     data_ext = f"{match_data.group(1)}/{ano}"
     
-    matches_valor = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]?)\s*[\*]*$', texto_bloco, re.IGNORECASE))
-    if not matches_valor:
-        matches_valor = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]?)', texto_bloco, re.IGNORECASE))
-        if not matches_valor: return
+    # 2. Extrair TODOS os valores monetários do bloco
+    matches_valor = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]?)', texto_bloco, re.IGNORECASE))
+    if not matches_valor: return
         
-    match_v = matches_valor[-1]
+    # O valor correto da transação SEMPRE é o PRIMEIRO que aparece na frase 
+    # (Isso nos blinda contra saldos vazando nas linhas de baixo)
+    match_v = matches_valor[0]
     valor_str = match_v.group(1)
     sinal_str = match_v.group(2).upper()
     
-    desc_raw = texto_bloco[match_data.end():match_v.start()].strip()
-    desc_junta = re.sub(r'\*+\.\d{3}\.\d{3}-\*+', '', desc_raw)
-    desc_junta = re.sub(r'\bDOC\.?:?\b', '', desc_junta, flags=re.IGNORECASE)
-    desc_junta = re.sub(r'\d+', '', desc_junta)
-    desc_junta = re.sub(r'[.\-\/]', ' ', desc_junta)
-    desc_junta = padronizar_texto(re.sub(r'\s+', ' ', desc_junta).strip())
-    
-    if eh_linha_de_saldo(desc_junta) or not desc_junta: return
-        
     valor_num = float(valor_str.replace('.', '').replace(',', '.'))
     
+    # 3. Limpar a Descrição
+    desc_limpa = texto_bloco[match_data.end():].strip()
+    
+    # Remove apenas os valores em dinheiro encontrados para não sujar o texto
+    for m in matches_valor:
+        desc_limpa = desc_limpa.replace(m.group(0), ' ')
+        
+    # Faxina leve sem destruir dados úteis
+    desc_limpa = re.sub(r'\*+\.\d{3}\.\d{3}-\*+', '', desc_limpa) # Tira CPF oculto
+    desc_limpa = re.sub(r'\bDOC\.?:?\b', 'DOC', desc_limpa, flags=re.IGNORECASE)
+    desc_limpa = re.sub(r'\b[CD]\b', '', desc_limpa) # Remove C ou D perdidos
+    desc_limpa = padronizar_texto(desc_limpa)
+    
+    # 4. Barreira de Saldo
+    if eh_linha_de_saldo(desc_limpa) or not desc_limpa: return
+        
+    # 5. Definir Sinal
     if sinal_str == 'C': sinal = '+'
     elif sinal_str == 'D': sinal = '-'
     else:
         sinal = '-'
-        if any(x in desc_junta for x in ['RECEB', 'CREDIT', 'DEPOSIT', 'RESGATE', 'ESTORNO', 'DEVOLUCAO', 'PIX A FAVOR']):
+        if any(x in desc_limpa for x in ['RECEB', 'CREDIT', 'DEPOSIT', 'RESGATE', 'ESTORNO', 'DEVOLUCAO', 'PIX A FAVOR']):
             sinal = '+'
             
-    dados.append({'Data': data_ext, 'Descricao': desc_junta, 'Valor': abs(valor_num), 'Sinal': sinal})
+    dados.append({
+        'Data': data_ext,
+        'Descricao': desc_limpa,
+        'Valor': abs(valor_num),
+        'Sinal': sinal
+    })
 
 @st.cache_data(show_spinner=False)
 def extrair_pdf_sicoob(file_bytes):
@@ -379,7 +395,13 @@ def extrair_pdf_sicoob(file_bytes):
                     if not in_table:
                         continue
                         
-                    if eh_linha_de_saldo(linha_norm): continue
+                    # Se achar linha de saldo, empurra o que estiver na gaveta e pula a linha
+                    if eh_linha_de_saldo(linha_norm):
+                        if bloco_atual:
+                            processar_bloco_sicoob(bloco_atual, ano, dados)
+                            bloco_atual = []
+                        continue
+                        
                     if len(linha_strip) < 3: continue
 
                     match_data = re.search(r'^(\d{2}/\d{2})\b', linha_strip)
@@ -396,8 +418,6 @@ def extrair_pdf_sicoob(file_bytes):
         logging.exception(f"Erro no Sicoob: {e}")
         
     return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
-
-
 # ==========================================
 # MOTOR ESPECÍFICO ITAÚ
 # ==========================================
