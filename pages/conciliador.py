@@ -124,7 +124,7 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
 
 
 # =============================================================================
-# 3. INTELIGÊNCIA: AUTO-LEITURA E EXTRAÇÃO (PDF, OFX e PLANILHAS)
+# 3. INTELIGÊNCIA: AUTO-LEITURA E EXTRAÇÃO
 # =============================================================================
 BBOX_HEADER_AREA    = (0, 0, 600, 150)
 BBOX_BANK_NAME_AREA = (50, 0, 550, 150)
@@ -251,7 +251,7 @@ def extrair_por_recintos(file_bytes):
 
 
 # ==========================================
-# MOTOR ESPECÍFICO ITAÚ (BLINDADO - TEXTO BRUTO)
+# MOTOR ESPECÍFICO ITAÚ
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_pdf_itau(file_bytes):
@@ -259,11 +259,13 @@ def extrair_pdf_itau(file_bytes):
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             in_movimento = False
+            terminou_leitura = False
             current_date = None
             ano = str(pd.Timestamp.now().year)
             
             for page in pdf.pages:
-                # Usar extração padrão (sem layout) evita espaços fantasmas gerados por coordenadas
+                if terminou_leitura: break
+                
                 texto = page.extract_text()
                 if not texto: continue
                 
@@ -277,17 +279,18 @@ def extrair_pdf_itau(file_bytes):
                     linha_strip = linha.strip()
                     linha_norm = padronizar_texto(linha_strip)
                     
-                    # Gatilho inicial seguro: normalizado e sem depender de espaços
                     if 'DATA' in linha_norm and 'DESCRICAO' in linha_norm and ('ENTRADA' in linha_norm or 'SAIDA' in linha_norm or 'CREDITO' in linha_norm):
                         in_movimento = True
                         continue
                     
                     if in_movimento:
-                        # Ignora totalizadores e informativos
-                        if any(k in linha_norm for k in ['SALDO EM', 'SALDO FINAL', 'CHEQUE ESPECIAL', 'LIMITE', 'SDO CT']):
+                        if 'SALDO FINAL' in linha_norm or 'SDO FINAL' in linha_norm:
+                            terminou_leitura = True
+                            break
+
+                        if any(k in linha_norm for k in ['SALDO EM', 'CHEQUE ESPECIAL', 'LIMITE', 'SDO CT']):
                             continue
 
-                        # Busca data estritamente no início da linha
                         match_data = re.search(r'^(\d{2}/\d{2})\b', linha_strip)
                         if match_data:
                             current_date = f"{match_data.group(1)}/{ano}"
@@ -296,17 +299,31 @@ def extrair_pdf_itau(file_bytes):
                         if not current_date:
                             continue
 
-                        # O Itaú encosta o valor negativo no fim. Busca o valor e se há um "-" no final.
-                        match_valor = re.search(r'\s(\d{1,3}(?:\.\d{3})*,\d{2})(-?)$', linha_strip)
-                        if match_valor:
-                            valor_str = match_valor.group(1)
-                            sinal_str = match_valor.group(2)
+                        matches = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})(-?)', linha_strip))
+                        if matches:
+                            v_match = None
+                            if len(matches) >= 2:
+                                m_last = matches[-1]
+                                m_penult = matches[-2]
+                                
+                                distancia = m_last.start() - m_penult.end()
+                                ta_no_fim = (len(linha_strip) - m_last.end()) <= 10
+                                
+                                if ta_no_fim and distancia <= 25:
+                                    v_match = m_penult
+                                    linha_strip = linha_strip[:m_last.start()].strip()
+                                else:
+                                    v_match = m_last
+                            else:
+                                v_match = matches[0]
+
+                            valor_str = v_match.group(1)
+                            sinal_str = v_match.group(2)
                             
                             sinal = '-' if sinal_str == '-' else '+'
                             valor_num = float(valor_str.replace('.', '').replace(',', '.'))
                             
-                            # A descrição é tudo que sobrou antes do valor
-                            desc = linha_strip[:match_valor.start()].strip()
+                            desc = linha_strip[:v_match.start()].strip()
                             desc_limpa = padronizar_texto(desc)
                             
                             if desc_limpa and len(desc_limpa) >= 2:
@@ -324,6 +341,7 @@ def extrair_pdf_itau(file_bytes):
         logging.exception(f"Erro no Itaú: {e}")
         
     return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
+
 
 # ==========================================
 # MOTOR GENÉRICO OFX
@@ -362,11 +380,9 @@ def extrair_texto_ofx(file_bytes):
             try:
                 valor = float(valor_raw.replace(',', '.'))
             except (ValueError, AttributeError):
-                logging.warning(f"OFX: valor inválido no bloco FITID={fitid}, ignorando.")
                 continue
 
             VALORES_GENERICOS = {'', 'NONE', 'NULL', '-', 'N/A', 'NAO INFORMADO', 'NAO IDENTIFICADO'}
-
             name_pad = padronizar_texto(name)
             memo_pad = padronizar_texto(memo)
 
@@ -380,25 +396,7 @@ def extrair_texto_ofx(file_bytes):
                     partes = [memo_pad]
 
             if not partes:
-                tipo_legivel = {
-                    'CREDIT':      'CREDITO',
-                    'DEBIT':       'DEBITO',
-                    'INT':         'JUROS',
-                    'DIV':         'DIVIDENDO',
-                    'FEE':         'TARIFA',
-                    'SRVCHG':      'ENCARGO',
-                    'DEP':         'DEPOSITO',
-                    'ATM':         'SAQUE ATM',
-                    'POS':         'COMPRA POS',
-                    'XFER':        'TRANSFERENCIA',
-                    'CHECK':       'CHEQUE',
-                    'PAYMENT':     'PAGAMENTO',
-                    'CASH':        'SAQUE',
-                    'DIRECTDEP':   'DEPOSITO DIRETO',
-                    'DIRECTDEBIT': 'DEBITO DIRETO',
-                    'OTHER':       'OUTROS',
-                }.get(trntype.upper(), trntype.upper() if trntype else 'SEM DESCRICAO')
-                partes.append(tipo_legivel)
+                partes.append(trntype.upper() if trntype else 'SEM DESCRICAO')
 
             descricao_final = " | ".join(partes) if partes else "SEM DESCRICAO"
 
@@ -408,23 +406,16 @@ def extrair_texto_ofx(file_bytes):
                 'Valor':     abs(valor),
                 'Sinal':     '+' if valor > 0 else '-'
             })
-
-        if not dados_extraidos:
-            st.warning("Nenhuma transação encontrada no OFX. Verifique se o arquivo está no formato padrão.")
-
     except Exception as e:
-        st.error(f"Erro ao processar OFX: {e}")
         logging.exception("Erro na extração OFX")
-
     return pd.DataFrame(dados_extraidos)
 
 # ==========================================
-# MOTOR ESPECÍFICO BANCO DO BRASIL (CAÇADOR DE CABEÇALHO)
+# MOTOR ESPECÍFICO BANCO DO BRASIL
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
     try:
-        # Lê tudo como string sem assumir a linha inicial para não se perder
         if nome_arquivo.lower().endswith('.csv'):
             try:
                 df_full = pd.read_csv(io.BytesIO(file_bytes), sep=',', header=None, dtype=str)
@@ -435,77 +426,113 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         else:
             df_full = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
         
-        # Caçador Dinâmico: Varre as linhas procurando onde a tabela realmente começa
         header_idx = -1
         for idx, row in df_full.iterrows():
             row_str = padronizar_texto(" ".join([str(x) for x in row.values]))
-            if 'DATA' in row_str and 'HISTORICO' in row_str and 'VALOR' in row_str:
+            if 'DATA' in row_str and 'VALOR' in row_str:
                 header_idx = idx
                 break
         
         if header_idx == -1:
-            logging.error("Cabeçalho não encontrado na planilha BB.")
             return pd.DataFrame()
 
-        # Define as colunas e corta o lixo superior
         df_raw = df_full.iloc[header_idx+1:].copy()
-        df_raw.columns = [str(c).strip() for c in df_full.iloc[header_idx].values]
+        colunas_limpas = [str(c).strip().upper() for c in df_full.iloc[header_idx].values]
+        df_raw.columns = colunas_limpas
         
         dados = []
-        # Encontra as colunas ignorando diferenças de espaços ("Valor R$ ", "Valor", etc)
-        col_data = next((c for c in df_raw.columns if 'DATA' in padronizar_texto(c)), None)
-        col_hist = next((c for c in df_raw.columns if 'HISTORICO' in padronizar_texto(c)), None)
-        col_detalhe = next((c for c in df_raw.columns if 'DETALHAMENTO' in padronizar_texto(c)), None)
-        col_valor = next((c for c in df_raw.columns if 'VALOR' in padronizar_texto(c)), None)
-        col_sinal = next((c for c in df_raw.columns if 'INF' in padronizar_texto(c)), None)
+        
+        col_data = next((c for c in colunas_limpas if 'DATA' in c), None)
+        
+        # Localização da Coluna de Histórico e Detalhamento
+        col_hist = 'HISTORICO' if 'HISTORICO' in colunas_limpas else ('HISTÓRICO' if 'HISTÓRICO' in colunas_limpas else None)
+        if not col_hist:
+            col_hist = next((c for c in colunas_limpas if 'HIST' in c and 'COD' not in c), None)
+        col_detalhe = next((c for c in colunas_limpas if 'DETALHAMENTO' in c or 'COMPLEMENTO' in c), None)
+        
+        # Localização da Coluna de Valor e Sinal
+        col_valor = next((c for c in colunas_limpas if 'VALOR' in c), None)
+        col_sinal = next((c for c in colunas_limpas if 'INF' in c), None)
 
-        if col_hist and col_valor and col_data:
+        if col_data and col_valor:
             for _, row in df_raw.iterrows():
                 data_raw = str(row[col_data]).strip()
                 if not re.match(r'\d{2}/\d{2}/\d{2,4}', data_raw):
                     continue 
                 
-                desc = str(row[col_hist]).strip()
+                # --- MÁGICA 1: COLUNA VIRTUAL DE DESCRIÇÃO (MANTIDA) ---
+                texto_historico = str(row[col_hist]).strip() if (col_hist and pd.notna(row[col_hist])) else ""
+                if texto_historico.lower() == 'nan': texto_historico = ""
+
+                texto_detalhe = str(row[col_detalhe]).strip() if (col_detalhe and pd.notna(row[col_detalhe])) else ""
+                if texto_detalhe.lower() == 'nan': texto_detalhe = ""
                 
-                # Regra estrita de mescla do detalhamento sem números
-                if col_detalhe and pd.notna(row[col_detalhe]) and str(row[col_detalhe]).strip().lower() != 'nan':
-                    detalhe_str = str(row[col_detalhe]).strip()
-                    detalhe_sem_numeros = re.sub(r'\d+', '', detalhe_str)
-                    detalhe_limpo = re.sub(r'[^\w\s]', ' ', detalhe_sem_numeros) 
-                    detalhe_limpo = re.sub(r'\s+', ' ', detalhe_limpo).strip()
+                terceira_coluna_unida = f"{texto_historico} {texto_detalhe}".strip()
+                descricao_sem_numeros = re.sub(r'\d+', '', terceira_coluna_unida)
+                descricao_sem_especiais = re.sub(r'[^\w\s]', ' ', descricao_sem_numeros) 
+                descricao_final = padronizar_texto(re.sub(r'\s+', ' ', descricao_sem_especiais).strip())
                     
-                    if detalhe_limpo:
-                        desc += " " + detalhe_limpo
+                # --- LEITURA DO VALOR PURO (SEM SINAL/TEXTO) ---
+                valor_bruto = str(row[col_valor]).upper()
+                if pd.isna(row[col_valor]) or valor_bruto == 'NAN' or valor_bruto == '':
+                    continue
                     
-                valor_str = str(row[col_valor]).replace('R$', '').strip()
-                if pd.isna(row[col_valor]) or valor_str.lower() == 'nan' or valor_str == '':
+                valor_limpo = valor_bruto.replace('R$', '').replace('"', '').replace("'", "").strip()
+                valor_limpo = re.sub(r'[^\d.,-]', '', valor_limpo)
+                if not valor_limpo:
                     continue
                     
                 try:
-                    valor_num = float(valor_str.replace('.', '').replace(',', '.'))
+                    if ',' in valor_limpo and '.' in valor_limpo:
+                        if valor_limpo.rfind(',') > valor_limpo.rfind('.'):
+                            valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
+                        else:
+                            valor_limpo = valor_limpo.replace(',', '')
+                    elif ',' in valor_limpo:
+                        valor_limpo = valor_limpo.replace(',', '.')
+                    valor_num = float(valor_limpo)
                 except ValueError:
                     continue
                 
-                # Regra de Entrada e Saída
+                # --- MÁGICA 2: NOVA COLUNA VIRTUAL DE TIPO DE MOVIMENTO ---
+                # Essa lógica substitui a dependência frágil da coluna INF bruta.
+                tipo_movimento = None
+                
                 if col_sinal and pd.notna(row[col_sinal]):
-                    sinal = '+' if str(row[col_sinal]).strip().upper() == 'C' else '-'
-                else:
-                    sinal = '+' if valor_num >= 0 else '-'
+                    # Pegamos a Inf original e limpamos todos os asteriscos e aspas
+                    marca_sinal_suja = str(row[col_sinal]).upper()
+                    marca_sinal_limpa = marca_sinal_suja.replace('*', '').replace('"', '').replace("'", "").strip()
                     
+                    if 'C' in marca_sinal_limpa or '+' in marca_sinal_limpa:
+                        tipo_movimento = 'ENTRADA'
+                    elif 'D' in marca_sinal_limpa or '-' in marca_sinal_limpa:
+                        tipo_movimento = 'SAIDA'
+                
+                # Fallback: Se a coluna INF ficou vazia (ex: era só um asterisco isolado), tenta caçar o sinal no valor
+                if not tipo_movimento:
+                    if 'C' in valor_bruto or '+' in valor_bruto:
+                        tipo_movimento = 'ENTRADA'
+                    elif 'D' in valor_bruto or '-' in valor_bruto:
+                        tipo_movimento = 'SAIDA'
+                    else:
+                        tipo_movimento = 'ENTRADA' if valor_num >= 0 else 'SAIDA'
+                
+                # Converte o Tipo de Movimento Textual para o Sinal Final do Sistema
+                sinal_final = '+' if tipo_movimento == 'ENTRADA' else '-'
+
                 dados.append({
                     'Data': data_raw,
-                    'Descricao': padronizar_texto(desc),
+                    'Descricao': descricao_final,
                     'Valor': abs(valor_num),
-                    'Sinal': sinal
+                    'Sinal': sinal_final
                 })
         return pd.DataFrame(dados)
     except Exception as e:
-        logging.exception(f"Erro na extração Planilha BB: {e}")
         return pd.DataFrame()
 
 
 # =============================================================================
-# 4. CARGA DE DADOS DO BANCO
+# 4. CARGA DE DADOS DO BANCO E DE REGRAS
 # =============================================================================
 @st.cache_data(ttl=60, show_spinner=False)
 def carregar_empresas():
@@ -607,10 +634,13 @@ if not conta_banco_fixa:
     conta_banco_fixa = empresa_data.get('conta_contabil', 'N/A')
 
 col_cfg2.text_input("Conta Banco (Âncora)", value=conta_banco_fixa, disabled=True)
-saldo_anterior_informado = col_cfg3.number_input("Saldo Anterior (R$)", value=0.00, step=100.00, format="%.2f")
+
+col_saldos1, col_saldos2 = col_cfg3.columns(2)
+saldo_anterior_informado = col_saldos1.number_input("Saldo Anterior (R$)", value=0.00, step=100.00, format="%.2f")
+saldo_final_informado = col_saldos2.number_input("Saldo Final (Opcional)", value=0.00, step=100.00, format="%.2f", help="Informe o saldo final real do extrato para checagem do sistema.")
 
 # =============================================================================
-# PASSO 4: PROCESSAMENTO (ROTEAMENTO INTELIGENTE)
+# PASSO 4: PROCESSAMENTO
 # =============================================================================
 if uploaded_files and conta_banco_fixa != 'N/A':
     if st.button("⚙️ Processar Extratos"):
@@ -620,7 +650,6 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                 extensao = file.name.lower()
                 
                 if extensao.endswith('.pdf'):
-                    # Identifica auto-magicamente para não depender apenas do selectbox
                     banco_pdf = identificar_banco_no_pdf(file.getvalue())
                     if banco_pdf == 'ITAU' or banco_selecionado == 'ITAU':
                         df_ex, ign = extrair_pdf_itau(file.getvalue())
@@ -648,7 +677,17 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                     else:
                         st.warning(f"⚠️ Extrator OFX não encontrou transações em: {file.name}")
 
-            st.session_state.df_bruto        = pd.concat(lista_dfs, ignore_index=True) if lista_dfs else pd.DataFrame()
+            if lista_dfs:
+                df_consolidado = pd.concat(lista_dfs, ignore_index=True)
+                
+                # GARANTIA FINAL: Assegura que o tipo de dado da coluna de Valor é número antes de somar
+                df_consolidado['Valor'] = pd.to_numeric(df_consolidado['Valor'], errors='coerce').fillna(0.0)
+                df_consolidado['Sinal'] = df_consolidado['Sinal'].astype(str).apply(lambda x: '+' if '+' in x else '-')
+                
+                st.session_state.df_bruto = df_consolidado
+            else:
+                st.session_state.df_bruto = pd.DataFrame()
+                
             st.session_state.skipped_indices = []
             st.session_state.criticas        = criticas
             st.session_state.comuns          = comuns
@@ -662,7 +701,7 @@ elif conta_banco_fixa == 'N/A':
     st.error("Configure a conta contábil antes de processar.")
 
 # =============================================================================
-# PASSO 5: RESULTADOS + MESA DE TREINAMENTO + DESFAZER
+# PASSO 5: RESULTADOS + DETETIVE + AUDITORIA
 # =============================================================================
 if not st.session_state.df_bruto.empty:
     st.divider()
@@ -670,8 +709,10 @@ if not st.session_state.df_bruto.empty:
     df_validos = st.session_state.df_bruto[
         ~st.session_state.df_bruto.index.isin(st.session_state.linhas_ignoradas_regras)
     ]
-    total_e               = df_validos[df_validos['Sinal'] == '+']['Valor'].sum()
-    total_s               = df_validos[df_validos['Sinal'] == '-']['Valor'].sum()
+    
+    # A soma agora flui perfeitamente, já que os sinais foram classificados explicitamente
+    total_e               = float(df_validos[df_validos['Sinal'] == '+']['Valor'].sum())
+    total_s               = float(df_validos[df_validos['Sinal'] == '-']['Valor'].sum())
     saldo_final_calculado = saldo_anterior_informado + total_e - total_s
 
     c1, c2, c3, c4 = st.columns(4)
@@ -680,14 +721,51 @@ if not st.session_state.df_bruto.empty:
     c3.metric("🔴 Saídas Válidas",        formatar_moeda(total_s))
     c4.metric("⚖️ Saldo Final Calculado", formatar_moeda(saldo_final_calculado))
 
-    if st.session_state.criticas or st.session_state.comuns:
-        with st.expander(f"⚠️ Alertas de Leitura ({len(st.session_state.criticas)} críticas / {len(st.session_state.comuns)} informativas)"):
+    # O DETETIVE: Verificação Inteligente de Saldo
+    if saldo_final_informado != 0.00:
+        diferenca = round(abs(saldo_final_calculado - saldo_final_informado), 2)
+        if diferenca > 0.01:
+            st.error(f"⚠️ **Atenção!** Há uma diferença de **{formatar_moeda(diferenca)}** entre o saldo calculado e o que você informou.")
+            
+            encontrou_pista = False
+            
+            suspeitos_bruto = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == diferenca]
+            if not suspeitos_bruto.empty:
+                st.info(f"💡 **PISTA 1:** Encontrei {len(suspeitos_bruto)} lançamento(s) na fila com o valor exato da diferença. Pode ser que um deles devesse ter sido ignorado ou o sinal esteja errado.")
+                encontrou_pista = True
+                
+            metade = round(diferenca / 2, 2)
+            suspeitos_metade = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == metade]
+            if not suspeitos_metade.empty:
+                st.info(f"💡 **PISTA 2:** Há um lançamento na fila de **{formatar_moeda(metade)}**. Se o sinal dele estiver invertido (Entrada no lugar de Saída ou vice-versa), ele gera exatamente essa diferença!")
+                encontrou_pista = True
+
+            str_diff_br = f"{diferenca:.2f}".replace('.', ',')
+            suspeitos_lixo = [l for l in st.session_state.criticas if str_diff_br in l]
+            if suspeitos_lixo:
+                st.info(f"💡 **PISTA 3:** O valor de {formatar_moeda(diferenca)} aparece nas linhas que o sistema ignorou. Talvez um lançamento válido tenha se perdido por falta de cabeçalho. Vá na auditoria abaixo e verifique!")
+                encontrou_pista = True
+
+            if not encontrou_pista:
+                st.info("💡 **PISTA:** Não encontrei um culpado exato. Essa diferença deve ser a soma de múltiplos lançamentos que faltaram ou vieram a mais.")
+        else:
+            st.success("✅ **O Saldo Final Calculado bateu perfeitamente com o Saldo Final Informado!**")
+
+    # PAINEL OCULTO DE AUDITORIA
+    with st.expander("🔍 Auditoria: Ver tudo que foi Lido e Ignorado (Bruto)"):
+        st.markdown("### 📊 Dados Lidos e Capturados")
+        st.dataframe(st.session_state.df_bruto, use_container_width=True)
+        
+        st.markdown("### 🗑️ Linhas Ignoradas (Lixo)")
+        if st.session_state.criticas or st.session_state.comuns:
             if st.session_state.criticas:
-                st.error("Linhas com valores suspeitos:")
+                st.error("Linhas descartadas que possuíam valores (Podem conter erros de leitura):")
                 for l in list(dict.fromkeys(st.session_state.criticas)): st.code(l)
             if st.session_state.comuns:
-                st.info("Ruídos ignorados:")
-                for l in list(dict.fromkeys(st.session_state.comuns))[:20]: st.text(l)
+                st.info("Linhas de texto descartadas (Ruído de cabeçalho):")
+                for l in list(dict.fromkeys(st.session_state.comuns))[:30]: st.text(l)
+        else:
+            st.write("Nenhuma linha foi descartada.")
 
     # =========================================================================
     # MESA DE TREINAMENTO
@@ -699,13 +777,7 @@ if not st.session_state.df_bruto.empty:
         st.subheader("🎓 Mesa de Treinamento")
 
         col_busca, col_limpar, col_total = st.columns([3, 1, 1])
-
-        busca_fila = col_busca.text_input(
-            "🔍 Buscar na fila (opcional)",
-            value=st.session_state.busca_fila,
-            placeholder="Ex: PAULO SERGIO, NATURAL ALEM...",
-            key="input_busca_fila"
-        )
+        busca_fila = col_busca.text_input("🔍 Buscar na fila (opcional)", value=st.session_state.busca_fila)
         st.session_state.busca_fila = busca_fila
 
         if col_limpar.button("✖ Limpar busca", disabled=not busca_fila):
@@ -717,13 +789,10 @@ if not st.session_state.df_bruto.empty:
             termo_busca   = padronizar_texto(busca_fila.strip())
             fila_filtrada = fila[fila['Descricao'].str.contains(re.escape(termo_busca), case=False, na=False)]
 
-        col_total.metric(
-            "📋 Pendentes",
-            f"{len(fila_filtrada)} / {len(fila)}" if busca_fila.strip() else len(fila)
-        )
+        col_total.metric("📋 Pendentes", f"{len(fila_filtrada)} / {len(fila)}" if busca_fila.strip() else len(fila))
 
         if fila_filtrada.empty:
-            st.warning(f"Nenhum lançamento pendente encontrado para **'{busca_fila}'**. Limpe a busca para continuar.")
+            st.warning("Nenhum lançamento encontrado.")
         else:
             item = fila_filtrada.iloc[0]
 
@@ -733,7 +802,6 @@ if not st.session_state.df_bruto.empty:
             m3.metric("↕️ Tipo",  "🟢 Entrada" if item['Sinal'] == '+' else "🔴 Saída")
             m4.write(f"**Descrição Extraída:** {item['Descricao']}")
 
-            # BOTÃO DESFAZER
             if not undo_manager.is_empty():
                 if m5.button("↩️ Desfazer Ação", type="primary"):
                     ultima_acao = undo_manager.pop()
@@ -747,14 +815,28 @@ if not st.session_state.df_bruto.empty:
                             cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (d['id_regra'],))
                             conn.commit()
                             aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                            st.toast("Ação desfeita! Lançamento voltou para a fila.")
+                            st.toast("Ação desfeita!")
                         elif t == 'pular':
                             if d['idx'] in st.session_state.skipped_indices:
                                 st.session_state.skipped_indices.remove(d['idx'])
-                            st.toast("Pulo desfeito! Lançamento voltou para a fila.")
-                    except mysql.connector.Error as err: st.error(f"Erro ao desfazer: {err}")
+                    except mysql.connector.Error as err: st.error(f"Erro: {err}")
                     finally:
                         if conn: conn.close()
+                    st.rerun()
+
+            with st.expander("🛠️ Corrigir Leitura (Caso o extrator tenha confundido saldo/valor/texto)", expanded=False):
+                st.caption("Altere os dados abaixo e clique em Salvar para corrigir este lançamento definitivamente na fila.")
+                ce1, ce2, ce3 = st.columns([3, 1, 1])
+                nova_desc = ce1.text_input("Descrição Correta", value=item['Descricao'], key=f"nd_{item['idx_original']}")
+                novo_val = ce2.number_input("Valor Correto", value=float(item['Valor']), step=0.01, format="%.2f", key=f"nv_{item['idx_original']}")
+                novo_sin = ce3.selectbox("Sinal Correto", ['+', '-'], index=0 if item['Sinal']=='+' else 1, key=f"ns_{item['idx_original']}")
+                
+                if st.button("💾 Aplicar Correção Permanente", type="primary"):
+                    st.session_state.df_bruto.at[item['idx_original'], 'Descricao'] = nova_desc
+                    st.session_state.df_bruto.at[item['idx_original'], 'Valor'] = float(novo_val)
+                    st.session_state.df_bruto.at[item['idx_original'], 'Sinal'] = novo_sin
+                    aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                    st.toast("Lançamento corrigido com sucesso!")
                     st.rerun()
 
             palavras_desc = item['Descricao'].split()
@@ -763,7 +845,6 @@ if not st.session_state.df_bruto.empty:
 
             if termo_final:
                 palavras_busca = termo_final.split()
-                
                 mascara = pd.Series([True] * len(df_p), index=df_p.index)
                 for palavra in palavras_busca:
                     mascara &= df_p['Descricao'].str.contains(re.escape(palavra), case=False, na=False)
@@ -772,14 +853,8 @@ if not st.session_state.df_bruto.empty:
                 impacto = len(df_impactados)
                 
                 st.caption(f"A regra atuará sobre o termo: **{termo_final}**")
-                
                 if impacto > 0:
                     st.info(f"💡 Esta regra resolverá **{impacto}** lançamento(s) desta fila.")
-                    with st.expander(f"📋 Ver lançamentos impactados ({impacto})", expanded=False):
-                        st.dataframe(
-                            df_impactados[['Data', 'Descricao', 'Valor', 'Sinal']].reset_index(drop=True),
-                            use_container_width=True
-                        )
 
             with st.form("form_treino"):
                 f1, f2, f3 = st.columns(3)
@@ -792,11 +867,14 @@ if not st.session_state.df_bruto.empty:
                     if contra:
                         conn = None
                         try:
+                            cod_h_val = cod_h if cod_h.strip() else None
+                            txt_h_val = txt_h if txt_h.strip() else None
+
                             conn = get_connection()
                             cursor = conn.cursor()
                             cursor.execute(
                                 "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil, cod_historico_erp, historico_padrao) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                                (id_empresa, banco_selecionado, termo_final, item['Sinal'], contra, cod_h, txt_h)
+                                (id_empresa, banco_selecionado, termo_final, item['Sinal'], contra, cod_h_val, txt_h_val)
                             )
                             id_inserido = cursor.lastrowid
                             conn.commit()
@@ -823,7 +901,7 @@ if not st.session_state.df_bruto.empty:
                         conn.commit()
                         undo_manager.push('ignorar_lixo', {'id_regra': id_inserido})
                         aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                        st.success("Lançamento ignorado! Saldo atualizado.")
+                        st.success("Lançamento ignorado!")
                     except mysql.connector.Error as err: st.error(f"Erro ao ignorar: {err}")
                     finally:
                         if conn: conn.close()
@@ -832,16 +910,13 @@ if not st.session_state.df_bruto.empty:
                 if b3.form_submit_button("⏭️ Pular"):
                     st.session_state.skipped_indices.append(item['idx_original'])
                     undo_manager.push('pular', {'idx': item['idx_original']})
-                    st.info("Lançamento pulado.")
                     st.rerun()
 
                 if b4.form_submit_button("🔄 Resetar Fila"):
                     st.session_state.skipped_indices = []
                     st.session_state.busca_fila      = ''
                     undo_manager.clear()
-                    st.info("Fila de pulados, busca e histórico de desfazer resetados.")
                     st.rerun()
-
     else:
         st.success("🎉 Todos os lançamentos pendentes foram mapeados! Exportação liberada.")
         if st.session_state.prontos:
@@ -910,11 +985,14 @@ with st.expander("📚 Gerenciar Regras Cadastradas", expanded=False):
                 if st.form_submit_button("Salvar Edição"):
                     conn = None
                     try:
+                        novo_cod_hist_val = novo_cod_hist if novo_cod_hist.strip() else None
+                        novo_hist_val = novo_hist if novo_hist.strip() else None
+                        
                         conn = get_connection()
                         cursor = conn.cursor()
                         cursor.execute(
                             "UPDATE tb_extratos_regras SET termo_chave=%s, conta_contabil=%s, sinal_esperado=%s, cod_historico_erp=%s, historico_padrao=%s WHERE id=%s",
-                            (novo_termo, nova_conta, novo_sinal, novo_cod_hist, novo_hist, regra_para_editar['id'])
+                            (novo_termo, nova_conta, novo_sinal, novo_cod_hist_val, novo_hist_val, regra_para_editar['id'])
                         )
                         conn.commit()
                         st.session_state.editando_regra_id = None
@@ -948,17 +1026,11 @@ with st.expander("📊 Gerenciar Contas Contábeis por Banco", expanded=False):
                     cursor = conn.cursor()
                     cursor.execute("DELETE FROM empresa_banco_contas WHERE id = %s", (int(c['id']),))
                     conn.commit()
-                    undo_manager.push('deletar_conta_banco', {
-                        'id_conta': c['id'], 'id_empresa': id_empresa,
-                        'nome_banco': c['nome_banco'], 'conta_contabil': c['conta_contabil']
-                    })
                     st.toast("Conta deletada!")
-                except mysql.connector.Error as err: st.error(f"Erro ao deletar: {err}")
+                except mysql.connector.Error as err: st.error(f"Erro: {err}")
                 finally:
                     if conn: conn.close()
                 st.rerun()
-    else:
-        st.info("Nenhuma conta cadastrada para esta empresa.")
 
     st.subheader("Adicionar / Editar Conta por Banco")
     with st.form("form_conta_banco"):
@@ -984,12 +1056,6 @@ with st.expander("📊 Gerenciar Contas Contábeis por Banco", expanded=False):
                     conn = get_connection()
                     cursor = conn.cursor()
                     if st.session_state.editando_conta_banco_id:
-                        old = df_contas_banco[df_contas_banco['id'] == st.session_state.editando_conta_banco_id].iloc[0]
-                        undo_manager.push('editar_conta_banco', {
-                            'id_conta':          st.session_state.editando_conta_banco_id,
-                            'old_nome_banco':     old['nome_banco'],
-                            'old_conta_contabil': old['conta_contabil']
-                        })
                         cursor.execute(
                             "UPDATE empresa_banco_contas SET nome_banco=%s, conta_contabil=%s WHERE id=%s",
                             (novo_nome_banco, nova_conta_contabil, st.session_state.editando_conta_banco_id)
@@ -1000,11 +1066,10 @@ with st.expander("📊 Gerenciar Contas Contábeis por Banco", expanded=False):
                             "INSERT INTO empresa_banco_contas (id_empresa, nome_banco, conta_contabil) VALUES (%s,%s,%s)",
                             (id_empresa, novo_nome_banco, nova_conta_contabil)
                         )
-                        undo_manager.push('adicionar_conta_banco', {'id_conta': cursor.lastrowid})
                         st.success("Conta adicionada!")
                     conn.commit()
                     st.session_state.editando_conta_banco_id = None
-                except mysql.connector.Error as err: st.error(f"Erro ao salvar conta: {err}")
+                except mysql.connector.Error as err: st.error(f"Erro: {err}")
                 finally:
                     if conn: conn.close()
                 st.rerun()
