@@ -249,7 +249,6 @@ def extrair_por_recintos(file_bytes):
             desc_limpa = re.sub(r'\b[DC]\b', '', desc_limpa, flags=re.IGNORECASE)
             desc_limpa = padronizar_texto(desc_limpa.strip())
 
-            # Filtro Global de Saldo
             if eh_linha_de_saldo(desc_limpa):
                 continue
 
@@ -272,7 +271,7 @@ def extrair_por_recintos(file_bytes):
 
 
 # ==========================================
-# MOTOR ESPECÍFICO SICOOB (O ÍNDICE)
+# MOTOR ESPECÍFICO SICOOB (O ÍNDICE + LIMPEZA AGRESSIVA)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_pdf_sicoob(file_bytes):
@@ -330,15 +329,28 @@ def extrair_pdf_sicoob(file_bytes):
                         elif linha_strip == '*':
                             pass
                         else:
-                            desc_clean = re.sub(r'\b\d{4,}[\.\-\/\d]*\b', '', linha_strip).strip()
-                            if desc_clean and len(desc_clean) > 1:
-                                current_bloco['desc_lines'].append(desc_clean)
+                            # Apenas adiciona ao bloco se tiver alguma letra (ignora linhas que são só um numero solto perdido)
+                            if re.search(r'[a-zA-Z]', linha_strip):
+                                current_bloco['desc_lines'].append(linha_strip)
 
                 if current_bloco:
                     blocos.append(current_bloco)
                     
                 for b in blocos:
                     desc_junta = " ".join(b['desc_lines'])
+                    
+                    # --- O TRATOR DE NÚMEROS (Limpeza Agressiva Sicoob) ---
+                    # 1. Mata CPFs mascarados (ex: ***.123.456-**)
+                    desc_junta = re.sub(r'\*+\.\d{3}\.\d{3}-\*+', '', desc_junta)
+                    # 2. Mata a palavra DOC e variações
+                    desc_junta = re.sub(r'\bDOC\.?:?\b', '', desc_junta, flags=re.IGNORECASE)
+                    # 3. Mata TODOS os números da frase
+                    desc_junta = re.sub(r'\d+', '', desc_junta)
+                    # 4. Transforma pontuações (traços, barras, pontos órfãos) em espaços
+                    desc_junta = re.sub(r'[.\-\/]', ' ', desc_junta)
+                    # --------------------------------------------------------
+                    
+                    # Finaliza com os espaçamentos simples e padroniza tudo (sem acentos, UPPER)
                     desc_junta = re.sub(r'\s+', ' ', desc_junta).strip()
                     desc_junta = padronizar_texto(desc_junta)
                     
@@ -835,7 +847,7 @@ defaults = {
     'comuns':                  [],
     'undo_stack':              [],
     'busca_fila':              '',
-    'inicio_operacao':         None, # Variáveis do cronômetro
+    'inicio_operacao':         None,
     'tempo_conclusao':         None,
 }
 for key, val in defaults.items():
@@ -852,7 +864,6 @@ if df_empresas.empty:
 # =============================================================================
 # PASSO 1 E 2: UPLOAD E PRÉ-SELEÇÃO
 # =============================================================================
-# Aceitando .xls agora
 uploaded_files  = st.file_uploader("1. Arraste seus extratos (PDF, OFX, XLS, XLSX, CSV)", type=["pdf", "ofx", "xls", "xlsx", "csv"], accept_multiple_files=True)
 indice_sugerido = 0
 
@@ -905,7 +916,6 @@ saldo_final_informado = col_saldos2.number_input("Saldo Final (Opcional)", value
 if uploaded_files and conta_banco_fixa != 'N/A':
     if st.button("⚙️ Processar Extratos"):
         
-        # Dispara o cronômetro no momento em que o operador começa o processo
         st.session_state.inicio_operacao = time.time()
         st.session_state.tempo_conclusao = None
         
@@ -1120,7 +1130,6 @@ if not st.session_state.df_bruto.empty:
                 df_impactados = df_p[mascara]
                 impacto = len(df_impactados)
                 
-                # PAINEL DE IMPACTO FECHADO POR PADRÃO (VISÃO RAIO-X)
                 if impacto > 0:
                     with st.expander(f"🎯 Visão de Raio-X: Esta regra vai automatizar {impacto} operação(ões) pendente(s).", expanded=False):
                         st.dataframe(
@@ -1191,13 +1200,11 @@ if not st.session_state.df_bruto.empty:
                     undo_manager.clear()
                     st.rerun()
     else:
-        # AQUI FINALIZA O CRONÔMETRO
         if st.session_state.inicio_operacao is not None and st.session_state.tempo_conclusao is None:
             st.session_state.tempo_conclusao = time.time() - st.session_state.inicio_operacao
             
         st.success("🎉 Todos os lançamentos pendentes foram mapeados! Exportação liberada.")
         
-        # EXIBIÇÃO DO TEMPO DE OPERAÇÃO
         if st.session_state.tempo_conclusao is not None:
             minutos = int(st.session_state.tempo_conclusao // 60)
             segundos = int(st.session_state.tempo_conclusao % 60)
