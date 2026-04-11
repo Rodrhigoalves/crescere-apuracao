@@ -147,7 +147,7 @@ BBOX_BANK_NAME_AREA = (50, 0, 550, 150)
 
 BANCOS_KEYWORDS = {
     'STONE':     ['STONE', 'INSTITUIÇÃO DE PAGAMENTO'],
-    'SICOOB':    ['SICOOB', 'BANCOOB', 'SICOOB BANCO'],
+    'SICOOB':    ['SICOOB', 'BANCOOB', 'SICOOB BANCO', 'CREDIMATA'],
     'BRADESCO':  ['BRADESCO', 'BANCO BRADESCO'],
     'ITAU':      ['ITAU', 'BANCO ITAU'],
     'CAIXA':     ['CAIXA', 'CAIXA ECONOMICA FEDERAL'],
@@ -205,7 +205,7 @@ def buscar_conta_por_banco(id_empresa, nome_banco):
         if conn: conn.close()
 
 # ==========================================
-# MOTOR GENÉRICO PDF
+# MOTOR GENÉRICO PDF (STONE, ETC)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_por_recintos(file_bytes):
@@ -271,6 +271,111 @@ def extrair_por_recintos(file_bytes):
 
 
 # ==========================================
+# MOTOR ESPECÍFICO SICOOB (O ÍNDICE)
+# ==========================================
+@st.cache_data(show_spinner=False)
+def extrair_pdf_sicoob(file_bytes):
+    dados, ignoradas_raw = [], []
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            ano = str(pd.Timestamp.now().year)
+            for page in pdf.pages:
+                texto = page.extract_text()
+                if not texto: continue
+                
+                # Tenta achar o ano no cabeçalho do Sicoob
+                match_ano = re.search(r'\b(20[2-9]\d)\b', texto)
+                if match_ano:
+                    ano = match_ano.group(1)
+                    
+                linhas = texto.split('\n')
+                blocos = []
+                current_bloco = None
+                
+                for linha in linhas:
+                    linha_strip = linha.strip()
+                    linha_norm = padronizar_texto(linha_strip)
+                    
+                    if 'SICOOB' in linha_norm or 'HISTORICO DE MOVIMENTACAO' in linha_norm:
+                        continue
+                    if 'DATA' in linha_norm and 'HISTORICO' in linha_norm and 'VALOR' in linha_norm:
+                        continue
+                    if eh_linha_de_saldo(linha_norm):
+                        continue
+                        
+                    # Procura a "cabeça" do lançamento (Data e Valor na mesma linha)
+                    # Ex: "01/12 PIX EMIT.OUTRA IF 1.000,00" ou "01/12 PIX 1.000,00 D"
+                    match_nova = re.search(r'^(\d{2}/\d{2})\s+(.*?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*([C|D|\*]*)?$', linha_strip, re.IGNORECASE)
+                    
+                    if match_nova:
+                        if current_bloco:
+                            blocos.append(current_bloco) # Salva o bloco anterior
+                        
+                        data = f"{match_nova.group(1)}/{ano}"
+                        desc_raw = match_nova.group(2).strip()
+                        valor_str = match_nova.group(3)
+                        sinal_raw = match_nova.group(4).upper() if match_nova.group(4) else ''
+                        
+                        current_bloco = {
+                            'data': data,
+                            'valor_str': valor_str,
+                            'sinal_encontrado': 'C' if 'C' in sinal_raw else ('D' if 'D' in sinal_raw else None),
+                            'desc_lines': [desc_raw] if desc_raw else []
+                        }
+                    elif current_bloco:
+                        # Linhas orfãs que caem no bloco atual (o corpo)
+                        linha_upper = linha_strip.upper()
+                        if linha_upper == 'C':
+                            current_bloco['sinal_encontrado'] = 'C'
+                        elif linha_upper == 'D':
+                            current_bloco['sinal_encontrado'] = 'D'
+                        elif linha_strip == '*':
+                            pass
+                        else:
+                            # Filtro Limpeza de Números Longos (Docs, CPF, CNPJ etc)
+                            # Remove blocos de números colados ou separados por ponto/traço
+                            desc_clean = re.sub(r'\b\d{4,}[\.\-\/\d]*\b', '', linha_strip).strip()
+                            if desc_clean and len(desc_clean) > 1:
+                                current_bloco['desc_lines'].append(desc_clean)
+
+                if current_bloco:
+                    blocos.append(current_bloco)
+                    
+                # Costura e finalização dos blocos do Sicoob
+                for b in blocos:
+                    desc_junta = " ".join(b['desc_lines'])
+                    desc_junta = re.sub(r'\s+', ' ', desc_junta).strip()
+                    desc_junta = padronizar_texto(desc_junta)
+                    
+                    if eh_linha_de_saldo(desc_junta):
+                        continue
+                        
+                    if not desc_junta:
+                        desc_junta = "SEM DESCRICAO"
+                        
+                    valor_num = float(b['valor_str'].replace('.', '').replace(',', '.'))
+                    
+                    # Definição do Sinal (Se o 'D' ou 'C' isolado não salvou o dia, caça na frase)
+                    sinal = '+'
+                    if b['sinal_encontrado'] == 'C': sinal = '+'
+                    elif b['sinal_encontrado'] == 'D': sinal = '-'
+                    else:
+                        sinal = '-' # Sicoob costuma ser débito padrão na dúvida, mas entraremos com filtro:
+                        if any(x in desc_junta for x in ['RECEB', 'CREDIT', 'DEPOSIT', 'RESGATE', 'ESTORNO']):
+                            sinal = '+'
+                            
+                    dados.append({
+                        'Data': b['data'],
+                        'Descricao': desc_junta,
+                        'Valor': abs(valor_num),
+                        'Sinal': sinal
+                    })
+    except Exception as e:
+        logging.exception(f"Erro no Sicoob: {e}")
+        
+    return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
+
+# ==========================================
 # MOTOR ESPECÍFICO ITAÚ
 # ==========================================
 @st.cache_data(show_spinner=False)
@@ -304,9 +409,7 @@ def extrair_pdf_itau(file_bytes):
                         continue
                     
                     if in_movimento:
-                        # Filtro Global de Saldo
                         if eh_linha_de_saldo(linha_norm):
-                            # Se for o Saldo Final de fato, encerra a busca de movimentos daquela tabela
                             if 'SALDO FINAL' in linha_norm or 'SDO FINAL' in linha_norm:
                                 terminou_leitura = True
                                 break
@@ -383,16 +486,12 @@ def extrair_pdf_caixa(file_bytes):
                     linha_strip = linha.strip()
                     linha_norm = padronizar_texto(linha_strip)
                     
-                    # Ignora cabeçalhos clássicos da CEF
                     if 'EXTRATO' in linha_norm or 'DATA MOV' in linha_norm or 'NR. DOC.' in linha_norm:
                         continue
                         
-                    # Filtro Global de Saldo
                     if eh_linha_de_saldo(linha_norm):
                         continue
 
-                    # Captura: Data | Histórico/Doc | Valor C/D | (Opcional) Saldo C/D
-                    # Ex: 02/03/2026 280855 C PIX QRES 40,00 C 64.854,93 D
                     match = re.search(r'^(\d{2}/\d{2}/\d{4})\s+(.*?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD])(?:\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]))?$', linha_strip, re.IGNORECASE)
                     
                     if match:
@@ -401,14 +500,12 @@ def extrair_pdf_caixa(file_bytes):
                         valor_str = match.group(3)
                         sinal_str = match.group(4).upper()
                         
-                        # Extrai o histórico tirando o Nr. Doc. (que sempre vem colado no início, se existir)
                         partes = meio.split(maxsplit=1)
                         if len(partes) > 1 and re.match(r'^\d+$', partes[0]):
                             desc_limpa = padronizar_texto(partes[1])
                         else:
                             desc_limpa = padronizar_texto(meio)
                             
-                        # Re-valida o Histórico pelo Filtro Global
                         if eh_linha_de_saldo(desc_limpa):
                             continue
                             
@@ -487,7 +584,6 @@ def extrair_texto_ofx(file_bytes):
 
             descricao_final = " | ".join(partes) if partes else "SEM DESCRICAO"
 
-            # Filtro Global de Saldo
             if eh_linha_de_saldo(descricao_final):
                 continue
 
@@ -532,16 +628,13 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         df_raw.columns = colunas_limpas
         
         dados = []
-        
         col_data = next((c for c in colunas_limpas if 'DATA' in c), None)
         
-        # Localização da Coluna de Histórico e Detalhamento
         col_hist = 'HISTORICO' if 'HISTORICO' in colunas_limpas else ('HISTÓRICO' if 'HISTÓRICO' in colunas_limpas else None)
         if not col_hist:
             col_hist = next((c for c in colunas_limpas if 'HIST' in c and 'COD' not in c), None)
         col_detalhe = next((c for c in colunas_limpas if 'DETALHAMENTO' in c or 'COMPLEMENTO' in c), None)
         
-        # Localização da Coluna de Valor e Sinal
         col_valor = next((c for c in colunas_limpas if 'VALOR' in c), None)
         col_sinal = next((c for c in colunas_limpas if 'INF' in c), None)
 
@@ -551,7 +644,6 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 if not re.match(r'\d{2}/\d{2}/\d{2,4}', data_raw):
                     continue 
                 
-                # --- COLUNA VIRTUAL DE DESCRIÇÃO ---
                 texto_historico = str(row[col_hist]).strip() if (col_hist and pd.notna(row[col_hist])) else ""
                 if texto_historico.lower() == 'nan': texto_historico = ""
 
@@ -563,11 +655,9 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 descricao_sem_especiais = re.sub(r'[^\w\s]', ' ', descricao_sem_numeros) 
                 descricao_final = padronizar_texto(re.sub(r'\s+', ' ', descricao_sem_especiais).strip())
                     
-                # Filtro Global de Saldo
                 if eh_linha_de_saldo(descricao_final):
                     continue
 
-                # --- LEITURA DO VALOR PURO ---
                 valor_bruto = str(row[col_valor]).upper()
                 if pd.isna(row[col_valor]) or valor_bruto == 'NAN' or valor_bruto == '':
                     continue
@@ -589,7 +679,6 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 except ValueError:
                     continue
                 
-                # --- NOVA COLUNA VIRTUAL DE TIPO DE MOVIMENTO ---
                 tipo_movimento = None
                 
                 if col_sinal and pd.notna(row[col_sinal]):
@@ -619,6 +708,95 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 })
         return pd.DataFrame(dados)
     except Exception as e:
+        return pd.DataFrame()
+
+
+# ==========================================
+# MOTOR ESPECÍFICO BRADESCO (XLS/CSV)
+# ==========================================
+@st.cache_data(show_spinner=False)
+def extrair_planilha_bradesco(file_bytes, nome_arquivo):
+    try:
+        # Pula as 8 linhas de lixo iniciais do Bradesco
+        if nome_arquivo.lower().endswith('.csv'):
+            try:
+                df = pd.read_csv(io.BytesIO(file_bytes), sep=',', header=8, dtype=str)
+                if len(df.columns) < 3:
+                    df = pd.read_csv(io.BytesIO(file_bytes), sep=';', header=8, dtype=str)
+            except:
+                df = pd.read_csv(io.BytesIO(file_bytes), sep=';', header=8, dtype=str)
+        else:
+            df = pd.read_excel(io.BytesIO(file_bytes), header=8, dtype=str)
+        
+        # Identificação robusta de colunas
+        col_data = next((c for c in df.columns if 'DATA' in str(c).upper()), df.columns[0])
+        col_lanc = next((c for c in df.columns if 'LANÇAMENTO' in str(c).upper() or 'LANCAMENTO' in str(c).upper()), df.columns[1])
+        col_cred = next((c for c in df.columns if 'CRÉDITO' in str(c).upper() or 'CREDITO' in str(c).upper()), None)
+        col_deb  = next((c for c in df.columns if 'DÉBITO' in str(c).upper() or 'DEBITO' in str(c).upper()), None)
+        
+        dados = []
+        if col_cred is None or col_deb is None:
+            return pd.DataFrame() # Falhou ao achar as colunas base
+            
+        for idx, row in df.iterrows():
+            data_val = str(row[col_data]).strip()
+            
+            # O FREIO DE MÃO: Achou "Total" na coluna de data, encerra a leitura na hora
+            if 'TOTAL' in data_val.upper():
+                break
+                
+            if not re.match(r'\d{2}/\d{2}/\d{2,4}', data_val):
+                continue
+                
+            desc = padronizar_texto(str(row[col_lanc]).strip())
+            
+            # Filtro Global de Saldo
+            if eh_linha_de_saldo(desc):
+                continue
+                
+            val_cred = str(row[col_cred]).strip().upper() if pd.notna(row[col_cred]) else ""
+            val_deb = str(row[col_deb]).strip().upper() if pd.notna(row[col_deb]) else ""
+            
+            valor_final = 0.0
+            sinal_final = '+'
+            
+            # Se tem valor no crédito, processa e assina como Entrada (+)
+            if val_cred and val_cred != 'NAN' and val_cred != '':
+                v_clean = re.sub(r'[^\d.,]', '', val_cred)
+                if ',' in v_clean and '.' in v_clean:
+                    v_clean = v_clean.replace('.', '').replace(',', '.')
+                elif ',' in v_clean:
+                    v_clean = v_clean.replace(',', '.')
+                try:
+                    valor_final = float(v_clean)
+                    sinal_final = '+'
+                except ValueError:
+                    pass
+            
+            # Se tem valor no débito, processa e assina como Saída (-)
+            elif val_deb and val_deb != 'NAN' and val_deb != '':
+                v_clean = re.sub(r'[^\d.,]', '', val_deb) # O regex tira até o '-' se vier do excel
+                if ',' in v_clean and '.' in v_clean:
+                    v_clean = v_clean.replace('.', '').replace(',', '.')
+                elif ',' in v_clean:
+                    v_clean = v_clean.replace(',', '.')
+                try:
+                    valor_final = float(v_clean)
+                    sinal_final = '-'
+                except ValueError:
+                    pass
+            
+            if valor_final > 0:
+                dados.append({
+                    'Data': data_val,
+                    'Descricao': desc,
+                    'Valor': abs(valor_final),
+                    'Sinal': sinal_final
+                })
+                
+        return pd.DataFrame(dados)
+    except Exception as e:
+        logging.exception(f"Erro Bradesco: {e}")
         return pd.DataFrame()
 
 
@@ -744,6 +922,8 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                     banco_pdf = identificar_banco_no_pdf(file.getvalue())
                     if banco_pdf == 'CAIXA' or banco_selecionado == 'CAIXA':
                         df_ex, ign = extrair_pdf_caixa(file.getvalue())
+                    elif banco_pdf == 'SICOOB' or banco_selecionado == 'SICOOB':
+                        df_ex, ign = extrair_pdf_sicoob(file.getvalue())
                     elif banco_pdf == 'ITAU' or banco_selecionado == 'ITAU':
                         df_ex, ign = extrair_pdf_itau(file.getvalue())
                     else:
@@ -757,11 +937,15 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                         st.warning(f"⚠️ Extrator PDF não encontrou transações em: {file.name}")
                         
                 elif extensao.endswith('.xlsx') or extensao.endswith('.csv'):
-                    df_ex = extrair_planilha_bb(file.getvalue(), file.name)
+                    if banco_selecionado == 'BRADESCO':
+                        df_ex = extrair_planilha_bradesco(file.getvalue(), file.name)
+                    else:
+                        df_ex = extrair_planilha_bb(file.getvalue(), file.name)
+                        
                     if not df_ex.empty:
                         lista_dfs.append(df_ex)
                     else:
-                        st.warning(f"⚠️ Extrator BB não encontrou transações na planilha: {file.name}")
+                        st.warning(f"⚠️ Extrator Excel/CSV não encontrou transações na planilha: {file.name}")
                         
                 elif extensao.endswith('.ofx'):
                     df_ex = extrair_texto_ofx(file.getvalue())
@@ -940,9 +1124,14 @@ if not st.session_state.df_bruto.empty:
                 df_impactados = df_p[mascara]
                 impacto = len(df_impactados)
                 
-                st.caption(f"A regra atuará sobre o termo: **{termo_final}**")
+                # AQUI ESTÁ O PAINEL DE IMPACTO DE VOLTA, E MELHORADO!
                 if impacto > 0:
-                    st.info(f"💡 Esta regra resolverá **{impacto}** lançamento(s) desta fila.")
+                    st.success(f"🎯 **Visão de Raio-X:** Esta regra vai automatizar **{impacto}** operação(ões) pendente(s). Veja quais são:")
+                    st.dataframe(
+                        df_impactados[['Data', 'Descricao', 'Valor', 'Sinal']].style.format({"Valor": "R$ {:.2f}"}),
+                        use_container_width=True,
+                        hide_index=True
+                    )
 
             with st.form("form_treino"):
                 f1, f2, f3 = st.columns(3)
