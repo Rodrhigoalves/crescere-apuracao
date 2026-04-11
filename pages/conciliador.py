@@ -251,7 +251,7 @@ def extrair_por_recintos(file_bytes):
 
 
 # ==========================================
-# MOTOR ESPECÍFICO ITAÚ (PARADA OBRIGATÓRIA NO SALDO FINAL)
+# MOTOR ESPECÍFICO ITAÚ
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_pdf_itau(file_bytes):
@@ -284,7 +284,6 @@ def extrair_pdf_itau(file_bytes):
                         continue
                     
                     if in_movimento:
-                        # Hard Stop
                         if 'SALDO FINAL' in linha_norm or 'SDO FINAL' in linha_norm:
                             terminou_leitura = True
                             break
@@ -438,12 +437,11 @@ def extrair_texto_ofx(file_bytes):
     return pd.DataFrame(dados_extraidos)
 
 # ==========================================
-# MOTOR ESPECÍFICO BANCO DO BRASIL (SOLUÇÃO DA 3ª COLUNA VIRTUAL)
+# MOTOR ESPECÍFICO BANCO DO BRASIL (SOLUÇÃO BLINDADA PARA VALORES)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
     try:
-        # Leitura inicial bruta
         if nome_arquivo.lower().endswith('.csv'):
             try:
                 df_full = pd.read_csv(io.BytesIO(file_bytes), sep=',', header=None, dtype=str)
@@ -454,7 +452,6 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         else:
             df_full = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
         
-        # Caça a linha que tem o cabeçalho correto
         header_idx = -1
         for idx, row in df_full.iterrows():
             row_str = padronizar_texto(" ".join([str(x) for x in row.values]))
@@ -466,29 +463,18 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
             logging.error("Cabeçalho não encontrado na planilha BB.")
             return pd.DataFrame()
 
-        # Isola os dados e limpa os nomes das colunas com precisão
         df_raw = df_full.iloc[header_idx+1:].copy()
         colunas_limpas = [str(c).strip().upper() for c in df_full.iloc[header_idx].values]
         df_raw.columns = colunas_limpas
         
         dados = []
         
-        # 1. Encontra a coluna DATA
         col_data = next((c for c in colunas_limpas if 'DATA' in c), None)
-        
-        # 2. Encontra a coluna HISTORICO (EXCLUINDO o COD. HISTORICO)
         col_hist = 'HISTORICO' if 'HISTORICO' in colunas_limpas else ('HISTÓRICO' if 'HISTÓRICO' in colunas_limpas else None)
-        # Fallback de segurança caso esteja escrito diferente, mas não pegue "COD"
         if not col_hist:
             col_hist = next((c for c in colunas_limpas if 'HIST' in c and 'COD' not in c), None)
-
-        # 3. Encontra a coluna DETALHAMENTO
         col_detalhe = next((c for c in colunas_limpas if 'DETALHAMENTO' in c or 'COMPLEMENTO' in c), None)
-        
-        # 4. Encontra a coluna VALOR
         col_valor = next((c for c in colunas_limpas if 'VALOR' in c), None)
-        
-        # 5. Encontra a coluna INF (SINAL)
         col_sinal = next((c for c in colunas_limpas if 'INF' in c), None)
 
         if col_data and col_valor:
@@ -497,52 +483,64 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 if not re.match(r'\d{2}/\d{2}/\d{2,4}', data_raw):
                     continue 
                 
-                # --- INÍCIO DA MÁGICA DA 3ª COLUNA VIRTUAL ---
-                # Extrai Histórico Limpo
                 texto_historico = str(row[col_hist]).strip() if (col_hist and pd.notna(row[col_hist])) else ""
                 if texto_historico.lower() == 'nan': texto_historico = ""
 
-                # Extrai Detalhamento Limpo
                 texto_detalhe = str(row[col_detalhe]).strip() if (col_detalhe and pd.notna(row[col_detalhe])) else ""
                 if texto_detalhe.lower() == 'nan': texto_detalhe = ""
                 
-                # Cria a 3ª Coluna Unida
                 terceira_coluna_unida = f"{texto_historico} {texto_detalhe}".strip()
-                
-                # Expurga TODOS os números da união
                 descricao_sem_numeros = re.sub(r'\d+', '', terceira_coluna_unida)
-                # Expurga caracteres especiais
                 descricao_sem_especiais = re.sub(r'[^\w\s]', ' ', descricao_sem_numeros) 
-                # Padroniza espaçamento
                 descricao_final = padronizar_texto(re.sub(r'\s+', ' ', descricao_sem_especiais).strip())
-                # --- FIM DA MÁGICA ---
                     
-                # Leitura de Valor (blindado contra pontos e vírgulas)
-                valor_str = str(row[col_valor]).replace('R$', '').strip()
-                if pd.isna(row[col_valor]) or valor_str.lower() == 'nan' or valor_str == '':
+                # ----- NOVA EXTRAÇÃO BLINDADA DE VALORES -----
+                valor_bruto = str(row[col_valor]).upper()
+                if pd.isna(row[col_valor]) or valor_bruto == 'NAN' or valor_bruto == '':
+                    continue
+                    
+                # Remove aspas escondidas, R$, espaços vazios...
+                valor_limpo = valor_bruto.replace('R$', '').replace('"', '').replace("'", "").strip()
+                
+                # Expurga tudo que não é número, vírgula, ponto ou sinal negativo
+                valor_limpo = re.sub(r'[^\d.,-]', '', valor_limpo)
+                if not valor_limpo:
                     continue
                     
                 try:
-                    if ',' in valor_str:
-                        valor_num = float(valor_str.replace('.', '').replace(',', '.'))
-                    else:
-                        valor_num = float(valor_str)
+                    # Trata o padrão brasileiro 1.234,56 ou 1234,56
+                    if ',' in valor_limpo and '.' in valor_limpo:
+                        if valor_limpo.rfind(',') > valor_limpo.rfind('.'):
+                            valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
+                        else:
+                            valor_limpo = valor_limpo.replace(',', '')
+                    elif ',' in valor_limpo:
+                        valor_limpo = valor_limpo.replace(',', '.')
+                        
+                    valor_num = float(valor_limpo)
                 except ValueError:
                     continue
                 
-                # Leitura de Sinal rigorosa
-                sinal = '+'
+                # ----- DEFINIÇÃO DE SINAL (CRÉDITO/DÉBITO) -----
+                sinal = None
+                
+                # 1ª Tentativa: Analisar a coluna "INF." nativa do Banco
                 if col_sinal and pd.notna(row[col_sinal]):
                     marca_sinal = str(row[col_sinal]).strip().upper().replace('"', '')
-                    if marca_sinal == 'C' or marca_sinal == '+':
+                    if marca_sinal in ['C', '+']:
                         sinal = '+'
-                    elif marca_sinal == 'D' or marca_sinal == '-':
+                    elif marca_sinal in ['D', '-']:
+                        sinal = '-'
+                
+                # 2ª Tentativa: Se a coluna INF não existir, verifica se o valor bruto tinha "C" ou "+" cravado nele
+                if not sinal:
+                    if 'C' in valor_bruto or '+' in valor_bruto:
+                        sinal = '+'
+                    elif 'D' in valor_bruto or '-' in valor_bruto:
                         sinal = '-'
                     else:
                         sinal = '+' if valor_num >= 0 else '-'
-                else:
-                    sinal = '+' if valor_num >= 0 else '-'
-                    
+                        
                 dados.append({
                     'Data': data_raw,
                     'Descricao': descricao_final,
