@@ -36,7 +36,7 @@ class UndoStack:
 undo_manager = UndoStack()
 
 # =============================================================================
-# 1. UTILITÁRIOS E CONEXÃO
+# 1. UTILITÁRIOS, CONEXÃO E FILTROS GLOBAIS
 # =============================================================================
 def get_connection():
     try:
@@ -71,6 +71,22 @@ def formatar_cnpj(cnpj_limpo):
     if not cnpj_limpo or len(cnpj_limpo) != 14:
         return cnpj_limpo
     return f"{cnpj_limpo[:2]}.{cnpj_limpo[2:5]}.{cnpj_limpo[5:8]}/{cnpj_limpo[8:12]}-{cnpj_limpo[12:]}"
+
+# FILTRO GLOBAL: BARREIRA ANTI-SALDO
+def eh_linha_de_saldo(descricao):
+    d = padronizar_texto(descricao)
+    if 'SALDO' in d or 'SDO' in d:
+        bloqueios = [
+            'SALDO ANTERIOR', 'SALDO FINAL', 'SALDO DO DIA', 'SALDO DIA', 
+            'SALDO EM', 'SDO FINAL', 'SDO ANTERIOR', 'SDO CT', 'SALDO BLOQUEADO'
+        ]
+        if any(b in d for b in bloqueios):
+            return True
+        if d == 'SALDO' or d == 'SDO':
+            return True
+        if d.startswith('SALDO ') or d.startswith('SDO '):
+            return True
+    return False
 
 # =============================================================================
 # 2. MOTOR DE RECÁLCULO EM TEMPO REAL
@@ -207,7 +223,7 @@ def extrair_por_recintos(file_bytes):
                 linha_ordenada = sorted(linhas_dict[y_key], key=lambda x: x['x0'])
                 texto_completo += " ".join([w['text'] for w in linha_ordenada]) + "\n"
 
-    RUIDO_CABECALHO = ["período:", "página", "saldo anterior", "saldo atual", "saldo final", "cnpj", "emitido em", "extrato de conta", "dados da conta", "nome documento", "instituição agência", "contraparte stone"]
+    RUIDO_CABECALHO = ["período:", "página", "cnpj", "emitido em", "extrato de conta", "dados da conta", "nome documento", "instituição agência", "contraparte stone"]
     linhas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
     dados, ignoradas_raw = [], []
     regex_data  = r'\d{2}/\d{2}/\d{2,4}'
@@ -231,6 +247,10 @@ def extrair_por_recintos(file_bytes):
             for v in valores: desc_limpa = desc_limpa.replace(v, '')
             desc_limpa = re.sub(r'\b[DC]\b', '', desc_limpa, flags=re.IGNORECASE)
             desc_limpa = padronizar_texto(desc_limpa.strip())
+
+            # Filtro Global de Saldo
+            if eh_linha_de_saldo(desc_limpa):
+                continue
 
             if not desc_limpa or len(desc_limpa) < 2: desc_limpa = "SEM DESCRICAO"
 
@@ -284,11 +304,15 @@ def extrair_pdf_itau(file_bytes):
                         continue
                     
                     if in_movimento:
-                        if 'SALDO FINAL' in linha_norm or 'SDO FINAL' in linha_norm:
-                            terminou_leitura = True
-                            break
+                        # Filtro Global de Saldo
+                        if eh_linha_de_saldo(linha_norm):
+                            # Se for o Saldo Final de fato, encerra a busca de movimentos daquela tabela
+                            if 'SALDO FINAL' in linha_norm or 'SDO FINAL' in linha_norm:
+                                terminou_leitura = True
+                                break
+                            continue
 
-                        if any(k in linha_norm for k in ['SALDO EM', 'CHEQUE ESPECIAL', 'LIMITE', 'SDO CT']):
+                        if any(k in linha_norm for k in ['CHEQUE ESPECIAL', 'LIMITE']):
                             continue
 
                         match_data = re.search(r'^(\d{2}/\d{2})\b', linha_strip)
@@ -342,6 +366,69 @@ def extrair_pdf_itau(file_bytes):
         
     return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
 
+# ==========================================
+# MOTOR ESPECÍFICO CAIXA ECONÔMICA FEDERAL
+# ==========================================
+@st.cache_data(show_spinner=False)
+def extrair_pdf_caixa(file_bytes):
+    dados, ignoradas_raw = [], []
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                texto = page.extract_text()
+                if not texto: continue
+                
+                linhas = texto.split('\n')
+                for linha in linhas:
+                    linha_strip = linha.strip()
+                    linha_norm = padronizar_texto(linha_strip)
+                    
+                    # Ignora cabeçalhos clássicos da CEF
+                    if 'EXTRATO' in linha_norm or 'DATA MOV' in linha_norm or 'NR. DOC.' in linha_norm:
+                        continue
+                        
+                    # Filtro Global de Saldo
+                    if eh_linha_de_saldo(linha_norm):
+                        continue
+
+                    # Captura: Data | Histórico/Doc | Valor C/D | (Opcional) Saldo C/D
+                    # Ex: 02/03/2026 280855 C PIX QRES 40,00 C 64.854,93 D
+                    match = re.search(r'^(\d{2}/\d{2}/\d{4})\s+(.*?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD])(?:\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]))?$', linha_strip, re.IGNORECASE)
+                    
+                    if match:
+                        data = match.group(1)
+                        meio = match.group(2)
+                        valor_str = match.group(3)
+                        sinal_str = match.group(4).upper()
+                        
+                        # Extrai o histórico tirando o Nr. Doc. (que sempre vem colado no início, se existir)
+                        partes = meio.split(maxsplit=1)
+                        if len(partes) > 1 and re.match(r'^\d+$', partes[0]):
+                            desc_limpa = padronizar_texto(partes[1])
+                        else:
+                            desc_limpa = padronizar_texto(meio)
+                            
+                        # Re-valida o Histórico pelo Filtro Global
+                        if eh_linha_de_saldo(desc_limpa):
+                            continue
+                            
+                        valor_num = float(valor_str.replace('.', '').replace(',', '.'))
+                        sinal = '+' if sinal_str == 'C' else '-'
+                        
+                        if desc_limpa and len(desc_limpa) >= 2:
+                            dados.append({
+                                'Data': data,
+                                'Descricao': desc_limpa,
+                                'Valor': abs(valor_num),
+                                'Sinal': sinal
+                            })
+                    else:
+                        if len(linha_strip) > 5:
+                            ignoradas_raw.append(linha_strip)
+    except Exception as e:
+        logging.exception(f"Erro na Caixa: {e}")
+        
+    return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
 
 # ==========================================
 # MOTOR GENÉRICO OFX
@@ -399,6 +486,10 @@ def extrair_texto_ofx(file_bytes):
                 partes.append(trntype.upper() if trntype else 'SEM DESCRICAO')
 
             descricao_final = " | ".join(partes) if partes else "SEM DESCRICAO"
+
+            # Filtro Global de Saldo
+            if eh_linha_de_saldo(descricao_final):
+                continue
 
             dados_extraidos.append({
                 'Data':      data_fmt,
@@ -460,7 +551,7 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 if not re.match(r'\d{2}/\d{2}/\d{2,4}', data_raw):
                     continue 
                 
-                # --- MÁGICA 1: COLUNA VIRTUAL DE DESCRIÇÃO (MANTIDA) ---
+                # --- COLUNA VIRTUAL DE DESCRIÇÃO ---
                 texto_historico = str(row[col_hist]).strip() if (col_hist and pd.notna(row[col_hist])) else ""
                 if texto_historico.lower() == 'nan': texto_historico = ""
 
@@ -472,7 +563,11 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 descricao_sem_especiais = re.sub(r'[^\w\s]', ' ', descricao_sem_numeros) 
                 descricao_final = padronizar_texto(re.sub(r'\s+', ' ', descricao_sem_especiais).strip())
                     
-                # --- LEITURA DO VALOR PURO (SEM SINAL/TEXTO) ---
+                # Filtro Global de Saldo
+                if eh_linha_de_saldo(descricao_final):
+                    continue
+
+                # --- LEITURA DO VALOR PURO ---
                 valor_bruto = str(row[col_valor]).upper()
                 if pd.isna(row[col_valor]) or valor_bruto == 'NAN' or valor_bruto == '':
                     continue
@@ -494,12 +589,10 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 except ValueError:
                     continue
                 
-                # --- MÁGICA 2: NOVA COLUNA VIRTUAL DE TIPO DE MOVIMENTO ---
-                # Essa lógica substitui a dependência frágil da coluna INF bruta.
+                # --- NOVA COLUNA VIRTUAL DE TIPO DE MOVIMENTO ---
                 tipo_movimento = None
                 
                 if col_sinal and pd.notna(row[col_sinal]):
-                    # Pegamos a Inf original e limpamos todos os asteriscos e aspas
                     marca_sinal_suja = str(row[col_sinal]).upper()
                     marca_sinal_limpa = marca_sinal_suja.replace('*', '').replace('"', '').replace("'", "").strip()
                     
@@ -508,7 +601,6 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                     elif 'D' in marca_sinal_limpa or '-' in marca_sinal_limpa:
                         tipo_movimento = 'SAIDA'
                 
-                # Fallback: Se a coluna INF ficou vazia (ex: era só um asterisco isolado), tenta caçar o sinal no valor
                 if not tipo_movimento:
                     if 'C' in valor_bruto or '+' in valor_bruto:
                         tipo_movimento = 'ENTRADA'
@@ -517,7 +609,6 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                     else:
                         tipo_movimento = 'ENTRADA' if valor_num >= 0 else 'SAIDA'
                 
-                # Converte o Tipo de Movimento Textual para o Sinal Final do Sistema
                 sinal_final = '+' if tipo_movimento == 'ENTRADA' else '-'
 
                 dados.append({
@@ -651,7 +742,9 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                 
                 if extensao.endswith('.pdf'):
                     banco_pdf = identificar_banco_no_pdf(file.getvalue())
-                    if banco_pdf == 'ITAU' or banco_selecionado == 'ITAU':
+                    if banco_pdf == 'CAIXA' or banco_selecionado == 'CAIXA':
+                        df_ex, ign = extrair_pdf_caixa(file.getvalue())
+                    elif banco_pdf == 'ITAU' or banco_selecionado == 'ITAU':
                         df_ex, ign = extrair_pdf_itau(file.getvalue())
                     else:
                         df_ex, ign = extrair_por_recintos(file.getvalue())
@@ -679,11 +772,8 @@ if uploaded_files and conta_banco_fixa != 'N/A':
 
             if lista_dfs:
                 df_consolidado = pd.concat(lista_dfs, ignore_index=True)
-                
-                # GARANTIA FINAL: Assegura que o tipo de dado da coluna de Valor é número antes de somar
                 df_consolidado['Valor'] = pd.to_numeric(df_consolidado['Valor'], errors='coerce').fillna(0.0)
                 df_consolidado['Sinal'] = df_consolidado['Sinal'].astype(str).apply(lambda x: '+' if '+' in x else '-')
-                
                 st.session_state.df_bruto = df_consolidado
             else:
                 st.session_state.df_bruto = pd.DataFrame()
@@ -710,7 +800,6 @@ if not st.session_state.df_bruto.empty:
         ~st.session_state.df_bruto.index.isin(st.session_state.linhas_ignoradas_regras)
     ]
     
-    # A soma agora flui perfeitamente, já que os sinais foram classificados explicitamente
     total_e               = float(df_validos[df_validos['Sinal'] == '+']['Valor'].sum())
     total_s               = float(df_validos[df_validos['Sinal'] == '-']['Valor'].sum())
     saldo_final_calculado = saldo_anterior_informado + total_e - total_s
@@ -721,14 +810,13 @@ if not st.session_state.df_bruto.empty:
     c3.metric("🔴 Saídas Válidas",        formatar_moeda(total_s))
     c4.metric("⚖️ Saldo Final Calculado", formatar_moeda(saldo_final_calculado))
 
-    # O DETETIVE: Verificação Inteligente de Saldo
+    # O DETETIVE
     if saldo_final_informado != 0.00:
         diferenca = round(abs(saldo_final_calculado - saldo_final_informado), 2)
         if diferenca > 0.01:
             st.error(f"⚠️ **Atenção!** Há uma diferença de **{formatar_moeda(diferenca)}** entre o saldo calculado e o que você informou.")
             
             encontrou_pista = False
-            
             suspeitos_bruto = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == diferenca]
             if not suspeitos_bruto.empty:
                 st.info(f"💡 **PISTA 1:** Encontrei {len(suspeitos_bruto)} lançamento(s) na fila com o valor exato da diferença. Pode ser que um deles devesse ter sido ignorado ou o sinal esteja errado.")
@@ -737,7 +825,7 @@ if not st.session_state.df_bruto.empty:
             metade = round(diferenca / 2, 2)
             suspeitos_metade = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == metade]
             if not suspeitos_metade.empty:
-                st.info(f"💡 **PISTA 2:** Há um lançamento na fila de **{formatar_moeda(metade)}**. Se o sinal dele estiver invertido (Entrada no lugar de Saída ou vice-versa), ele gera exatamente essa diferença!")
+                st.info(f"💡 **PISTA 2:** Há um lançamento na fila de **{formatar_moeda(metade)}**. Se o sinal dele estiver invertido, ele gera exatamente essa diferença!")
                 encontrou_pista = True
 
             str_diff_br = f"{diferenca:.2f}".replace('.', ',')
