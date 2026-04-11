@@ -380,11 +380,9 @@ def extrair_texto_ofx(file_bytes):
             try:
                 valor = float(valor_raw.replace(',', '.'))
             except (ValueError, AttributeError):
-                logging.warning(f"OFX: valor inválido no bloco FITID={fitid}, ignorando.")
                 continue
 
             VALORES_GENERICOS = {'', 'NONE', 'NULL', '-', 'N/A', 'NAO INFORMADO', 'NAO IDENTIFICADO'}
-
             name_pad = padronizar_texto(name)
             memo_pad = padronizar_texto(memo)
 
@@ -398,25 +396,7 @@ def extrair_texto_ofx(file_bytes):
                     partes = [memo_pad]
 
             if not partes:
-                tipo_legivel = {
-                    'CREDIT':      'CREDITO',
-                    'DEBIT':       'DEBITO',
-                    'INT':         'JUROS',
-                    'DIV':         'DIVIDENDO',
-                    'FEE':         'TARIFA',
-                    'SRVCHG':      'ENCARGO',
-                    'DEP':         'DEPOSITO',
-                    'ATM':         'SAQUE ATM',
-                    'POS':         'COMPRA POS',
-                    'XFER':        'TRANSFERENCIA',
-                    'CHECK':       'CHEQUE',
-                    'PAYMENT':     'PAGAMENTO',
-                    'CASH':        'SAQUE',
-                    'DIRECTDEP':   'DEPOSITO DIRETO',
-                    'DIRECTDEBIT': 'DEBITO DIRETO',
-                    'OTHER':       'OUTROS',
-                }.get(trntype.upper(), trntype.upper() if trntype else 'SEM DESCRICAO')
-                partes.append(tipo_legivel)
+                partes.append(trntype.upper() if trntype else 'SEM DESCRICAO')
 
             descricao_final = " | ".join(partes) if partes else "SEM DESCRICAO"
 
@@ -426,18 +406,12 @@ def extrair_texto_ofx(file_bytes):
                 'Valor':     abs(valor),
                 'Sinal':     '+' if valor > 0 else '-'
             })
-
-        if not dados_extraidos:
-            st.warning("Nenhuma transação encontrada no OFX. Verifique se o arquivo está no formato padrão.")
-
     except Exception as e:
-        st.error(f"Erro ao processar OFX: {e}")
         logging.exception("Erro na extração OFX")
-
     return pd.DataFrame(dados_extraidos)
 
 # ==========================================
-# MOTOR ESPECÍFICO BANCO DO BRASIL (SOLUÇÃO BLINDADA PARA VALORES)
+# MOTOR ESPECÍFICO BANCO DO BRASIL
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
@@ -460,7 +434,6 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 break
         
         if header_idx == -1:
-            logging.error("Cabeçalho não encontrado na planilha BB.")
             return pd.DataFrame()
 
         df_raw = df_full.iloc[header_idx+1:].copy()
@@ -494,21 +467,16 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 descricao_sem_especiais = re.sub(r'[^\w\s]', ' ', descricao_sem_numeros) 
                 descricao_final = padronizar_texto(re.sub(r'\s+', ' ', descricao_sem_especiais).strip())
                     
-                # ----- NOVA EXTRAÇÃO BLINDADA DE VALORES -----
                 valor_bruto = str(row[col_valor]).upper()
                 if pd.isna(row[col_valor]) or valor_bruto == 'NAN' or valor_bruto == '':
                     continue
                     
-                # Remove aspas escondidas, R$, espaços vazios...
                 valor_limpo = valor_bruto.replace('R$', '').replace('"', '').replace("'", "").strip()
-                
-                # Expurga tudo que não é número, vírgula, ponto ou sinal negativo
                 valor_limpo = re.sub(r'[^\d.,-]', '', valor_limpo)
                 if not valor_limpo:
                     continue
                     
                 try:
-                    # Trata o padrão brasileiro 1.234,56 ou 1234,56
                     if ',' in valor_limpo and '.' in valor_limpo:
                         if valor_limpo.rfind(',') > valor_limpo.rfind('.'):
                             valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
@@ -516,39 +484,18 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                             valor_limpo = valor_limpo.replace(',', '')
                     elif ',' in valor_limpo:
                         valor_limpo = valor_limpo.replace(',', '.')
-                        
                     valor_num = float(valor_limpo)
                 except ValueError:
                     continue
                 
-                # =================================================================
-                # FIX: DEFINIÇÃO DE SINAL (CRÉDITO/DÉBITO) — VERSÃO BLINDADA
-                #
-                # Problema original: str.strip() não remove espaços não-quebráveis
-                # Unicode (\xa0) nem outros caracteres invisíveis que o Excel injeta
-                # nas células. Isso fazia 'C\xa0' não bater com ['C', '+'], deixando
-                # sinal=None e ativando o fallback de forma incorreta.
-                #
-                # Solução: usar padronizar_texto() que passa por unicodedata.normalize
-                # + encode('ASCII','ignore'), eliminando qualquer lixo Unicode antes
-                # da comparação. E trocar `in [...]` por startswith() para cobrir
-                # variações como 'CR', 'CRED', 'DB', 'DEB'.
-                # =================================================================
                 sinal = None
-
-                # 1ª Tentativa: Analisar a coluna "INF." nativa do Banco do Brasil
                 if col_sinal and pd.notna(row[col_sinal]):
-                    # padronizar_texto remove acentos, espaços unicode (\xa0 etc.),
-                    # aspas e normaliza para ASCII maiúsculo — muito mais robusto
-                    # que o simples .strip().upper().replace('"','') anterior.
-                    marca_sinal = padronizar_texto(str(row[col_sinal]))
-                    if marca_sinal.startswith('C') or marca_sinal == '+':
+                    marca_sinal = str(row[col_sinal]).upper()
+                    if 'C' in marca_sinal or '+' in marca_sinal:
                         sinal = '+'
-                    elif marca_sinal.startswith('D') or marca_sinal == '-':
+                    elif 'D' in marca_sinal or '-' in marca_sinal:
                         sinal = '-'
-
-                # 2ª Tentativa: Se a coluna INF não existir ou não definiu o sinal,
-                # verifica se o valor bruto tinha "C" ou "+" cravado nele
+                
                 if not sinal:
                     if 'C' in valor_bruto or '+' in valor_bruto:
                         sinal = '+'
@@ -565,12 +512,11 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 })
         return pd.DataFrame(dados)
     except Exception as e:
-        logging.exception(f"Erro na extração Planilha BB: {e}")
         return pd.DataFrame()
 
 
 # =============================================================================
-# 4. CARGA DE DADOS DO BANCO
+# 4. CARGA DE DADOS DO BANCO E DE REGRAS
 # =============================================================================
 @st.cache_data(ttl=60, show_spinner=False)
 def carregar_empresas():
@@ -715,7 +661,18 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                     else:
                         st.warning(f"⚠️ Extrator OFX não encontrou transações em: {file.name}")
 
-            st.session_state.df_bruto        = pd.concat(lista_dfs, ignore_index=True) if lista_dfs else pd.DataFrame()
+            if lista_dfs:
+                df_consolidado = pd.concat(lista_dfs, ignore_index=True)
+                
+                # SANITIZAÇÃO ABSOLUTA: Garante que cálculos não quebrem por erros invisíveis
+                df_consolidado['Valor'] = pd.to_numeric(df_consolidado['Valor'], errors='coerce').fillna(0.0)
+                # Força o sinal a ser estritamente o caractere puro + ou -
+                df_consolidado['Sinal'] = df_consolidado['Sinal'].astype(str).apply(lambda x: '+' if '+' in x else '-')
+                
+                st.session_state.df_bruto = df_consolidado
+            else:
+                st.session_state.df_bruto = pd.DataFrame()
+                
             st.session_state.skipped_indices = []
             st.session_state.criticas        = criticas
             st.session_state.comuns          = comuns
@@ -737,8 +694,10 @@ if not st.session_state.df_bruto.empty:
     df_validos = st.session_state.df_bruto[
         ~st.session_state.df_bruto.index.isin(st.session_state.linhas_ignoradas_regras)
     ]
-    total_e               = df_validos[df_validos['Sinal'] == '+']['Valor'].sum()
-    total_s               = df_validos[df_validos['Sinal'] == '-']['Valor'].sum()
+    
+    # Cálculos agora estão blindados
+    total_e               = float(df_validos[df_validos['Sinal'] == '+']['Valor'].sum())
+    total_s               = float(df_validos[df_validos['Sinal'] == '-']['Valor'].sum())
     saldo_final_calculado = saldo_anterior_informado + total_e - total_s
 
     c1, c2, c3, c4 = st.columns(4)
