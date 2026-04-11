@@ -8,7 +8,7 @@ import unicodedata
 from thefuzz import fuzz
 from ofxparse import OfxParser
 import logging
-import time # Adicionado para o cronômetro
+import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -269,9 +269,8 @@ def extrair_por_recintos(file_bytes):
 
     return pd.DataFrame(dados), {"criticas": ignoradas_com_valor, "comuns": ignoradas_texto}
 
-
 # ==========================================
-# MOTOR ESPECÍFICO SICOOB (O ÍNDICE + LIMPEZA AGRESSIVA)
+# MOTOR ESPECÍFICO SICOOB (LÓGICA DE BLOCOS)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_pdf_sicoob(file_bytes):
@@ -283,74 +282,73 @@ def extrair_pdf_sicoob(file_bytes):
                 texto = page.extract_text()
                 if not texto: continue
                 
-                # Tenta achar o ano no cabeçalho do Sicoob
                 match_ano = re.search(r'\b(20[2-9]\d)\b', texto)
                 if match_ano:
                     ano = match_ano.group(1)
                     
                 linhas = texto.split('\n')
                 blocos = []
-                current_bloco = None
+                current_bloco = []
                 
+                # Fase 1: Agrupar linhas em caixas (blocos) ancorados pela Data
                 for linha in linhas:
                     linha_strip = linha.strip()
                     linha_norm = padronizar_texto(linha_strip)
                     
-                    if 'SICOOB' in linha_norm or 'HISTORICO DE MOVIMENTACAO' in linha_norm:
-                        continue
-                    if 'DATA' in linha_norm and 'HISTORICO' in linha_norm and 'VALOR' in linha_norm:
-                        continue
-                    if eh_linha_de_saldo(linha_norm):
-                        continue
-                        
-                    match_nova = re.search(r'^(\d{2}/\d{2})\s+(.*?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*([C|D|\*]*)?$', linha_strip, re.IGNORECASE)
+                    if 'SICOOB' in linha_norm or 'HISTORICO DE MOVIMENTACAO' in linha_norm: continue
+                    if 'DATA' in linha_norm and 'HISTORICO' in linha_norm and 'VALOR' in linha_norm: continue
+                    if eh_linha_de_saldo(linha_norm): continue
                     
-                    if match_nova:
+                    # Se achar uma data no início da linha, fecha a caixa anterior e abre uma nova
+                    if re.match(r'^\d{2}/\d{2}\b', linha_strip):
                         if current_bloco:
                             blocos.append(current_bloco)
-                        
-                        data = f"{match_nova.group(1)}/{ano}"
-                        desc_raw = match_nova.group(2).strip()
-                        valor_str = match_nova.group(3)
-                        sinal_raw = match_nova.group(4).upper() if match_nova.group(4) else ''
-                        
-                        current_bloco = {
-                            'data': data,
-                            'valor_str': valor_str,
-                            'sinal_encontrado': 'C' if 'C' in sinal_raw else ('D' if 'D' in sinal_raw else None),
-                            'desc_lines': [desc_raw] if desc_raw else []
-                        }
+                        current_bloco = [linha_strip]
                     elif current_bloco:
-                        linha_upper = linha_strip.upper()
-                        if linha_upper == 'C':
-                            current_bloco['sinal_encontrado'] = 'C'
-                        elif linha_upper == 'D':
-                            current_bloco['sinal_encontrado'] = 'D'
-                        elif linha_strip == '*':
-                            pass
-                        else:
-                            # Apenas adiciona ao bloco se tiver alguma letra (ignora linhas que são só um numero solto perdido)
-                            if re.search(r'[a-zA-Z]', linha_strip):
-                                current_bloco['desc_lines'].append(linha_strip)
+                        # Joga o resto do texto (independente de onde o valor/sinal estiver) dentro da caixa atual
+                        if re.search(r'[a-zA-Z0-9]', linha_strip): # Pula linhas totalmente vazias ou só asteriscos isolados
+                            current_bloco.append(linha_strip)
 
                 if current_bloco:
                     blocos.append(current_bloco)
                     
-                for b in blocos:
-                    desc_junta = " ".join(b['desc_lines'])
+                # Fase 2: Extrair informações completas de dentro de cada caixa
+                for bloco in blocos:
+                    texto_bloco = " ".join(bloco)
                     
-                    # --- O TRATOR DE NÚMEROS (Limpeza Agressiva Sicoob) ---
-                    # 1. Mata CPFs mascarados (ex: ***.123.456-**)
-                    desc_junta = re.sub(r'\*+\.\d{3}\.\d{3}-\*+', '', desc_junta)
-                    # 2. Mata a palavra DOC e variações
-                    desc_junta = re.sub(r'\bDOC\.?:?\b', '', desc_junta, flags=re.IGNORECASE)
-                    # 3. Mata TODOS os números da frase
-                    desc_junta = re.sub(r'\d+', '', desc_junta)
-                    # 4. Transforma pontuações (traços, barras, pontos órfãos) em espaços
-                    desc_junta = re.sub(r'[.\-\/]', ' ', desc_junta)
-                    # --------------------------------------------------------
+                    # Captura Data
+                    match_data = re.search(r'^(\d{2}/\d{2})\b', texto_bloco)
+                    if not match_data: continue
+                    data_ext = f"{match_data.group(1)}/{ano}"
                     
-                    # Finaliza com os espaçamentos simples e padroniza tudo (sem acentos, UPPER)
+                    # Captura Valor (Geralmente o último valor monetário do bloco)
+                    matches_valor = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})\s*([C|D|\*]?)', texto_bloco, re.IGNORECASE))
+                    if not matches_valor: continue
+                    
+                    match_v = matches_valor[-1]
+                    valor_str = match_v.group(1)
+                    sinal_agarrado = match_v.group(2).upper() if match_v.group(2) else ''
+                    
+                    # Isolando o Histórico
+                    desc_raw = texto_bloco.replace(match_data.group(0), '', 1)
+                    desc_raw = desc_raw.replace(match_v.group(0), '', 1)
+                    
+                    # Captura Sinal se ele caiu isolado na última linha do bloco
+                    sinal_isolado = None
+                    match_isolado = re.search(r'\s+([CD])\s*$', desc_raw, re.IGNORECASE)
+                    if match_isolado:
+                        sinal_isolado = match_isolado.group(1).upper()
+                        desc_raw = desc_raw[:match_isolado.start()] # Apaga o sinal da descrição
+                        
+                    sinal_final = 'C' if (sinal_agarrado == 'C' or sinal_isolado == 'C') else ('D' if (sinal_agarrado == 'D' or sinal_isolado == 'D') else None)
+
+                    # Trator de Números Ultra Agressivo
+                    desc_junta = desc_raw
+                    desc_junta = re.sub(r'\*+\.\d{3}\.\d{3}-\*+', '', desc_junta) # Mata CPF oculto
+                    desc_junta = re.sub(r'\bDOC\.?:?\b', '', desc_junta, flags=re.IGNORECASE) # Mata palavra DOC
+                    desc_junta = re.sub(r'\d+', '', desc_junta) # Mata TODOS os numeros restantes
+                    desc_junta = re.sub(r'[.\-\/]', ' ', desc_junta) # Transforma hífens e pontos sobrantes em espaço
+                    
                     desc_junta = re.sub(r'\s+', ' ', desc_junta).strip()
                     desc_junta = padronizar_texto(desc_junta)
                     
@@ -360,18 +358,18 @@ def extrair_pdf_sicoob(file_bytes):
                     if not desc_junta:
                         desc_junta = "SEM DESCRICAO"
                         
-                    valor_num = float(b['valor_str'].replace('.', '').replace(',', '.'))
+                    valor_num = float(valor_str.replace('.', '').replace(',', '.'))
                     
                     sinal = '+'
-                    if b['sinal_encontrado'] == 'C': sinal = '+'
-                    elif b['sinal_encontrado'] == 'D': sinal = '-'
+                    if sinal_final == 'C': sinal = '+'
+                    elif sinal_final == 'D': sinal = '-'
                     else:
-                        sinal = '-'
-                        if any(x in desc_junta for x in ['RECEB', 'CREDIT', 'DEPOSIT', 'RESGATE', 'ESTORNO']):
+                        sinal = '-' # Padrão sicoob
+                        if any(x in desc_junta for x in ['RECEB', 'CREDIT', 'DEPOSIT', 'RESGATE', 'ESTORNO', 'DEVOLUCAO']):
                             sinal = '+'
                             
                     dados.append({
-                        'Data': b['data'],
+                        'Data': data_ext,
                         'Descricao': desc_junta,
                         'Valor': abs(valor_num),
                         'Sinal': sinal
@@ -718,33 +716,59 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
 
 
 # ==========================================
-# MOTOR ESPECÍFICO BRADESCO (XLS/CSV)
+# MOTOR ESPECÍFICO BRADESCO (LÓGICA DINÂMICA)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bradesco(file_bytes, nome_arquivo):
     try:
+        # Lê tudo sem cabeçalho para achar a linha correta dinamicamente
         if nome_arquivo.lower().endswith('.csv'):
             try:
-                df = pd.read_csv(io.BytesIO(file_bytes), sep=',', header=8, dtype=str)
-                if len(df.columns) < 3:
-                    df = pd.read_csv(io.BytesIO(file_bytes), sep=';', header=8, dtype=str)
+                df_full = pd.read_csv(io.BytesIO(file_bytes), sep=',', header=None, dtype=str)
+                if len(df_full.columns) < 3:
+                    df_full = pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str)
             except:
-                df = pd.read_csv(io.BytesIO(file_bytes), sep=';', header=8, dtype=str)
+                df_full = pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str)
         else:
-            df = pd.read_excel(io.BytesIO(file_bytes), header=8, dtype=str)
+            df_full = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
         
-        col_data = next((c for c in df.columns if 'DATA' in str(c).upper()), df.columns[0])
-        col_lanc = next((c for c in df.columns if 'LANÇAMENTO' in str(c).upper() or 'LANCAMENTO' in str(c).upper()), df.columns[1])
-        col_cred = next((c for c in df.columns if 'CRÉDITO' in str(c).upper() or 'CREDITO' in str(c).upper()), None)
-        col_deb  = next((c for c in df.columns if 'DÉBITO' in str(c).upper() or 'DEBITO' in str(c).upper()), None)
+        # Desce a planilha até achar "DATA" e "LANCAMENTO" na mesma linha
+        header_idx = -1
+        for idx, row in df_full.iterrows():
+            row_str = padronizar_texto(" ".join([str(x) for x in row.values if pd.notna(x)]))
+            if 'DATA' in row_str and ('LANCAMENTO' in row_str or 'HISTORICO' in row_str):
+                header_idx = idx
+                break
+        
+        if header_idx == -1:
+            return pd.DataFrame() # Se não achou cabeçalho, aborta
+
+        df_raw = df_full.iloc[header_idx+1:].copy()
+        colunas_limpas = [str(c).strip().upper() for c in df_full.iloc[header_idx].values]
+        
+        # Evita erro do pandas se tiver colunas com nome repetido ou vazio
+        colunas_unicas = []
+        for i, col in enumerate(colunas_limpas):
+            base = col if col and col != 'NAN' else f"COLUNA_VAZIA_{i}"
+            if base in colunas_unicas: base = f"{base}_{i}"
+            colunas_unicas.append(base)
+            
+        df_raw.columns = colunas_unicas
+        
+        # Mapeamento robusto que aceita pequenas variações
+        col_data = next((c for c in colunas_unicas if 'DATA' in c), colunas_unicas[0])
+        col_lanc = next((c for c in colunas_unicas if 'LANCAMENTO' in c or 'LANÇAMENTO' in c or 'HIST' in c), colunas_unicas[1])
+        col_cred = next((c for c in colunas_unicas if 'CRED' in c or 'CRÉD' in c), None)
+        col_deb  = next((c for c in colunas_unicas if 'DEB' in c or 'DÉB' in c), None)
         
         dados = []
         if col_cred is None or col_deb is None:
             return pd.DataFrame()
             
-        for idx, row in df.iterrows():
+        for idx, row in df_raw.iterrows():
             data_val = str(row[col_data]).strip()
             
+            # Corta a leitura assim que achar TOTAL
             if 'TOTAL' in data_val.upper():
                 break
                 
@@ -762,6 +786,7 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
             valor_final = 0.0
             sinal_final = '+'
             
+            # Checa Coluna de Crédito
             if val_cred and val_cred != 'NAN' and val_cred != '':
                 v_clean = re.sub(r'[^\d.,]', '', val_cred)
                 if ',' in v_clean and '.' in v_clean:
@@ -774,6 +799,7 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
                 except ValueError:
                     pass
             
+            # Checa Coluna de Débito
             elif val_deb and val_deb != 'NAN' and val_deb != '':
                 v_clean = re.sub(r'[^\d.,]', '', val_deb) 
                 if ',' in v_clean and '.' in v_clean:
@@ -798,7 +824,6 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
     except Exception as e:
         logging.exception(f"Erro Bradesco: {e}")
         return pd.DataFrame()
-
 
 # =============================================================================
 # 4. CARGA DE DADOS DO BANCO E DE REGRAS
@@ -868,6 +893,7 @@ uploaded_files  = st.file_uploader("1. Arraste seus extratos (PDF, OFX, XLS, XLS
 indice_sugerido = 0
 
 if uploaded_files:
+    mensagens_auto = []
     for file in uploaded_files:
         if file.name.lower().endswith('.pdf'):
             cnpj_lido = identificar_cnpj_no_pdf(file.getvalue())
@@ -876,14 +902,20 @@ if uploaded_files:
                 if empresa_detectada_data:
                     idx_encontrado  = df_empresas[df_empresas['id'] == empresa_detectada_data['id']].index[0]
                     indice_sugerido = int(idx_encontrado)
-                    st.toast(f"✅ Empresa '{empresa_detectada_data['nome']}' reconhecida pelo CNPJ!")
                     st.session_state.empresa_detectada_data = empresa_detectada_data
+                    if f"Empresa '{empresa_detectada_data['nome']}' reconhecida" not in mensagens_auto:
+                        mensagens_auto.append(f"Empresa '{empresa_detectada_data['nome']}' reconhecida pelo CNPJ")
 
             banco_detectado = identificar_banco_no_pdf(file.getvalue())
             if banco_detectado != "DESCONHECIDO":
-                st.toast(f"✅ Banco '{banco_detectado}' identificado no PDF!")
                 st.session_state.banco_detectado = banco_detectado
+                if f"Banco '{banco_detectado}'" not in mensagens_auto:
+                    mensagens_auto.append(f"Banco '{banco_detectado}' identificado")
             break
+            
+    # Avisos fixos ao invés do pop-up chato (toast)
+    if mensagens_auto:
+        st.success("✅ " + " | ".join(mensagens_auto))
 
 # =============================================================================
 # PASSO 3: PAINEL DE CONFIGURAÇÕES
