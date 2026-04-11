@@ -443,10 +443,14 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         dados = []
         
         col_data = next((c for c in colunas_limpas if 'DATA' in c), None)
+        
+        # Localização da Coluna de Histórico e Detalhamento
         col_hist = 'HISTORICO' if 'HISTORICO' in colunas_limpas else ('HISTÓRICO' if 'HISTÓRICO' in colunas_limpas else None)
         if not col_hist:
             col_hist = next((c for c in colunas_limpas if 'HIST' in c and 'COD' not in c), None)
         col_detalhe = next((c for c in colunas_limpas if 'DETALHAMENTO' in c or 'COMPLEMENTO' in c), None)
+        
+        # Localização da Coluna de Valor e Sinal
         col_valor = next((c for c in colunas_limpas if 'VALOR' in c), None)
         col_sinal = next((c for c in colunas_limpas if 'INF' in c), None)
 
@@ -456,6 +460,7 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 if not re.match(r'\d{2}/\d{2}/\d{2,4}', data_raw):
                     continue 
                 
+                # --- MÁGICA 1: COLUNA VIRTUAL DE DESCRIÇÃO ---
                 texto_historico = str(row[col_hist]).strip() if (col_hist and pd.notna(row[col_hist])) else ""
                 if texto_historico.lower() == 'nan': texto_historico = ""
 
@@ -467,43 +472,43 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 descricao_sem_especiais = re.sub(r'[^\w\s]', ' ', descricao_sem_numeros) 
                 descricao_final = padronizar_texto(re.sub(r'\s+', ' ', descricao_sem_especiais).strip())
                     
-                valor_bruto = str(row[col_valor]).upper()
-                if pd.isna(row[col_valor]) or valor_bruto == 'NAN' or valor_bruto == '':
+                # --- MÁGICA 2: COLUNA VIRTUAL FINANCEIRA (Valor + Sinal) ---
+                # Essa solução foi a sua ideia, junta as duas colunas cruas e depois varre tudo.
+                texto_valor = str(row[col_valor]) if pd.notna(row[col_valor]) else ""
+                texto_inf = str(row[col_sinal]) if (col_sinal and pd.notna(row[col_sinal])) else ""
+                
+                coluna_financeira = f"{texto_valor} {texto_inf}".upper()
+                cfu_limpa = coluna_financeira.replace('R$', '').replace('NAN', '').strip()
+                
+                if not cfu_limpa:
                     continue
                     
-                valor_limpo = valor_bruto.replace('R$', '').replace('"', '').replace("'", "").strip()
-                valor_limpo = re.sub(r'[^\d.,-]', '', valor_limpo)
-                if not valor_limpo:
+                # 1. Definir o Sinal varrendo a coluna virtual unida
+                if 'C' in cfu_limpa or '+' in cfu_limpa:
+                    sinal = '+'
+                elif 'D' in cfu_limpa or '-' in cfu_limpa:
+                    sinal = '-'
+                else:
+                    sinal = '+' # Padrão
+                    
+                # 2. Definir o Valor varrendo a coluna virtual unida
+                apenas_numeros = re.sub(r'[^\d.,]', '', cfu_limpa)
+                if not apenas_numeros:
                     continue
                     
                 try:
-                    if ',' in valor_limpo and '.' in valor_limpo:
-                        if valor_limpo.rfind(',') > valor_limpo.rfind('.'):
-                            valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
+                    if ',' in apenas_numeros and '.' in apenas_numeros:
+                        if apenas_numeros.rfind(',') > apenas_numeros.rfind('.'):
+                            apenas_numeros = apenas_numeros.replace('.', '').replace(',', '.')
                         else:
-                            valor_limpo = valor_limpo.replace(',', '')
-                    elif ',' in valor_limpo:
-                        valor_limpo = valor_limpo.replace(',', '.')
-                    valor_num = float(valor_limpo)
+                            apenas_numeros = apenas_numeros.replace(',', '')
+                    elif ',' in apenas_numeros:
+                        apenas_numeros = apenas_numeros.replace(',', '.')
+                    valor_num = float(apenas_numeros)
                 except ValueError:
                     continue
-                
-                sinal = None
-                if col_sinal and pd.notna(row[col_sinal]):
-                    marca_sinal = str(row[col_sinal]).upper()
-                    if 'C' in marca_sinal or '+' in marca_sinal:
-                        sinal = '+'
-                    elif 'D' in marca_sinal or '-' in marca_sinal:
-                        sinal = '-'
-                
-                if not sinal:
-                    if 'C' in valor_bruto or '+' in valor_bruto:
-                        sinal = '+'
-                    elif 'D' in valor_bruto or '-' in valor_bruto:
-                        sinal = '-'
-                    else:
-                        sinal = '+' if valor_num >= 0 else '-'
-                        
+                # ==========================================================
+
                 dados.append({
                     'Data': data_raw,
                     'Descricao': descricao_final,
@@ -664,9 +669,8 @@ if uploaded_files and conta_banco_fixa != 'N/A':
             if lista_dfs:
                 df_consolidado = pd.concat(lista_dfs, ignore_index=True)
                 
-                # SANITIZAÇÃO ABSOLUTA: Garante que cálculos não quebrem por erros invisíveis
+                # SANITIZAÇÃO ABSOLUTA: Garante que os totais da tela funcionem sempre
                 df_consolidado['Valor'] = pd.to_numeric(df_consolidado['Valor'], errors='coerce').fillna(0.0)
-                # Força o sinal a ser estritamente o caractere puro + ou -
                 df_consolidado['Sinal'] = df_consolidado['Sinal'].astype(str).apply(lambda x: '+' if '+' in x else '-')
                 
                 st.session_state.df_bruto = df_consolidado
@@ -695,7 +699,7 @@ if not st.session_state.df_bruto.empty:
         ~st.session_state.df_bruto.index.isin(st.session_state.linhas_ignoradas_regras)
     ]
     
-    # Cálculos agora estão blindados
+    # Agora a soma ocorrerá em um formato numérico validado e purificado
     total_e               = float(df_validos[df_validos['Sinal'] == '+']['Valor'].sum())
     total_s               = float(df_validos[df_validos['Sinal'] == '-']['Valor'].sum())
     saldo_final_calculado = saldo_anterior_informado + total_e - total_s
