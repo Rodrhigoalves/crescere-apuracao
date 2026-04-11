@@ -521,18 +521,34 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 except ValueError:
                     continue
                 
-                # ----- DEFINIÇÃO DE SINAL (CRÉDITO/DÉBITO) -----
+                # =================================================================
+                # FIX: DEFINIÇÃO DE SINAL (CRÉDITO/DÉBITO) — VERSÃO BLINDADA
+                #
+                # Problema original: str.strip() não remove espaços não-quebráveis
+                # Unicode (\xa0) nem outros caracteres invisíveis que o Excel injeta
+                # nas células. Isso fazia 'C\xa0' não bater com ['C', '+'], deixando
+                # sinal=None e ativando o fallback de forma incorreta.
+                #
+                # Solução: usar padronizar_texto() que passa por unicodedata.normalize
+                # + encode('ASCII','ignore'), eliminando qualquer lixo Unicode antes
+                # da comparação. E trocar `in [...]` por startswith() para cobrir
+                # variações como 'CR', 'CRED', 'DB', 'DEB'.
+                # =================================================================
                 sinal = None
-                
-                # 1ª Tentativa: Analisar a coluna "INF." nativa do Banco
+
+                # 1ª Tentativa: Analisar a coluna "INF." nativa do Banco do Brasil
                 if col_sinal and pd.notna(row[col_sinal]):
-                    marca_sinal = str(row[col_sinal]).strip().upper().replace('"', '')
-                    if marca_sinal in ['C', '+']:
+                    # padronizar_texto remove acentos, espaços unicode (\xa0 etc.),
+                    # aspas e normaliza para ASCII maiúsculo — muito mais robusto
+                    # que o simples .strip().upper().replace('"','') anterior.
+                    marca_sinal = padronizar_texto(str(row[col_sinal]))
+                    if marca_sinal.startswith('C') or marca_sinal == '+':
                         sinal = '+'
-                    elif marca_sinal in ['D', '-']:
+                    elif marca_sinal.startswith('D') or marca_sinal == '-':
                         sinal = '-'
-                
-                # 2ª Tentativa: Se a coluna INF não existir, verifica se o valor bruto tinha "C" ou "+" cravado nele
+
+                # 2ª Tentativa: Se a coluna INF não existir ou não definiu o sinal,
+                # verifica se o valor bruto tinha "C" ou "+" cravado nele
                 if not sinal:
                     if 'C' in valor_bruto or '+' in valor_bruto:
                         sinal = '+'
