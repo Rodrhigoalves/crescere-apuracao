@@ -8,6 +8,7 @@ import unicodedata
 from thefuzz import fuzz
 from ofxparse import OfxParser
 import logging
+import time # Adicionado para o cronômetro
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -303,13 +304,11 @@ def extrair_pdf_sicoob(file_bytes):
                     if eh_linha_de_saldo(linha_norm):
                         continue
                         
-                    # Procura a "cabeça" do lançamento (Data e Valor na mesma linha)
-                    # Ex: "01/12 PIX EMIT.OUTRA IF 1.000,00" ou "01/12 PIX 1.000,00 D"
                     match_nova = re.search(r'^(\d{2}/\d{2})\s+(.*?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*([C|D|\*]*)?$', linha_strip, re.IGNORECASE)
                     
                     if match_nova:
                         if current_bloco:
-                            blocos.append(current_bloco) # Salva o bloco anterior
+                            blocos.append(current_bloco)
                         
                         data = f"{match_nova.group(1)}/{ano}"
                         desc_raw = match_nova.group(2).strip()
@@ -323,7 +322,6 @@ def extrair_pdf_sicoob(file_bytes):
                             'desc_lines': [desc_raw] if desc_raw else []
                         }
                     elif current_bloco:
-                        # Linhas orfãs que caem no bloco atual (o corpo)
                         linha_upper = linha_strip.upper()
                         if linha_upper == 'C':
                             current_bloco['sinal_encontrado'] = 'C'
@@ -332,8 +330,6 @@ def extrair_pdf_sicoob(file_bytes):
                         elif linha_strip == '*':
                             pass
                         else:
-                            # Filtro Limpeza de Números Longos (Docs, CPF, CNPJ etc)
-                            # Remove blocos de números colados ou separados por ponto/traço
                             desc_clean = re.sub(r'\b\d{4,}[\.\-\/\d]*\b', '', linha_strip).strip()
                             if desc_clean and len(desc_clean) > 1:
                                 current_bloco['desc_lines'].append(desc_clean)
@@ -341,7 +337,6 @@ def extrair_pdf_sicoob(file_bytes):
                 if current_bloco:
                     blocos.append(current_bloco)
                     
-                # Costura e finalização dos blocos do Sicoob
                 for b in blocos:
                     desc_junta = " ".join(b['desc_lines'])
                     desc_junta = re.sub(r'\s+', ' ', desc_junta).strip()
@@ -355,12 +350,11 @@ def extrair_pdf_sicoob(file_bytes):
                         
                     valor_num = float(b['valor_str'].replace('.', '').replace(',', '.'))
                     
-                    # Definição do Sinal (Se o 'D' ou 'C' isolado não salvou o dia, caça na frase)
                     sinal = '+'
                     if b['sinal_encontrado'] == 'C': sinal = '+'
                     elif b['sinal_encontrado'] == 'D': sinal = '-'
                     else:
-                        sinal = '-' # Sicoob costuma ser débito padrão na dúvida, mas entraremos com filtro:
+                        sinal = '-'
                         if any(x in desc_junta for x in ['RECEB', 'CREDIT', 'DEPOSIT', 'RESGATE', 'ESTORNO']):
                             sinal = '+'
                             
@@ -717,7 +711,6 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bradesco(file_bytes, nome_arquivo):
     try:
-        # Pula as 8 linhas de lixo iniciais do Bradesco
         if nome_arquivo.lower().endswith('.csv'):
             try:
                 df = pd.read_csv(io.BytesIO(file_bytes), sep=',', header=8, dtype=str)
@@ -728,7 +721,6 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
         else:
             df = pd.read_excel(io.BytesIO(file_bytes), header=8, dtype=str)
         
-        # Identificação robusta de colunas
         col_data = next((c for c in df.columns if 'DATA' in str(c).upper()), df.columns[0])
         col_lanc = next((c for c in df.columns if 'LANÇAMENTO' in str(c).upper() or 'LANCAMENTO' in str(c).upper()), df.columns[1])
         col_cred = next((c for c in df.columns if 'CRÉDITO' in str(c).upper() or 'CREDITO' in str(c).upper()), None)
@@ -736,12 +728,11 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
         
         dados = []
         if col_cred is None or col_deb is None:
-            return pd.DataFrame() # Falhou ao achar as colunas base
+            return pd.DataFrame()
             
         for idx, row in df.iterrows():
             data_val = str(row[col_data]).strip()
             
-            # O FREIO DE MÃO: Achou "Total" na coluna de data, encerra a leitura na hora
             if 'TOTAL' in data_val.upper():
                 break
                 
@@ -750,7 +741,6 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
                 
             desc = padronizar_texto(str(row[col_lanc]).strip())
             
-            # Filtro Global de Saldo
             if eh_linha_de_saldo(desc):
                 continue
                 
@@ -760,7 +750,6 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
             valor_final = 0.0
             sinal_final = '+'
             
-            # Se tem valor no crédito, processa e assina como Entrada (+)
             if val_cred and val_cred != 'NAN' and val_cred != '':
                 v_clean = re.sub(r'[^\d.,]', '', val_cred)
                 if ',' in v_clean and '.' in v_clean:
@@ -773,9 +762,8 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
                 except ValueError:
                     pass
             
-            # Se tem valor no débito, processa e assina como Saída (-)
             elif val_deb and val_deb != 'NAN' and val_deb != '':
-                v_clean = re.sub(r'[^\d.,]', '', val_deb) # O regex tira até o '-' se vier do excel
+                v_clean = re.sub(r'[^\d.,]', '', val_deb) 
                 if ',' in v_clean and '.' in v_clean:
                     v_clean = v_clean.replace('.', '').replace(',', '.')
                 elif ',' in v_clean:
@@ -847,6 +835,8 @@ defaults = {
     'comuns':                  [],
     'undo_stack':              [],
     'busca_fila':              '',
+    'inicio_operacao':         None, # Variáveis do cronômetro
+    'tempo_conclusao':         None,
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -862,7 +852,8 @@ if df_empresas.empty:
 # =============================================================================
 # PASSO 1 E 2: UPLOAD E PRÉ-SELEÇÃO
 # =============================================================================
-uploaded_files  = st.file_uploader("1. Arraste seus extratos (PDF, OFX, XLSX, CSV)", type=["pdf", "ofx", "xlsx", "csv"], accept_multiple_files=True)
+# Aceitando .xls agora
+uploaded_files  = st.file_uploader("1. Arraste seus extratos (PDF, OFX, XLS, XLSX, CSV)", type=["pdf", "ofx", "xls", "xlsx", "csv"], accept_multiple_files=True)
 indice_sugerido = 0
 
 if uploaded_files:
@@ -913,6 +904,11 @@ saldo_final_informado = col_saldos2.number_input("Saldo Final (Opcional)", value
 # =============================================================================
 if uploaded_files and conta_banco_fixa != 'N/A':
     if st.button("⚙️ Processar Extratos"):
+        
+        # Dispara o cronômetro no momento em que o operador começa o processo
+        st.session_state.inicio_operacao = time.time()
+        st.session_state.tempo_conclusao = None
+        
         with st.spinner("Lendo e classificando extratos..."):
             lista_dfs, criticas, comuns = [], [], []
             for file in uploaded_files:
@@ -936,7 +932,7 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                     else:
                         st.warning(f"⚠️ Extrator PDF não encontrou transações em: {file.name}")
                         
-                elif extensao.endswith('.xlsx') or extensao.endswith('.csv'):
+                elif extensao.endswith(('.xlsx', '.xls', '.csv')):
                     if banco_selecionado == 'BRADESCO':
                         df_ex = extrair_planilha_bradesco(file.getvalue(), file.name)
                     else:
@@ -1124,14 +1120,14 @@ if not st.session_state.df_bruto.empty:
                 df_impactados = df_p[mascara]
                 impacto = len(df_impactados)
                 
-                # AQUI ESTÁ O PAINEL DE IMPACTO DE VOLTA, E MELHORADO!
+                # PAINEL DE IMPACTO FECHADO POR PADRÃO (VISÃO RAIO-X)
                 if impacto > 0:
-                    st.success(f"🎯 **Visão de Raio-X:** Esta regra vai automatizar **{impacto}** operação(ões) pendente(s). Veja quais são:")
-                    st.dataframe(
-                        df_impactados[['Data', 'Descricao', 'Valor', 'Sinal']].style.format({"Valor": "R$ {:.2f}"}),
-                        use_container_width=True,
-                        hide_index=True
-                    )
+                    with st.expander(f"🎯 Visão de Raio-X: Esta regra vai automatizar {impacto} operação(ões) pendente(s).", expanded=False):
+                        st.dataframe(
+                            df_impactados[['Data', 'Descricao', 'Valor', 'Sinal']].style.format({"Valor": "R$ {:.2f}"}),
+                            use_container_width=True,
+                            hide_index=True
+                        )
 
             with st.form("form_treino"):
                 f1, f2, f3 = st.columns(3)
@@ -1195,7 +1191,18 @@ if not st.session_state.df_bruto.empty:
                     undo_manager.clear()
                     st.rerun()
     else:
+        # AQUI FINALIZA O CRONÔMETRO
+        if st.session_state.inicio_operacao is not None and st.session_state.tempo_conclusao is None:
+            st.session_state.tempo_conclusao = time.time() - st.session_state.inicio_operacao
+            
         st.success("🎉 Todos os lançamentos pendentes foram mapeados! Exportação liberada.")
+        
+        # EXIBIÇÃO DO TEMPO DE OPERAÇÃO
+        if st.session_state.tempo_conclusao is not None:
+            minutos = int(st.session_state.tempo_conclusao // 60)
+            segundos = int(st.session_state.tempo_conclusao % 60)
+            st.info(f"⏱️ **Produtividade:** Operação concluída em {minutos} minuto(s) e {segundos} segundo(s).")
+
         if st.session_state.prontos:
             df_prontos = pd.DataFrame(st.session_state.prontos)
             st.download_button(
