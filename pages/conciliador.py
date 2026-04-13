@@ -88,6 +88,15 @@ def eh_linha_de_saldo(descricao):
             return True
     return False
 
+def limpar_cod_historico(cod):
+    """Garante que códigos como 207.0 ou 203.0 sejam lidos apenas como 207 ou 203"""
+    if not cod or pd.isna(cod) or str(cod).strip() == "" or str(cod).strip().upper() == "NAN":
+        return ""
+    try:
+        return str(int(float(cod)))
+    except ValueError:
+        return str(cod).strip()
+
 # =============================================================================
 # 2. MOTOR DE RECÁLCULO EM TEMPO REAL
 # =============================================================================
@@ -126,13 +135,17 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
                         'Credito':       credito_conta,
                         'Data':          row['Data'],
                         'Valor':         f"{row['Valor']:.2f}".replace('.', ','),
-                        'Cod_Historico': r['cod_historico_erp'] if r['cod_historico_erp'] else "",
+                        'Cod_Historico': limpar_cod_historico(r['cod_historico_erp']),
                         'Historico':     r['historico_padrao'] if r['historico_padrao'] else row['Descricao']
                     })
                 match = True
                 break
         if not match:
             pendentes.append({'idx_original': idx, **row})
+
+    # Adiciona os lançamentos manuais ao bolo final
+    if 'lancamentos_manuais' in st.session_state and st.session_state.lancamentos_manuais:
+        prontos.extend(st.session_state.lancamentos_manuais)
 
     st.session_state.prontos                 = prontos
     st.session_state.pendentes               = pd.DataFrame(pendentes)
@@ -303,47 +316,37 @@ def extrair_por_recintos(file_bytes):
 
     return pd.DataFrame(dados), {"criticas": ignoradas_com_valor, "comuns": ignoradas_texto}
 
-
 # ==========================================
 # MOTOR ESPECÍFICO SICOOB (LÓGICA DE BLOCOS + TRAVA RIGOROSA)
 # ==========================================
 def processar_bloco_sicoob(bloco, ano, dados):
     texto_bloco = " ".join(bloco)
     
-    # 1. Extrair Data
     match_data = re.search(r'^(\d{2}/\d{2})\b', texto_bloco)
     if not match_data: return
     data_ext = f"{match_data.group(1)}/{ano}"
     
-    # 2. Extrair TODOS os valores monetários do bloco
     matches_valor = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]?)', texto_bloco, re.IGNORECASE))
     if not matches_valor: return
         
-    # O valor correto da transação SEMPRE é o PRIMEIRO que aparece na frase 
-    # (Isso nos blinda contra saldos vazando nas linhas de baixo)
     match_v = matches_valor[0]
     valor_str = match_v.group(1)
     sinal_str = match_v.group(2).upper()
     
     valor_num = float(valor_str.replace('.', '').replace(',', '.'))
     
-    # 3. Limpar a Descrição
     desc_limpa = texto_bloco[match_data.end():].strip()
     
-    # Remove apenas os valores em dinheiro encontrados para não sujar o texto
     for m in matches_valor:
         desc_limpa = desc_limpa.replace(m.group(0), ' ')
         
-    # Faxina leve sem destruir dados úteis
-    desc_limpa = re.sub(r'\*+\.\d{3}\.\d{3}-\*+', '', desc_limpa) # Tira CPF oculto
+    desc_limpa = re.sub(r'\*+\.\d{3}\.\d{3}-\*+', '', desc_limpa) 
     desc_limpa = re.sub(r'\bDOC\.?:?\b', 'DOC', desc_limpa, flags=re.IGNORECASE)
-    desc_limpa = re.sub(r'\b[CD]\b', '', desc_limpa) # Remove C ou D perdidos
+    desc_limpa = re.sub(r'\b[CD]\b', '', desc_limpa) 
     desc_limpa = padronizar_texto(desc_limpa)
     
-    # 4. Barreira de Saldo
     if eh_linha_de_saldo(desc_limpa) or not desc_limpa: return
         
-    # 5. Definir Sinal
     if sinal_str == 'C': sinal = '+'
     elif sinal_str == 'D': sinal = '-'
     else:
@@ -385,7 +388,7 @@ def extrair_pdf_sicoob(file_bytes):
                         in_table = True
                         continue 
                         
-                    if in_table and any(x in linha_norm for x in ['RESUMO', 'SALDOS', 'TOTAIS', 'OUVIDORIA']):
+                    if in_table and any(x in linha_norm for x in ['RESUMO', 'SALDOS', 'TOTAIS', 'OUVIDORIA', 'LANCAMENTOS FUTUROS']):
                         in_table = False
                         if bloco_atual:
                             processar_bloco_sicoob(bloco_atual, ano, dados)
@@ -395,7 +398,6 @@ def extrair_pdf_sicoob(file_bytes):
                     if not in_table:
                         continue
                         
-                    # Se achar linha de saldo, empurra o que estiver na gaveta e pula a linha
                     if eh_linha_de_saldo(linha_norm):
                         if bloco_atual:
                             processar_bloco_sicoob(bloco_atual, ano, dados)
@@ -418,6 +420,7 @@ def extrair_pdf_sicoob(file_bytes):
         logging.exception(f"Erro no Sicoob: {e}")
         
     return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
+
 # ==========================================
 # MOTOR ESPECÍFICO ITAÚ
 # ==========================================
@@ -864,6 +867,7 @@ defaults = {
     'busca_fila':              '',
     'inicio_operacao':         None,
     'tempo_conclusao':         None,
+    'lancamentos_manuais':     [],
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -939,6 +943,7 @@ if uploaded_files and conta_banco_fixa != 'N/A':
         
         st.session_state.inicio_operacao = time.time()
         st.session_state.tempo_conclusao = None
+        st.session_state.lancamentos_manuais = [] # Reseta os manuais num novo processamento
         
         with st.spinner("Lendo e classificando extratos..."):
             lista_dfs, criticas, comuns = [], [], []
@@ -1002,7 +1007,7 @@ elif conta_banco_fixa == 'N/A':
     st.error("Configure a conta contábil antes de processar.")
 
 # =============================================================================
-# PASSO 5: RESULTADOS + DETETIVE + AUDITORIA
+# PASSO 5: RESULTADOS + DETETIVE + AUDITORIA + INCLUSÃO MANUAL
 # =============================================================================
 if not st.session_state.df_bruto.empty:
     st.divider()
@@ -1013,6 +1018,16 @@ if not st.session_state.df_bruto.empty:
     
     total_e               = float(df_validos[df_validos['Sinal'] == '+']['Valor'].sum())
     total_s               = float(df_validos[df_validos['Sinal'] == '-']['Valor'].sum())
+    
+    # Soma dos manuais na visualização (opcional)
+    if 'lancamentos_manuais' in st.session_state and st.session_state.lancamentos_manuais:
+        for m_item in st.session_state.lancamentos_manuais:
+            val_m = float(m_item['Valor'].replace(',', '.'))
+            if m_item['Debito'] == conta_banco_fixa: # Entrada
+                total_e += val_m
+            else:
+                total_s += val_m
+
     saldo_final_calculado = saldo_anterior_informado + total_e - total_s
 
     c1, c2, c3, c4 = st.columns(4)
@@ -1049,6 +1064,42 @@ if not st.session_state.df_bruto.empty:
                 st.info("💡 **PISTA:** Não encontrei um culpado exato. Essa diferença deve ser a soma de múltiplos lançamentos que faltaram ou vieram a mais.")
         else:
             st.success("✅ **O Saldo Final Calculado bateu perfeitamente com o Saldo Final Informado!**")
+
+    # ==========================================
+    # INCLUSÃO MANUAL (Para fechar o saldo ou injetar dados que o PDF engoliu)
+    # ==========================================
+    with st.expander("➕ Adicionar Lançamento Manual (Ajuste de Saldo)", expanded=False):
+        st.caption("Se o PDF pular alguma linha ou você precisar forçar uma compensação, adicione o lançamento aqui. Ele vai direto para o arquivo final.")
+        col_m1, col_m2, col_m3 = st.columns([1, 2, 1])
+        m_data = col_m1.text_input("Data (DD/MM/AAAA)")
+        m_desc = col_m2.text_input("Descrição do Lançamento")
+        m_valor = col_m3.number_input("Valor (R$)", step=0.01, format="%.2f")
+        
+        col_m4, col_m5, col_m6 = st.columns([1, 1, 2])
+        m_sinal = col_m4.selectbox("Tipo", ["- (Saída)", "+ (Entrada)"])
+        m_conta = col_m5.text_input("Conta Contrapartida")
+        
+        if st.button("Adicionar Lançamento Manual à Exportação", type="primary"):
+            if m_data and m_desc and m_valor > 0 and m_conta:
+                sinal_final = '+' if '+' in m_sinal else '-'
+                novo_item = {
+                    'Debito':  conta_banco_fixa if sinal_final == '+' else m_conta,
+                    'Credito': m_conta if sinal_final == '+' else conta_banco_fixa,
+                    'Data':    m_data,
+                    'Valor':   f"{m_valor:.2f}".replace('.', ','),
+                    'Cod_Historico': "",
+                    'Historico': m_desc.upper()
+                }
+                if 'lancamentos_manuais' not in st.session_state:
+                    st.session_state.lancamentos_manuais = []
+                st.session_state.lancamentos_manuais.append(novo_item)
+                
+                # Reaplica as regras para colocar a inclusão manual na lista final
+                aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                st.toast("Lançamento manual inserido com sucesso!")
+                st.rerun()
+            else:
+                st.error("Preencha Data, Descrição, Valor maior que zero e Conta de Contrapartida.")
 
     # PAINEL OCULTO DE AUDITORIA
     with st.expander("🔍 Auditoria: Ver tudo que foi Lido e Ignorado (Bruto)"):
@@ -1233,11 +1284,17 @@ if not st.session_state.df_bruto.empty:
 
         if st.session_state.prontos:
             df_prontos = pd.DataFrame(st.session_state.prontos)
+            
+            # Exportação direto em XLSX via buffer na memória
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df_prontos.to_excel(writer, index=False, sheet_name='Conciliacao')
+            
             st.download_button(
-                "📥 BAIXAR CSV ALTERDATA",
-                df_prontos.to_csv(index=False, sep=';', encoding='latin1'),
-                f"conciliacao_{empresa_data['apelido_unidade']}_{banco_selecionado}_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.csv",
-                "text/csv"
+                label="📥 BAIXAR EXCEL PARA ERP",
+                data=output.getvalue(),
+                file_name=f"conciliacao_{empresa_data['apelido_unidade']}_{banco_selecionado}_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
 # =============================================================================
