@@ -9,3 +9,4 @@ pdfplumber
 thefuzz  
 ofxparse
 ofxtools
+xlsxwriter
