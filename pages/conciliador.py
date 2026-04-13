@@ -122,7 +122,7 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
         st.session_state.linhas_ignoradas_regras = []
 
     for idx, row in df_bruto.iterrows():
-        # Pula se o usuário excluiu manualmente este index
+        # Pula se o usuário excluiu manualmente este index pelo painel de Ajuste
         if idx in st.session_state.linhas_ignoradas_regras:
             continue
 
@@ -140,7 +140,7 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
                     debito_conta  = conta_banco_fixa if row['Sinal'] == '+' else r['conta_contabil']
                     credito_conta = r['conta_contabil'] if row['Sinal'] == '+' else conta_banco_fixa
                     prontos.append({
-                        'idx_original':  str(idx), # Guardamos o ID para poder excluir depois
+                        'idx_original':  str(idx), # Guardamos o ID para poder excluir depois se for o caso
                         'Debito':        debito_conta,
                         'Credito':       credito_conta,
                         'Data':          row['Data'],
@@ -160,7 +160,7 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
     st.session_state.prontos                 = prontos
     st.session_state.pendentes               = pd.DataFrame(pendentes)
     
-    # Mantém as exclusões manuais seguras unindo com as novas ignoradas
+    # Mantém as exclusões manuais seguras unindo com as novas ignoradas pelo banco de dados
     todas_ignoradas = list(set(st.session_state.linhas_ignoradas_regras + linhas_ignoradas_regras))
     st.session_state.linhas_ignoradas_regras = todas_ignoradas
 
@@ -956,7 +956,7 @@ if uploaded_files and conta_banco_fixa != 'N/A':
         st.session_state.inicio_operacao = time.time()
         st.session_state.tempo_conclusao = None
         st.session_state.lancamentos_manuais = [] # Reseta os manuais num novo processamento
-        st.session_state.linhas_ignoradas_regras = [] # Reseta as exclusões manuais
+        st.session_state.linhas_ignoradas_regras = [] # Reseta as exclusões da sessão
         
         with st.spinner("Lendo e classificando extratos..."):
             lista_dfs, criticas, comuns = [], [], []
@@ -1025,6 +1025,7 @@ elif conta_banco_fixa == 'N/A':
 if not st.session_state.df_bruto.empty:
     st.divider()
 
+    # Separa apenas as linhas que NÃO foram excluídas pelo banco de dados ou manualmente
     df_validos = st.session_state.df_bruto[
         ~st.session_state.df_bruto.index.isin(st.session_state.linhas_ignoradas_regras)
     ]
@@ -1032,7 +1033,7 @@ if not st.session_state.df_bruto.empty:
     total_e               = float(df_validos[df_validos['Sinal'] == '+']['Valor'].sum())
     total_s               = float(df_validos[df_validos['Sinal'] == '-']['Valor'].sum())
     
-    # Soma dos manuais na visualização
+    # Soma os manuais (Ajustes de saldo) na visualização
     if 'lancamentos_manuais' in st.session_state and st.session_state.lancamentos_manuais:
         for m_item in st.session_state.lancamentos_manuais:
             val_m = float(m_item['Valor'].replace(',', '.'))
@@ -1058,7 +1059,7 @@ if not st.session_state.df_bruto.empty:
             encontrou_pista = False
             suspeitos_bruto = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == diferenca]
             if not suspeitos_bruto.empty:
-                st.info(f"💡 **PISTA 1:** Encontrei {len(suspeitos_bruto)} lançamento(s) na fila com o valor exato da diferença. Pode ser que um deles devesse ter sido ignorado ou o sinal esteja errado.")
+                st.info(f"💡 **PISTA 1:** Encontrei {len(suspeitos_bruto)} lançamento(s) na fila com o valor exato da diferença. Vá em 'Excluir Lançamento' abaixo para descartá-lo, se for o caso.")
                 encontrou_pista = True
                 
             metade = round(diferenca / 2, 2)
@@ -1070,7 +1071,7 @@ if not st.session_state.df_bruto.empty:
             str_diff_br = f"{diferenca:.2f}".replace('.', ',')
             suspeitos_lixo = [l for l in st.session_state.criticas if str_diff_br in l]
             if suspeitos_lixo:
-                st.info(f"💡 **PISTA 3:** O valor de {formatar_moeda(diferenca)} aparece nas linhas que o sistema ignorou. Talvez um lançamento válido tenha se perdido por falta de cabeçalho. Vá na auditoria abaixo e verifique!")
+                st.info(f"💡 **PISTA 3:** O valor de {formatar_moeda(diferenca)} aparece nas linhas que o extrator de PDF não conseguiu ler direito (Ignorados Brutos). Adicione este valor manualmente logo abaixo!")
                 encontrou_pista = True
 
             if not encontrou_pista:
@@ -1079,24 +1080,23 @@ if not st.session_state.df_bruto.empty:
             st.success("✅ **O Saldo Final Calculado bateu perfeitamente com o Saldo Final Informado!**")
 
     # ==========================================
-    # INCLUSÃO MANUAL 
+    # PAINÉIS DE AJUSTE DE SALDO (INCLUIR / EXCLUIR)
     # ==========================================
-    with st.expander("➕ Adicionar Lançamento Manual (Ajuste de Saldo)", expanded=False):
-        st.caption("Se o PDF pular alguma linha ou você precisar forçar uma compensação, adicione o lançamento aqui. Ele vai direto para o arquivo final.")
-        col_m1, col_m2, col_m3 = st.columns([1, 2, 1])
-        m_data = col_m1.text_input("Data (DD/MM/AAAA)")
-        m_desc = col_m2.text_input("Descrição do Lançamento")
-        m_valor = col_m3.number_input("Valor (R$)", step=0.01, format="%.2f")
+    col_ajuste1, col_ajuste2 = st.columns(2)
+
+    with col_ajuste1.expander("➕ Adicionar Lançamento Manual (Ajuste de Saldo)", expanded=False):
+        st.caption("Faltou alguma coisa? Insira aqui e o saldo recalcula na hora.")
+        m_data = st.text_input("Data (DD/MM/AAAA)")
+        m_desc = st.text_input("Descrição do Lançamento")
+        m_valor = st.number_input("Valor (R$)", step=0.01, format="%.2f")
+        m_sinal = st.selectbox("Tipo", ["- (Saída)", "+ (Entrada)"])
+        m_conta = st.text_input("Conta Contrapartida")
         
-        col_m4, col_m5, col_m6 = st.columns([1, 1, 2])
-        m_sinal = col_m4.selectbox("Tipo", ["- (Saída)", "+ (Entrada)"])
-        m_conta = col_m5.text_input("Conta Contrapartida")
-        
-        if st.button("Adicionar Lançamento Manual à Exportação", type="primary"):
+        if st.button("Adicionar Lançamento Manual", type="primary"):
             if m_data and m_desc and m_valor > 0 and m_conta:
                 sinal_final = '+' if '+' in m_sinal else '-'
                 novo_item = {
-                    'idx_original':  f"manual_{uuid.uuid4().hex}", # Gera ID único para exclusão
+                    'idx_original':  f"manual_{uuid.uuid4().hex}", # Gera ID para poder ser excluído depois
                     'Debito':  conta_banco_fixa if sinal_final == '+' else m_conta,
                     'Credito': m_conta if sinal_final == '+' else conta_banco_fixa,
                     'Data':    m_data,
@@ -1108,45 +1108,47 @@ if not st.session_state.df_bruto.empty:
                     st.session_state.lancamentos_manuais = []
                 st.session_state.lancamentos_manuais.append(novo_item)
                 
-                # Reaplica as regras para colocar a inclusão manual na lista final
                 aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                st.toast("Lançamento manual inserido com sucesso!")
+                st.toast("Lançamento inserido e saldo atualizado!")
                 st.rerun()
             else:
-                st.error("Preencha Data, Descrição, Valor maior que zero e Conta de Contrapartida.")
+                st.error("Preencha todos os campos corretamente.")
 
-    # ==========================================
-    # EXCLUSÃO ESPECÍFICA DE LANÇAMENTOS PRONTOS
-    # ==========================================
-    with st.expander("🗑️ Excluir Lançamento Específico do Arquivo Final", expanded=False):
-        st.caption("Abaixo estão os lançamentos que **já estão prontos** para exportar. Selecione os que deseja remover permanentemente (por duplicidade ou erro).")
+    with col_ajuste2.expander("🗑️ Excluir Lançamento (Ajuste de Saldo)", expanded=False):
+        st.caption("Selecione lançamentos do banco (ou inseridos manualmente) que devem ser **ignorados na conta matemática e no ERP**.")
         
-        if st.session_state.prontos:
-            opcoes_exclusao = []
-            for p in st.session_state.prontos:
-                # Cria a string visual pro menu. Fica assim: [15] 10/04/2026 - R$ 150,00 - TARIFA
-                opcoes_exclusao.append(f"[{p['idx_original']}] {p['Data']} | R$ {p['Valor']} | {p['Historico']}")
+        opcoes_exclusao = []
+        # Lista as transações lidas do arquivo (que ainda são válidas)
+        if not df_validos.empty:
+            for idx, row in df_validos.iterrows():
+                tipo_str = "Entrada" if row['Sinal'] == '+' else "Saída"
+                opcoes_exclusao.append(f"[{idx}] {row['Data']} - {tipo_str} - R$ {row['Valor']:.2f} - {row['Descricao']}")
                 
-            itens_para_excluir = st.multiselect("Lançamentos para remover:", opcoes_exclusao)
+        # Lista as transações inseridas manualmente
+        if 'lancamentos_manuais' in st.session_state and st.session_state.lancamentos_manuais:
+            for m in st.session_state.lancamentos_manuais:
+                s_m = "+" if m['Debito'] == conta_banco_fixa else "-"
+                tipo_str_m = "Entrada" if s_m == '+' else "Saída"
+                opcoes_exclusao.append(f"[{m['idx_original']}] {m['Data']} - {tipo_str_m} - R$ {m['Valor']} - MANUAL: {m['Historico']}")
+
+        if opcoes_exclusao:
+            itens_para_excluir = st.multiselect("Pesquise e selecione os itens:", opcoes_exclusao)
             
-            if st.button("❌ Remover Lançamentos Selecionados"):
+            if st.button("❌ Confirmar Exclusão e Recalcular", type="primary"):
                 for item in itens_para_excluir:
-                    idx_str = item.split(']')[0][1:] # Extrai o ID de dentro dos colchetes
+                    idx_str = item.split(']')[0][1:] # Puxa o ID dentro dos colchetes
                     
                     if str(idx_str).startswith('manual_'):
-                        # Exclui da lista de manuais
                         st.session_state.lancamentos_manuais = [m for m in st.session_state.lancamentos_manuais if m['idx_original'] != idx_str]
                     else:
-                        # Exclui do bruto adicionando o index original na lista de ignorados
-                        if int(idx_str) not in st.session_state.linhas_ignoradas_regras:
-                            st.session_state.linhas_ignoradas_regras.append(int(idx_str))
+                        st.session_state.linhas_ignoradas_regras.append(int(idx_str))
                 
-                # Roda a inteligência de novo para atualizar as listas
+                # Roda a inteligência de novo para expurgar as linhas
                 aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                st.toast("Lançamentos removidos com sucesso!")
+                st.toast("Lançamentos excluídos com sucesso! Saldo recalculado.")
                 st.rerun()
         else:
-            st.info("Nenhum lançamento processado na fila de exportação.")
+            st.info("Não há lançamentos disponíveis para exclusão.")
 
     # PAINEL OCULTO DE AUDITORIA
     with st.expander("🔍 Auditoria: Ver tudo que foi Lido e Ignorado (Bruto)"):
@@ -1330,21 +1332,19 @@ if not st.session_state.df_bruto.empty:
             st.info(f"⏱️ **Produtividade:** Operação concluída em {minutos} minuto(s) e {segundos} segundo(s).")
 
         if st.session_state.prontos:
-            # 1. Transformar em DataFrame
             df_prontos = pd.DataFrame(st.session_state.prontos)
             
-            # 2. Retirar a coluna de ID interno que usamos só no Streamlit
+            # Limpa o index temporário que usamos para as exclusões
             if 'idx_original' in df_prontos.columns:
                 df_prontos = df_prontos.drop(columns=['idx_original'])
                 
-            # 3. Adicionar a coluna vazia ANTES da coluna 'Debito'
+            # Adiciona a Coluna Vazia Imediatamente Antes da Coluna 'Debito'
             if 'Debito' in df_prontos.columns:
                 idx_debito = df_prontos.columns.get_loc('Debito')
-                df_prontos.insert(idx_debito, '', '') # O cabeçalho ficará vazio
-
-            # Exportação direto em XLSX via buffer na memória
+                df_prontos.insert(idx_debito, ' ', '') # Cabeçalho em branco
+            
             output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_prontos.to_excel(writer, index=False, sheet_name='Conciliacao')
             
             st.download_button(
