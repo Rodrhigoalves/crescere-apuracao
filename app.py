@@ -10,8 +10,8 @@ import bcrypt
 from fpdf import FPDF
 import calendar
 import uuid
-import re
 from contextlib import contextmanager
+import re
 
 # --- 1. CONFIGURAÇÕES VISUAIS E INJEÇÃO CSS ---
 st.set_page_config(page_title="Crescere - Apuração Fiscal", layout="wide", initial_sidebar_state="expanded")
@@ -52,12 +52,7 @@ def formatar_historico_erp(texto_base, competencia):
     base = limpar_texto(texto_base)
     return f"{base} - {competencia}" if base else f"LANCAMENTO CONTABIL - {competencia}"
 
-# --- HELPER: VERIFICAÇÃO DE SUPER ADMIN (sem hardcode de username) ---
 def _is_super_admin(username: str) -> bool:
-    """Verifica se o username está na lista de super admins.
-    Configure via st.secrets['super_admins'] = ['usuario1', 'usuario2'].
-    Mantém retrocompatibilidade se a chave não existir.
-    """
     try:
         admins = list(st.secrets.get("super_admins", ["rodrhigo"]))
     except Exception:
@@ -90,7 +85,6 @@ class RelatorioCrescerePDF(FPDF):
         self.cell(0, 5, 'Desenvolvido por Rodrhigo Alves | Conciliacao e Auditoria Contabil', 0, 1, 'C')
         self.cell(0, 5, f'Pagina {self.page_no()}', 0, 0, 'C')
 
-# --- FUNÇÃO PADRÃO PARA EXPORTAÇÃO ERP ---
 def criar_linha_erp(deb, cred, data, valor, cod_hist, hist, nr_doc):
     return {
         "Lancto Aut.": "",
@@ -158,8 +152,6 @@ def carregar_empresas_ativas():
             df['id'] = df['id'].astype(int)
         return df
 
-# FIX: parâmetros explícitos para que o cache seja invalidado corretamente
-# quando o usuário/sessão mudar, evitando cross-session data leak.
 @st.cache_data(ttl=120)
 def carregar_empresas_visiveis(nivel_acesso: str, contabilidade_id, usuario_id, empresa_id_legacy):
     if nivel_acesso == "SUPER_ADMIN":
@@ -184,7 +176,6 @@ def carregar_empresas_visiveis(nivel_acesso: str, contabilidade_id, usuario_id, 
             df['id'] = df['id'].astype(int)
         return df
 
-# Atalho para chamar com os valores da sessão atual
 def _empresas_visiveis():
     return carregar_empresas_visiveis(
         st.session_state.nivel_acesso,
@@ -201,14 +192,9 @@ def gerar_hash_senha(senha_plana):
 
 @st.cache_data(ttl=86400)
 def consultar_cnpj(cnpj_limpo):
-    # FIX: except específico em vez de bare except que engolia qualquer erro
     try:
         headers = {'Accept': 'application/json'}
-        res = requests.get(
-            f"https://receitaws.com.br/v1/cnpj/{cnpj_limpo}",
-            headers=headers,
-            timeout=10
-        )
+        res = requests.get(f"https://receitaws.com.br/v1/cnpj/{cnpj_limpo}", headers=headers, timeout=10)
         return res.json() if res.status_code == 200 else None
     except requests.RequestException:
         return None
@@ -228,7 +214,6 @@ def buscar_sugestao_imobilizado(emp_id, competencia_str):
     ano_alvo, mes_alvo = map(int, comp_db.split('-'))
     ultimo_dia = calendar.monthrange(ano_alvo, mes_alvo)[1]
     data_inicio_mes = date(ano_alvo, mes_alvo, 1)
-
     total_sugerido = 0.0
 
     query_bens = """
@@ -237,47 +222,36 @@ def buscar_sugestao_imobilizado(emp_id, competencia_str):
         LEFT JOIN grupos_imobilizado g ON b.grupo_id = g.id
         WHERE b.tenant_id = %s AND b.status = 'ativo' AND b.regra_credito != 'NENHUM (Sem Crédito)'
     """
-
-    # FIX: uma única conexão para ambas as queries ao invés de duas separadas
     with get_db_connection() as conn:
         df_bens = pd.read_sql(query_bens, conn, params=(emp_id,))
         df_planos = pd.read_sql(
             "SELECT * FROM plano_depreciacao_itens WHERE bem_id IN (SELECT id FROM bens_imobilizado WHERE tenant_id = %s)",
-            conn,
-            params=(emp_id,)
+            conn, params=(emp_id,)
         )
 
-    if df_bens.empty:
-        return 0.0
-
-    if not df_planos.empty:
-        df_planos['mes_referencia'] = pd.to_datetime(df_planos['mes_referencia']).dt.date
+    if df_bens.empty: return 0.0
+    if not df_planos.empty: df_planos['mes_referencia'] = pd.to_datetime(df_planos['mes_referencia']).dt.date
 
     for _, b in df_bens.iterrows():
         if "INTEGRAL" in b['regra_credito']:
             dt_compra = b['data_compra']
-            if dt_compra.year == ano_alvo and dt_compra.month == mes_alvo:
-                total_sugerido += float(b['valor_compra'])
+            if dt_compra.year == ano_alvo and dt_compra.month == mes_alvo: total_sugerido += float(b['valor_compra'])
             continue
 
         dt_base = b['data_saldo_inicial'] if pd.notnull(b.get('data_saldo_inicial')) else b['data_compra']
-        if ano_alvo < dt_base.year or (ano_alvo == dt_base.year and mes_alvo < dt_base.month):
-            continue
+        if ano_alvo < dt_base.year or (ano_alvo == dt_base.year and mes_alvo < dt_base.month): continue
 
         plano_do_bem = df_planos[df_planos['bem_id'] == b['id']] if not df_planos.empty else pd.DataFrame()
         if not plano_do_bem.empty:
             plano_mes = plano_do_bem[plano_do_bem['mes_referencia'] == data_inicio_mes]
-            if not plano_mes.empty:
-                total_sugerido += float(plano_mes.iloc[0]['valor_cota'])
+            if not plano_mes.empty: total_sugerido += float(plano_mes.iloc[0]['valor_cota'])
             continue
 
         base_calc = float(b['valor_compra'])
         taxa_anual = (
-            float(b['taxa_customizada']) / 100.0
-            if (pd.notnull(b.get('taxa_customizada')) and float(b['taxa_customizada']) > 0)
+            float(b['taxa_customizada']) / 100.0 if (pd.notnull(b.get('taxa_customizada')) and float(b['taxa_customizada']) > 0)
             else (float(b['taxa_anual_percentual']) / 100.0 if pd.notnull(b.get('taxa_anual_percentual')) else 0.0)
         )
-
         if taxa_anual == 0: continue
 
         dt_ref_calc_ant = data_inicio_mes - timedelta(days=1)
@@ -286,13 +260,11 @@ def buscar_sugestao_imobilizado(emp_id, competencia_str):
 
         saldo_ini = float(b.get('valor_residual_inicial', 0.0))
         residual_ant = max(0.0, saldo_ini - dep_acumulada_ant) if pd.notnull(b.get('data_saldo_inicial')) else max(0.0, base_calc - dep_acumulada_ant)
-
         if residual_ant <= 0.009: continue
 
         dia_inicial = dt_base.day if (ano_alvo == dt_base.year and mes_alvo == dt_base.month) else 1
         dias_uso = max(0, ultimo_dia - dia_inicial + 1)
         cota = (base_calc * taxa_anual / 365.0) * dias_uso
-
         total_sugerido += min(cota, residual_ant)
 
     return float(total_sugerido)
@@ -302,7 +274,15 @@ if 'autenticado' not in st.session_state: st.session_state.autenticado = False
 if 'usuario_id' not in st.session_state: st.session_state.usuario_id = None
 if 'contabilidade_id' not in st.session_state: st.session_state.contabilidade_id = None
 if 'empresa_id_legacy' not in st.session_state: st.session_state.empresa_id_legacy = None
-if 'dados_form' not in st.session_state: st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": "", "apelido_unidade": "", "conta_transf_pis": "", "conta_transf_cofins": ""}
+if 'dados_form' not in st.session_state: 
+    st.session_state.dados_form = {
+        "id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", 
+        "tipo": "Matriz", "cnae": "", "endereco": "", "apelido_unidade": "", 
+        "conta_transf_pis": "", "conta_transf_cofins": "",
+        "contribuinte_icms": 1, "contribuinte_iss": 0,
+        "conta_icms_ciap_curto_prazo": "", "conta_icms_ciap_longo_prazo": "", 
+        "conta_pis_recuperar_ativo": "", "conta_cofins_recuperar_ativo": ""
+    }
 if 'rascunho_lancamentos' not in st.session_state: st.session_state.rascunho_lancamentos = []
 if 'form_key' not in st.session_state: st.session_state.form_key = 0
 
@@ -320,10 +300,7 @@ if not st.session_state.autenticado:
             pw_input = st.text_input("Palavra-passe", type="password")
             if st.form_submit_button("Entrar no Sistema", use_container_width=True):
                 with get_db_cursor(dictionary=True) as cursor:
-                    cursor.execute(
-                        "SELECT u.* FROM usuarios u WHERE u.username = %s AND u.status_usuario = 'ATIVO'",
-                        (user_input,)
-                    )
+                    cursor.execute("SELECT u.* FROM usuarios u WHERE u.username = %s AND u.status_usuario = 'ATIVO'", (user_input,))
                     user_data = cursor.fetchone()
 
                 if user_data and verificar_senha(pw_input, user_data['senha_hash']):
@@ -333,12 +310,7 @@ if not st.session_state.autenticado:
                     st.session_state.usuario_id = user_data.get('id')
                     st.session_state.contabilidade_id = user_data.get('contabilidade_id')
                     st.session_state.empresa_id_legacy = user_data.get('empresa_id')
-                    # FIX: usa helper dedicado em vez de hardcode de username
-                    st.session_state.nivel_acesso = (
-                        "SUPER_ADMIN"
-                        if _is_super_admin(user_data['username'])
-                        else user_data['nivel_acesso']
-                    )
+                    st.session_state.nivel_acesso = "SUPER_ADMIN" if _is_super_admin(user_data['username']) else user_data['nivel_acesso']
                     st.rerun()
                 else:
                     st.error("Credenciais inválidas.")
@@ -378,19 +350,42 @@ def modulo_empresas():
             c6, c7 = st.columns([1, 3])
             cnae = c6.text_input("CNAE", value=limpar_texto(f['cnae']))
             endereco = c7.text_input("Endereço", value=limpar_texto(f['endereco']))
+            
+            with st.expander("Parâmetros Fiscais (Imobilizado - CPC 27)"):
+                cf1, cf2 = st.columns(2)
+                contribuinte_icms = cf1.checkbox("Contribuinte de ICMS", value=bool(f.get('contribuinte_icms', True)))
+                contribuinte_iss = cf2.checkbox("Contribuinte de ISS", value=bool(f.get('contribuinte_iss', False)))
+                
+                st.markdown("##### Contas Contábeis de Recuperação (Ativo)")
+                ca1, ca2 = st.columns(2)
+                conta_ciap_cp = ca1.text_input("Conta ICMS CIAP (Curto Prazo)", value=limpar_texto(f.get('conta_icms_ciap_curto_prazo', '')))
+                conta_ciap_lp = ca2.text_input("Conta ICMS CIAP (Longo Prazo)", value=limpar_texto(f.get('conta_icms_ciap_longo_prazo', '')))
+                
+                ca3, ca4 = st.columns(2)
+                conta_pis_rec = ca3.text_input("Conta PIS a Recuperar s/ Ativo", value=limpar_texto(f.get('conta_pis_recuperar_ativo', '')))
+                conta_cofins_rec = ca4.text_input("Conta COFINS a Recuperar s/ Ativo", value=limpar_texto(f.get('conta_cofins_recuperar_ativo', '')))
+
             if st.form_submit_button("Gravar Unidade", use_container_width=True):
                 if not nome or not cnpj: st.error("Razão Social e CNPJ são obrigatórios.")
                 else:
                     try:
                         with get_db_cursor(commit=True) as cursor:
                             if f['id']:
-                                cursor.execute("UPDATE empresas SET nome=%s, fantasia=%s, cnpj=%s, regime=%s, tipo=%s, cnae=%s, endereco=%s, apelido_unidade=%s WHERE id=%s", (nome, fanta, cnpj, regime, tipo, cnae, endereco, apelido, int(f['id'])))
+                                cursor.execute("""
+                                    UPDATE empresas SET nome=%s, fantasia=%s, cnpj=%s, regime=%s, tipo=%s, cnae=%s, endereco=%s, apelido_unidade=%s,
+                                    contribuinte_icms=%s, contribuinte_iss=%s, conta_icms_ciap_curto_prazo=%s, conta_icms_ciap_longo_prazo=%s, 
+                                    conta_pis_recuperar_ativo=%s, conta_cofins_recuperar_ativo=%s
+                                    WHERE id=%s
+                                """, (nome, fanta, cnpj, regime, tipo, cnae, endereco, apelido, int(contribuinte_icms), int(contribuinte_iss), conta_ciap_cp, conta_ciap_lp, conta_pis_rec, conta_cofins_rec, int(f['id'])))
                             else:
-                                cursor.execute("INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco, status_assinatura, apelido_unidade) VALUES (%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s)", (nome, fanta, cnpj, regime, tipo, cnae, endereco, apelido))
+                                cursor.execute("""
+                                    INSERT INTO empresas (nome, fantasia, cnpj, regime, tipo, cnae, endereco, status_assinatura, apelido_unidade, contribuinte_icms, contribuinte_iss, conta_icms_ciap_curto_prazo, conta_icms_ciap_longo_prazo, conta_pis_recuperar_ativo, conta_cofins_recuperar_ativo) 
+                                    VALUES (%s,%s,%s,%s,%s,%s,%s,'ATIVO',%s,%s,%s,%s,%s,%s,%s)
+                                """, (nome, fanta, cnpj, regime, tipo, cnae, endereco, apelido, int(contribuinte_icms), int(contribuinte_iss), conta_ciap_cp, conta_ciap_lp, conta_pis_rec, conta_cofins_rec))
                         carregar_empresas_ativas.clear()
                         carregar_empresas_visiveis.clear()
                         st.success("Gravado com sucesso!")
-                        st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": "", "apelido_unidade": "", "conta_transf_pis": "", "conta_transf_cofins": ""}
+                        st.session_state.dados_form = {"id": None, "nome": "", "fantasia": "", "cnpj": "", "regime": "Lucro Real", "tipo": "Matriz", "cnae": "", "endereco": "", "apelido_unidade": "", "conta_transf_pis": "", "conta_transf_cofins": "", "contribuinte_icms": 1, "contribuinte_iss": 0, "conta_icms_ciap_curto_prazo": "", "conta_icms_ciap_longo_prazo": "", "conta_pis_recuperar_ativo": "", "conta_cofins_recuperar_ativo": ""}
                     except Exception as e: st.error(f"Erro: {e}")
     with tab_lista:
         df = carregar_empresas_ativas()
@@ -517,7 +512,6 @@ def modulo_apuracao():
                     if not comp_valida: st.error("O formato da Competência deve ser MM/AAAA válido.")
                     elif v_consumido <= 0: st.warning("O valor consumido deve ser maior que zero.")
                     else:
-                        # FIX: guarda contra df_op vazio antes de acessar iloc[0]
                         if df_op.empty:
                             st.error("Nenhuma operação cadastrada. Cadastre operações em Parâmetros Contábeis.")
                             st.stop()
@@ -629,14 +623,11 @@ def modulo_relatorios():
 
         try:
             with get_db_connection() as conn:
-                # FIX: SQL injection corrigido — filtro montado com placeholders %s,
-                # valores nunca interpolados diretamente na string da query.
                 if consolidar:
                     raiz_cnpj = emp_row['cnpj'][:10]
                     df_ids = pd.read_sql(
                         "SELECT id FROM empresas WHERE cnpj LIKE %s AND status_assinatura = 'ATIVO'",
-                        conn,
-                        params=(f"{raiz_cnpj}%",)
+                        conn, params=(f"{raiz_cnpj}%",)
                     )
                     lista_ids = [int(i) for i in df_ids['id'].tolist()]
                     if not lista_ids:
@@ -706,10 +697,8 @@ def modulo_relatorios():
                     comp_origem = r.get('competencia_origem')
 
                     if is_retro and pd.notnull(comp_origem) and str(comp_origem).strip():
-                        if '-' in str(comp_origem):
-                            ano_alvo, mes_alvo = str(comp_origem).split('-')[:2]
-                        else:
-                            mes_alvo, ano_alvo = str(comp_origem).split('/')
+                        if '-' in str(comp_origem): ano_alvo, mes_alvo = str(comp_origem).split('-')[:2]
+                        else: mes_alvo, ano_alvo = str(comp_origem).split('/')
                         comp_exibicao = f"{int(mes_alvo):02d}/{ano_alvo}"
                         ultimo_dia = calendar.monthrange(int(ano_alvo), int(mes_alvo))[1]
                         d_str = f"{ultimo_dia:02d}/{int(mes_alvo):02d}/{ano_alvo}"
@@ -741,10 +730,8 @@ def modulo_relatorios():
                 df_notas = df_export[df_export['is_custo_avulso'] == 0].copy()
 
                 if not df_notas.empty:
-                    if 'apelido_unidade' in df_notas.columns:
-                        df_notas['apelido_unidade'] = df_notas['apelido_unidade'].fillna('MATRIZ')
-                    else:
-                        df_notas['apelido_unidade'] = 'MATRIZ'
+                    if 'apelido_unidade' in df_notas.columns: df_notas['apelido_unidade'] = df_notas['apelido_unidade'].fillna('MATRIZ')
+                    else: df_notas['apelido_unidade'] = 'MATRIZ'
 
                     try:
                         m_c, a_c = competencia.split('/')
@@ -848,6 +835,68 @@ def modulo_relatorios():
         except Exception as e: st.error(f"Erro na geração: {e}")
 
 # --- 7.5 MÓDULO IMOBILIZADO E DEPRECIAÇÃO ---
+
+def render_ficha_cpc27(emp_id, emp_row):
+    st.markdown("#### Ficha de Aquisição e Mensuração Inicial (CPC 27)")
+    st.info("A segregação dos impostos recuperáveis (PIS/COFINS/CIAP) é obrigatória para determinar o custo contábil correto do ativo imobilizado.")
+
+    regime = emp_row.get('regime', 'Lucro Real')
+    contribuinte_icms = emp_row.get('contribuinte_icms', 1)
+
+    with st.form("form_aquisicao_cpc27"):
+        c1, c2, c3 = st.columns(3)
+        descricao = c1.text_input("Descrição do Bem")
+        data_aq = c2.date_input("Data de Aquisição")
+        valor_bruto = c3.number_input("Valor Bruto da NF (R$)", min_value=0.0, step=100.0)
+
+        st.markdown("##### Impostos Destacados / Recuperáveis")
+        c4, c5 = st.columns(2)
+        
+        is_real = regime == "Lucro Real"
+        recupera_pis_cofins = c4.checkbox("Recupera PIS/COFINS (Regra Geral: Lucro Real)", value=is_real)
+        
+        icms_destacado = 0.0
+        if contribuinte_icms:
+            icms_destacado = c5.number_input("Valor do ICMS Destacado na NF (CIAP)", min_value=0.0, step=10.0)
+            
+        es_legado = st.checkbox("Bem de Legado (Já possui parcelas de CIAP apropriadas em sistema anterior)?")
+        parcelas_rest = 48
+        if es_legado:
+            parcelas_rest = st.number_input("Parcelas Restantes do CIAP", min_value=1, max_value=48, value=48)
+
+        submit = st.form_submit_button("Calcular e Salvar Ficha", type="primary")
+
+        if submit:
+            if not descricao or valor_bruto <= 0:
+                st.error("Descrição e Valor Bruto são obrigatórios e maiores que zero.")
+            else:
+                pis = (valor_bruto * 0.0165) if recupera_pis_cofins else 0.0
+                cofins = (valor_bruto * 0.076) if recupera_pis_cofins else 0.0
+                valor_liquido = valor_bruto - (pis + cofins + icms_destacado)
+
+                try:
+                    with get_db_cursor(commit=True) as cursor:
+                        cursor.execute("""
+                            INSERT INTO ativo_imobilizado_detalhes 
+                            (empresa_id, descricao_item, data_aquisicao, valor_bruto_nf, valor_pis_recuperar, valor_cofins_recuperar, valor_icms_ciap_total, valor_liquido_ativo, parcelas_totais, parcelas_restantes, status_bem, usuario_registro) 
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'ATIVO', %s)
+                        """, (emp_id, descricao, data_aq, valor_bruto, pis, cofins, icms_destacado, valor_liquido, 48, parcelas_rest, st.session_state.username))
+                    
+                    st.success("Ficha salva com sucesso! Veja a sugestão de lançamento contábil abaixo:")
+                    
+                    st.code(f"""
+                    --- SUGESTÃO DE LANÇAMENTO CONTÁBIL DE ENTRADA (ERP) ---
+                    D - Imobilizado em Andamento/Equipamentos (ANC): R$ {valor_liquido:,.2f}
+                    D - PIS a Recuperar s/ Ativo (AC):               R$ {pis:,.2f}
+                    D - COFINS a Recuperar s/ Ativo (AC):            R$ {cofins:,.2f}
+                    D - ICMS CIAP (AC - 12 parcelas curto prazo):    R$ {(icms_destacado/48)*min(12, parcelas_rest):,.2f}
+                    D - ICMS CIAP (ANC - Longo Prazo rest.):         R$ {(icms_destacado/48)*max(0, parcelas_rest-12):,.2f}
+                    C - Fornecedores de Imobilizado (PC):            R$ {valor_bruto:,.2f}
+                    """, language="text")
+
+                except Exception as e:
+                    st.error(f"Erro ao salvar Ficha CPC 27 no banco de dados: {e}")
+
 def modulo_imobilizado():
     st.markdown("### Gestão de Ativo Imobilizado")
     df_emp = _empresas_visiveis()
@@ -862,15 +911,15 @@ def modulo_imobilizado():
 
     st.divider()
 
-    abas = ["Cadastro e Processamento", "Inventário Dinâmico"]
-    if st.session_state.nivel_acesso in ["SUPER_ADMIN", "ADMIN"]: abas.append("Manutenção de Ativos (Admin)")
+    abas = ["1. Aquisição (Ficha CPC 27)", "2. Cadastro e Depreciação", "3. Inventário Dinâmico"]
+    if st.session_state.nivel_acesso in ["SUPER_ADMIN", "ADMIN"]: abas.append("4. Manutenção de Ativos (Admin)")
 
     tabs = st.tabs(abas)
 
     with get_db_connection() as conn:
         df_g = pd.read_sql("SELECT * FROM grupos_imobilizado WHERE tenant_id = %s", conn, params=(emp_id,))
 
-    if len(tabs) > 2:
+    if len(tabs) > 3:
         @st.fragment
         def fragmento_manutencao(emp_id_param):
             st.markdown("#### Manutenção de Ativos (Edição/Transferência/Exclusão)")
@@ -1101,9 +1150,12 @@ def modulo_imobilizado():
                         st.markdown('</div>', unsafe_allow_html=True)
 
     with tabs[0]:
+        render_ficha_cpc27(emp_id, row_emp_ativa)
+
+    with tabs[1]:
         col_in, col_ras = st.columns([1, 1], gap="large")
         with col_in:
-            st.markdown("#### Cadastro do Bem")
+            st.markdown("#### Cadastro do Bem para Depreciação")
             if df_g.empty:
                 st.warning("Cadastre os Grupos em Parâmetros Contábeis primeiro nesta empresa para realizar novos registros.")
             else:
@@ -1210,20 +1262,20 @@ def modulo_imobilizado():
                                     cursor_c.execute("""INSERT INTO bens_imobilizado (tenant_id, grupo_id, descricao_item, marca_modelo, num_serie_placa, plaqueta, localizacao, numero_nota_fiscal, nome_fornecedor, data_compra, valor_compra, regra_credito, data_saldo_inicial, valor_residual_inicial, taxa_customizada) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (int(emp_id), int(g_row['id']), desc, marca, num_serie, plaqueta, localizacao, nf, forn, dt_c, float(v_aq), regra_cred, dt_s_db, v_s_db, tx_cust_db))
                                     bem_id = cursor_c.lastrowid
 
-                                if "3" in cenario and cota_sugerida > 0 and v_s_db > 0:
-                                    saldo_restante = v_s_db
-                                    mes_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
-                                    ano_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
-                                    data_plan = date(ano_plan, mes_plan, 1)
+                                    if "3" in cenario and cota_sugerida > 0 and v_s_db > 0:
+                                        saldo_restante = v_s_db
+                                        mes_plan = dt_saldo.month + 1 if dt_saldo.month < 12 else 1
+                                        ano_plan = dt_saldo.year if dt_saldo.month < 12 else dt_saldo.year + 1
+                                        data_plan = date(ano_plan, mes_plan, 1)
 
-                                    is_first_month = True
-                                    while saldo_restante > 0.009:
-                                        cota_atual = min(saldo_restante, float(primeira_cota_manual) if is_first_month else float(cota_sugerida))
-                                        cursor_c.execute("INSERT INTO plano_depreciacao_itens (bem_id, mes_referencia, valor_cota, tipo_registro, status_contabil) VALUES (%s, %s, %s, 'PROJETADO', 'PENDENTE')", (bem_id, data_plan.strftime('%Y-%m-%d'), cota_atual))
-                                        saldo_restante -= cota_atual
-                                        is_first_month = False
-                                        if data_plan.month == 12: data_plan = date(data_plan.year + 1, 1, 1)
-                                        else: data_plan = date(data_plan.year, data_plan.month + 1, 1)
+                                        is_first_month = True
+                                        while saldo_restante > 0.009:
+                                            cota_atual = min(saldo_restante, float(primeira_cota_manual) if is_first_month else float(cota_sugerida))
+                                            cursor_c.execute("INSERT INTO plano_depreciacao_itens (bem_id, mes_referencia, valor_cota, tipo_registro, status_contabil) VALUES (%s, %s, %s, 'PROJETADO', 'PENDENTE')", (bem_id, data_plan.strftime('%Y-%m-%d'), cota_atual))
+                                            saldo_restante -= cota_atual
+                                            is_first_month = False
+                                            if data_plan.month == 12: data_plan = date(data_plan.year + 1, 1, 1)
+                                            else: data_plan = date(data_plan.year, data_plan.month + 1, 1)
 
                                 st.success("Bem registado com sucesso!"); st.rerun()
                             except Exception as e: st.error(f"Erro ao salvar: {e}")
@@ -1334,7 +1386,7 @@ def modulo_imobilizado():
                         with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_xlsx.to_excel(writer, index=False, sheet_name='Depreciacao')
                         st.download_button("Baixar Planilha ERP (XLSX)", data=buffer.getvalue(), file_name=f"DEPREC_{a_proc}.xlsx")
 
-    with tabs[1]:
+    with tabs[2]:
         st.markdown("#### Consultar Inventário Dinâmico")
         mostrar_inativos = st.checkbox("Exibir bens inativos (baixados nos últimos 5 anos)")
         limite_anos = hoje_br.year - 5
@@ -1388,17 +1440,17 @@ def modulo_imobilizado():
                 cursor_min.execute("SELECT MIN(data_compra) as min_c, MIN(data_saldo_inicial) as min_s FROM bens_imobilizado WHERE tenant_id = %s", (int(emp_id),))
                 res_min = cursor_min.fetchone()
 
-                dts = []
-                if res_min:
-                    if res_min['min_c']: dts.append(res_min['min_c'])
-                    if res_min['min_s']: dts.append(res_min['min_s'])
+            dts = []
+            if res_min:
+                if res_min['min_c']: dts.append(res_min['min_c'])
+                if res_min['min_s']: dts.append(res_min['min_s'])
 
-                if dts:
-                    data_minima = min(dts)
-                    if isinstance(data_minima, (pd.Timestamp, datetime)):
-                        data_minima = data_minima.date()
-                else:
-                    data_minima = date(2024, 12, 31)
+            if dts:
+                data_minima = min(dts)
+                if isinstance(data_minima, (pd.Timestamp, datetime)):
+                    data_minima = data_minima.date()
+            else:
+                data_minima = date(2024, 12, 31)
 
             c_filtro, c_item, c_data, c_btn = st.columns([1.5, 2, 1, 1])
             opcoes_grupos = ["Todos os Grupos"] + df_g['nome_grupo'].tolist() if not df_g.empty else ["Todos os Grupos"]
@@ -1515,8 +1567,8 @@ def modulo_imobilizado():
                 st.success("Relatório processado e pronto para download!")
                 st.download_button("⬇️ Baixar Arquivo PDF", data=st.session_state['pdf_inv_b64'], file_name=st.session_state['pdf_inv_nome'], mime="application/pdf", use_container_width=True)
 
-    if len(tabs) > 2:
-        with tabs[2]:
+    if len(tabs) > 3:
+        with tabs[3]:
             fragmento_manutencao(emp_id)
 
 # --- 8. MÓDULO PARÂMETROS CONTÁBEIS ---
@@ -1733,13 +1785,13 @@ def modulo_parametros():
                     with get_db_connection() as conn_origem:
                         df_origem = pd.read_sql("SELECT * FROM grupos_imobilizado WHERE tenant_id = %s", conn_origem, params=(id_origem,))
 
-                    if df_origem.empty: st.warning("A empresa de origem não possui grupos cadastrados.")
-                    else:
-                        with get_db_cursor(commit=True) as cursor:
-                            for _, r in df_origem.iterrows():
-                                if not df_g.empty and r['nome_grupo'] in df_g['nome_grupo'].tolist(): continue
-                                cursor.execute("INSERT INTO grupos_imobilizado (tenant_id, nome_grupo, taxa_anual_percentual, conta_contabil_despesa, conta_contabil_dep_acumulada) VALUES (%s,%s,%s,%s,%s)", (int(e_id), r['nome_grupo'], float(r['taxa_anual_percentual']), r['conta_contabil_despesa'], r['conta_contabil_dep_acumulada']))
-                        st.success("Grupos clonados com sucesso!"); st.rerun()
+                if df_origem.empty: st.warning("A empresa de origem não possui grupos cadastrados.")
+                else:
+                    with get_db_cursor(commit=True) as cursor:
+                        for _, r in df_origem.iterrows():
+                            if not df_g.empty and r['nome_grupo'] in df_g['nome_grupo'].tolist(): continue
+                            cursor.execute("INSERT INTO grupos_imobilizado (tenant_id, nome_grupo, taxa_anual_percentual, conta_contabil_despesa, conta_contabil_dep_acumulada) VALUES (%s,%s,%s,%s,%s)", (int(e_id), r['nome_grupo'], float(r['taxa_anual_percentual']), r['conta_contabil_despesa'], r['conta_contabil_dep_acumulada']))
+                    st.success("Grupos clonados com sucesso!"); st.rerun()
 
         st.divider()
         col_edit, col_new = st.columns(2, gap="large")
