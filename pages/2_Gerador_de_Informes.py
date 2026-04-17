@@ -5,59 +5,80 @@ import io
 import zipfile
 import os
 
+# Configuração da página
 st.set_page_config(page_title="Gerador de Informes", layout="wide")
 
 st.title("📄 Gerador de Informe de Rendimentos")
 st.markdown("---")
 
-# Ajuste automático do caminho do template
-# Se o arquivo estiver na raiz, '..' volta um nível a partir da pasta /pages
+# 1. LOCALIZAÇÃO DO TEMPLATE (Ajustado conforme seu print)
+# Como o script está em /pages, precisamos subir um nível para achar o .docx na raiz
 current_dir = os.path.dirname(os.path.abspath(__file__))
 template_path = os.path.join(current_dir, "..", "INFORME-RENDIMENTO-EDITAVEL.docx")
 
-# Interface de Upload
-uploaded_file = st.file_uploader("Suba sua planilha de Aluguéis", type=["xlsx"])
+# 2. INTERFACE DE UPLOAD DA PLANILHA
+st.subheader("1. Selecione a planilha de dados")
+uploaded_file = st.file_uploader("Arraste o arquivo Aluguel.xlsx aqui", type=["xlsx"])
 
 if uploaded_file:
-    df = pd.read_excel(uploaded_file)
-    st.subheader("Dados Identificados")
-    st.dataframe(df.head())
+    try:
+        df = pd.read_excel(uploaded_file)
+        st.success("✅ Planilha carregada com sucesso!")
+        st.dataframe(df.head(10)) # Mostra as primeiras 10 linhas para conferência
 
-    # Verificação se o arquivo de template existe no local esperado
-    if not os.path.exists(template_path):
-        st.error(f"Arquivo de template não encontrado em: {template_path}. Certifique-se de que o arquivo .docx está na pasta raiz do projeto.")
-    else:
-        if st.button("Gerar 100% dos Informes"):
-            try:
+        # 3. VERIFICAÇÃO DO TEMPLATE NO SERVIDOR
+        if not os.path.exists(template_path):
+            st.error(f"❌ Erro: O arquivo '{os.path.basename(template_path)}' não foi encontrado na raiz do projeto.")
+            st.info(f"Caminho tentado: {template_path}")
+        else:
+            st.subheader("2. Gerar Documentos")
+            if st.button("🚀 Gerar todos os Informes em ZIP"):
+                
+                # Criar o arquivo ZIP na memória
                 zip_buffer = io.BytesIO()
                 
                 with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zip_file:
+                    progress_bar = st.progress(0)
+                    total_rows = len(df)
+                    
                     for index, row in df.iterrows():
+                        # Carrega o template a cada iteração
                         doc = DocxTemplate(template_path)
                         
-                        # Converte a linha do Excel em dicionário para preencher o Word
-                        # As tags {{campo}} devem ser iguais aos nomes das colunas no Excel
+                        # Converte a linha do Excel para o dicionário de tags do Word
                         context = row.to_dict()
                         
-                        # Garante que a data de emissão seja o último dia do ano anterior
+                        # Define a data fixa de emissão (último dia do ano anterior)
                         context['data_emissao'] = "31/12/2025"
                         
+                        # Preenche o Word (renderiza)
                         doc.render(context)
                         
+                        # Salva o arquivo preenchido em memória
                         doc_io = io.BytesIO()
                         doc.save(doc_io)
                         doc_io.seek(0)
                         
-                        # Nomeia o arquivo com o nome do beneficiário (limpando espaços)
-                        nome_limpo = str(row['nome_beneficiario']).strip().replace(" ", "_")
-                        zip_file.writestr(f"Informe_{nome_limpo}.docx", doc_io.getvalue())
-                
-                st.success(f"Concluído! {len(df)} documentos processados sem distorções de layout.")
+                        # Define o nome do arquivo individual dentro do ZIP
+                        nome_beneficiario = str(row['nome_beneficiario']).strip().replace(" ", "_")
+                        file_name = f"Informe_{nome_beneficiario}.docx"
+                        
+                        # Adiciona ao ZIP
+                        zip_file.writestr(file_name, doc_io.getvalue())
+                        
+                        # Atualiza barra de progresso
+                        progress_bar.progress((index + 1) / total_rows)
+
+                # Botão de Download do arquivo final
+                st.success(f"✨ {total_rows} Informes gerados com sucesso!")
                 st.download_button(
-                    label="📥 Baixar Arquivos (ZIP)",
+                    label="📥 Baixar todos os Informes (.zip)",
                     data=zip_buffer.getvalue(),
-                    file_name="Informes_Rendimentos_Aluguel.zip",
+                    file_name="Informes_Gerados_Aluguel.zip",
                     mime="application/zip"
                 )
-            except Exception as e:
-                st.error(f"Erro no processamento: {e}")
+                
+    except Exception as e:
+        st.error(f"Erro ao processar a planilha: {e}")
+else:
+    st.info("Aguardando o upload da planilha Excel para liberar o gerador.")
