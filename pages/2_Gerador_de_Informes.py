@@ -13,7 +13,7 @@ st.title("📄 Gerador de Informe de Rendimentos")
 # --- BUSCA AUTOMÁTICA POR QUALQUER ARQUIVO QUE COMECE COM 'INFORME' ---
 def localizar_template():
     # Procura na pasta atual e na pasta acima por qualquer .docx que tenha 'INFORME' no nome
-    padrao = "**/INFORME*.docx"
+    padrao = "INFORME-RENDIMENTO-EDITAVEL.docx"
     arquivos = glob.glob(padrao, recursive=True)
     
     # Se estiver no Streamlit Cloud, tenta caminhos relativos comuns
