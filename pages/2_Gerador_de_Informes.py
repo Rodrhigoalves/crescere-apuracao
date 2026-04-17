@@ -4,17 +4,18 @@ from docxtpl import DocxTemplate
 import io
 import zipfile
 import os
+import re
 
-# Configuração para o monitor do ASUS TUF
+# Configuração da página para o monitor do ASUS TUF
 st.set_page_config(page_title="Gerador de Informes Pro", layout="wide")
 
 st.title("📄 Gerador de Informe de Rendimentos")
 st.markdown("---")
 
-# --- FUNÇÕES DE FORMATAÇÃO E LIMPEZA ---
+# --- FUNÇÕES DE FORMATAÇÃO E TRATAMENTO ---
 
 def formatar_moeda(valor):
-    """Formata para 6.500,00 mantendo a string curta para não quebrar o layout"""
+    """Garante o formato 6.500,00 ou 0,00 sem o R$ para evitar quebras de layout"""
     try:
         if pd.isna(valor) or valor == "" or valor == 0:
             return "0,00"
@@ -23,16 +24,19 @@ def formatar_moeda(valor):
         return "0,00"
 
 def formatar_documento(doc):
-    """Aplica máscara de CPF/CNPJ e limpa espaços"""
-    doc = str(doc).translate(str.maketrans("", "", "./- ")).strip()
-    if len(doc) == 11:
+    """Aplica máscara de CPF ou CNPJ garantindo todos os dígitos (inclusive os últimos)"""
+    # Remove qualquer carater que não seja número para evitar erros de fatiamento
+    doc = re.sub(r'\D', '', str(doc)).strip()
+    
+    if len(doc) == 11: # CPF
         return f"{doc[:3]}.{doc[3:6]}.{doc[6:9]}-{doc[9:]}"
-    elif len(doc) == 14:
+    elif len(doc) == 14: # CNPJ
+        # O fatiamento [12:] garante que os dois últimos dígitos apareçam após o hífen
         return f"{doc[:2]}.{doc[2:5]}.{doc[5:8]}/{doc[8:12]}-{doc[12:]}"
     return doc
 
 def localizar_template():
-    """Busca automática do Word na raiz do projeto"""
+    """Busca automática de qualquer ficheiro .docx na raiz do repositório no GitHub"""
     current_dir = os.path.dirname(os.path.abspath(__file__))
     raiz = os.path.normpath(os.path.join(current_dir, ".."))
     try:
@@ -44,24 +48,27 @@ def localizar_template():
         return None
     return None
 
-# --- EXECUÇÃO ---
+# --- VERIFICAÇÃO DO TEMPLATE ---
 
 template_path = localizar_template()
 
 if template_path:
     st.success(f"✅ Template detetado: **{os.path.basename(template_path)}**")
 else:
-    st.error("❌ Erro: Arquivo .docx não encontrado na raiz do GitHub.")
+    st.error("❌ Erro: Nenhum ficheiro .docx encontrado na raiz do projeto no GitHub.")
     st.stop()
 
-uploaded_file = st.file_uploader("Suba a planilha Excel", type=["xlsx"])
+# --- INTERFACE E PROCESSAMENTO ---
+
+uploaded_file = st.file_uploader("Carrega a tua planilha Excel", type=["xlsx"])
 
 if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
+        st.write(f"Registos encontrados: {len(df)}")
         st.dataframe(df.head())
 
-        if st.button("🚀 Gerar Informes em Lote"):
+        if st.button("🚀 Gerar Informes (ZIP com Nomes)"):
             zip_buffer = io.BytesIO()
             
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zip_file:
@@ -70,18 +77,18 @@ if uploaded_file:
                 for index, row in df.iterrows():
                     doc_tpl = DocxTemplate(template_path)
                     
-                    # --- LIMPEZA DE DADOS (PREVINE CORTE DE TEXTO) ---
-                    # Criamos um contexto limpando espaços em branco que deformam tabelas
+                    # 1. Limpeza de Dados e NaNs
                     context = {}
                     for k, v in row.to_dict().items():
                         if pd.isna(v):
                             context[k] = ""
                         elif isinstance(v, str):
-                            context[k] = v.strip() # Remove espaços fantasmas
+                            context[k] = v.strip()
                         else:
                             context[k] = v
 
-                    # Aplica formatações específicas
+                    # 2. Aplicação das Formatações (Moeda e Documentos)
+                    # Certifica-te que os nomes das colunas abaixo batem com o teu Excel
                     context['valor_aluguel'] = formatar_moeda(context.get('valor_aluguel'))
                     context['ir_retido'] = formatar_moeda(context.get('ir_retido'))
                     
@@ -92,24 +99,28 @@ if uploaded_file:
                     
                     context['data_emissao'] = "31/12/2025"
 
-                    # Renderização
+                    # 3. Renderização do Word
                     doc_tpl.render(context)
                     
+                    # 4. Gravação em Memória
                     doc_io = io.BytesIO()
                     doc_tpl.save(doc_io)
                     
-                    nome_limpo = str(row.get('nome_beneficiario', index)).strip().replace(" ", "_")
-                    zip_file.writestr(f"Informe_{nome_limpo}.docx", doc_io.getvalue())
+                    # 5. Nomeação do Ficheiro com o Nome do Beneficiário
+                    nome_pessoa = str(row.get('nome_beneficiario', f"Informe_{index}")).strip().replace(" ", "_")
+                    nome_ficheiro_individual = f"Informe_{nome_pessoa}.docx"
+                    
+                    zip_file.writestr(nome_ficheiro_individual, doc_io.getvalue())
                     
                     barra.progress((index + 1) / len(df))
 
-            st.success("✅ Documentos gerados!")
+            st.success("✅ Processamento concluído com sucesso!")
             st.download_button(
-                label="📥 Baixar ZIP",
+                label="📥 Baixar ZIP com Informes Nomeados",
                 data=zip_buffer.getvalue(),
-                file_name="Informes_Rendimentos.zip",
+                file_name="Informes_Rendimentos_2025.zip",
                 mime="application/zip"
             )
                 
     except Exception as e:
-        st.error(f"Erro técnico: {e}")
+        st.error(f"Ocorreu um erro técnico: {e}")
