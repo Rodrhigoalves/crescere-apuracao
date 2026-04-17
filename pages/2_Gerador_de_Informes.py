@@ -9,28 +9,41 @@ st.set_page_config(page_title="Gerador de Informes", layout="wide")
 
 st.title("📄 Gerador de Informe de Rendimentos")
 
-# --- CONFIGURAÇÃO DO NOME DO ARQUIVO (IDÊNTICO AO GITHUB) ---
-NOME_DO_ARQUIVO = "INFORME-RENDIMENTO-EDITAVEL.docx"
+# --- FUNÇÃO PARA LOCALIZAR O WORD NA RAIZ ---
+def buscar_word_na_raiz():
+    # Caminho da pasta atual (pages/)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # Caminho da pasta pai (raiz do projeto)
+    raiz = os.path.normpath(os.path.join(current_dir, ".."))
+    
+    # Lista todos os arquivos na raiz e procura o primeiro .docx
+    try:
+        arquivos = os.listdir(raiz)
+        for arq in arquivos:
+            if arq.lower().endswith(".docx"):
+                return os.path.join(raiz, arq)
+    except:
+        return None
+    return None
 
-# Localização: volta um nível para sair da pasta /pages e chegar na raiz
-current_dir = os.path.dirname(os.path.abspath(__file__))
-template_path = os.path.join(current_dir, "..", NOME_DO_ARQUIVO)
+template_path = buscar_word_na_raiz()
 
-# --- VERIFICAÇÃO DE SEGURANÇA ---
-if os.path.exists(template_path):
-    st.success(f"✅ Arquivo encontrado: {NOME_DO_ARQUIVO}")
+# Verificação visual para o usuário
+if template_path:
+    nome_exibicao = os.path.basename(template_path)
+    st.success(f"✅ Template detectado: **{nome_exibicao}**")
 else:
-    st.error(f"❌ Arquivo NÃO encontrado na raiz do GitHub.")
-    st.info(f"Certifique-se de que o nome no GitHub seja exatamente: {NOME_DO_ARQUIVO}")
+    st.error("❌ Nenhum arquivo Word (.docx) encontrado na raiz do projeto.")
+    st.info("Dica: Certifique-se de que o arquivo Word não está dentro da pasta 'pages'.")
     st.stop()
-# -----------------------------------------------------------
+# --------------------------------------------
 
 uploaded_file = st.file_uploader("Suba sua planilha de Aluguéis (Excel)", type=["xlsx"])
 
 if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
-        st.subheader("Prévia dos Dados")
+        st.subheader("Dados Identificados")
         st.dataframe(df.head())
 
         if st.button("🚀 Gerar Informes em ZIP"):
@@ -39,9 +52,8 @@ if uploaded_file:
                 for index, row in df.iterrows():
                     doc = DocxTemplate(template_path)
                     
-                    # Converte a linha do Excel em dados para o Word
+                    # Preenche os dados
                     context = row.to_dict()
-                    # Adiciona a data fixa de emissão
                     context['data_emissao'] = "31/12/2025"
                     
                     doc.render(context)
@@ -49,16 +61,16 @@ if uploaded_file:
                     doc_io = io.BytesIO()
                     doc.save(doc_io)
                     
-                    # Nome do arquivo individual dentro do ZIP
+                    # Nome do arquivo no ZIP
                     nome_benef = str(row['nome_beneficiario']).strip().replace(" ", "_")
                     zip_file.writestr(f"Informe_{nome_benef}.docx", doc_io.getvalue())
             
-            st.success("Documentos gerados com sucesso!")
+            st.success("Processamento concluído!")
             st.download_button(
-                label="📥 Baixar Todos os Informes",
+                label="📥 Baixar ZIP",
                 data=zip_buffer.getvalue(),
                 file_name="Informes_Gerados.zip",
                 mime="application/zip"
             )
     except Exception as e:
-        st.error(f"Erro ao processar: {e}")
+        st.error(f"Erro: {e}")
