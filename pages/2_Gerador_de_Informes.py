@@ -5,34 +5,34 @@ import io
 import zipfile
 import os
 
-# Configuração da página para o teu ASUS TUF (Modo Largo)
+# Configuração para o monitor do ASUS TUF
 st.set_page_config(page_title="Gerador de Informes Pro", layout="wide")
 
 st.title("📄 Gerador de Informe de Rendimentos")
 st.markdown("---")
 
-# --- FUNÇÕES DE FORMATAÇÃO TÉCNICA ---
+# --- FUNÇÕES DE FORMATAÇÃO E LIMPEZA ---
 
 def formatar_moeda(valor):
-    """Formata valores para o padrão 6.500,00 ou 6.500,10 sem o R$"""
+    """Formata para 6.500,00 mantendo a string curta para não quebrar o layout"""
     try:
         if pd.isna(valor) or valor == "" or valor == 0:
             return "0,00"
         return f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except:
-        return valor
+        return "0,00"
 
 def formatar_documento(doc):
-    """Aplica máscara de CPF (11 dígitos) ou CNPJ (14 dígitos) automaticamente"""
-    doc = str(doc).translate(str.maketrans("", "", "./- ")) # Remove formatação existente
-    if len(doc) == 11: # CPF
+    """Aplica máscara de CPF/CNPJ e limpa espaços"""
+    doc = str(doc).translate(str.maketrans("", "", "./- ")).strip()
+    if len(doc) == 11:
         return f"{doc[:3]}.{doc[3:6]}.{doc[6:9]}-{doc[9:]}"
-    elif len(doc) == 14: # CNPJ
+    elif len(doc) == 14:
         return f"{doc[:2]}.{doc[2:5]}.{doc[5:8]}/{doc[8:12]}-{doc[12:]}"
     return doc
 
 def localizar_template():
-    """Procura qualquer ficheiro .docx na raiz do projeto (um nível acima de /pages)"""
+    """Busca automática do Word na raiz do projeto"""
     current_dir = os.path.dirname(os.path.abspath(__file__))
     raiz = os.path.normpath(os.path.join(current_dir, ".."))
     try:
@@ -44,79 +44,72 @@ def localizar_template():
         return None
     return None
 
-# --- VERIFICAÇÃO DO TEMPLATE ---
+# --- EXECUÇÃO ---
+
 template_path = localizar_template()
 
 if template_path:
-    st.success(f"✅ Template detetado no GitHub: **{os.path.basename(template_path)}**")
+    st.success(f"✅ Template detetado: **{os.path.basename(template_path)}**")
 else:
-    st.error("❌ Erro: Nenhum ficheiro Word (.docx) encontrado na raiz do projeto.")
+    st.error("❌ Erro: Arquivo .docx não encontrado na raiz do GitHub.")
     st.stop()
 
-# --- INTERFACE DE UPLOAD ---
-st.subheader("1. Dados de Entrada")
-uploaded_file = st.file_uploader("Carrega a tua planilha Excel (Aluguel.xlsx)", type=["xlsx"])
+uploaded_file = st.file_uploader("Suba a planilha Excel", type=["xlsx"])
 
 if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
-        st.write(f"Registos encontrados: {len(df)}")
         st.dataframe(df.head())
 
-        st.subheader("2. Processamento")
-        if st.button("🚀 Gerar Informes em Lote (ZIP)"):
-            
+        if st.button("🚀 Gerar Informes em Lote"):
             zip_buffer = io.BytesIO()
             
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zip_file:
-                barra_progresso = st.progress(0)
+                barra = st.progress(0)
                 
                 for index, row in df.iterrows():
                     doc_tpl = DocxTemplate(template_path)
                     
-                    # Converte a linha da planilha em dicionário
-                    context = row.to_dict()
+                    # --- LIMPEZA DE DADOS (PREVINE CORTE DE TEXTO) ---
+                    # Criamos um contexto limpando espaços em branco que deformam tabelas
+                    context = {}
+                    for k, v in row.to_dict().items():
+                        if pd.isna(v):
+                            context[k] = ""
+                        elif isinstance(v, str):
+                            context[k] = v.strip() # Remove espaços fantasmas
+                        else:
+                            context[k] = v
+
+                    # Aplica formatações específicas
+                    context['valor_aluguel'] = formatar_moeda(context.get('valor_aluguel'))
+                    context['ir_retido'] = formatar_moeda(context.get('ir_retido'))
                     
-                    # --- APLICAÇÃO DAS REGRAS DE FORMATAÇÃO ---
-                    
-                    # 1. Valores Monetários (ajusta os nomes das colunas conforme o teu Excel)
-                    campos_valor = ['valor_aluguel', 'ir_retido']
-                    for campo in campos_valor:
-                        context[campo] = formatar_moeda(context.get(campo, 0))
-                    
-                    # 2. Documentos (CPF/CNPJ)
                     if 'cnpj_fonte' in context:
                         context['cnpj_fonte'] = formatar_documento(context['cnpj_fonte'])
                     if 'cpf_beneficiario' in context:
                         context['cpf_beneficiario'] = formatar_documento(context['cpf_beneficiario'])
                     
-                    # 3. Data e Limpeza de NaNs
                     context['data_emissao'] = "31/12/2025"
-                    # Garante que qualquer outro campo vazio não escreva 'nan' no Word
-                    context = {k: ("" if pd.isna(v) else v) for k, v in context.items()}
-                    
-                    # Renderiza o preenchimento mantendo as bordas e estilos
+
+                    # Renderização
                     doc_tpl.render(context)
                     
-                    # Guarda o documento preenchido em memória
                     doc_io = io.BytesIO()
                     doc_tpl.save(doc_io)
-                    doc_io.seek(0)
                     
-                    # Nome do ficheiro dentro do ZIP
-                    nome_cliente = str(row.get('nome_beneficiario', f"Informe_{index}")).strip().replace(" ", "_")
-                    zip_file.writestr(f"Informe_{nome_cliente}.docx", doc_io.getvalue())
+                    nome_limpo = str(row.get('nome_beneficiario', index)).strip().replace(" ", "_")
+                    zip_file.writestr(f"Informe_{nome_limpo}.docx", doc_io.getvalue())
                     
-                    # Atualiza progresso
-                    barra_progresso.progress((index + 1) / len(df))
+                    barra.progress((index + 1) / len(df))
 
-            st.success("✅ Todos os documentos foram gerados e formatados!")
+            st.success("✅ Documentos gerados!")
             st.download_button(
-                label="📥 Baixar Ficheiros ZIP",
+                label="📥 Baixar ZIP",
                 data=zip_buffer.getvalue(),
-                file_name="Informes_Rendimentos_Formatados.zip",
+                file_name="Informes_Rendimentos.zip",
                 mime="application/zip"
             )
                 
     except Exception as e:
-        st.error(f"Ocorreu um erro no processamento: {e}")
+        st.error(f"Erro técnico: {e}")
