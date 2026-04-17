@@ -10,3 +10,4 @@ thefuzz
 ofxparse
 ofxtools
 xlsxwriter
+docxtpl
