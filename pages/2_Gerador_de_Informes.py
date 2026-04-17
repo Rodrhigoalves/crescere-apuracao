@@ -10,7 +10,7 @@ st.set_page_config(page_title="Gerador de Informes", layout="wide")
 st.title("📄 Gerador de Informe de Rendimentos")
 
 # --- CONFIGURAÇÃO DO NOME DO ARQUIVO (IDÊNTICO AO GITHUB) ---
-NOME_DO_ARQUIVO = "INFORME-RENDIMENTO-EDITAVEL-2026-1 (1).docx"
+NOME_DO_ARQUIVO = "INFORME-RENDIMENTO-EDITAVEL.docx"
 
 # Localização: volta um nível para sair da pasta /pages e chegar na raiz
 current_dir = os.path.dirname(os.path.abspath(__file__))
