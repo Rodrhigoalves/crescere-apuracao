@@ -9,24 +9,21 @@ st.set_page_config(page_title="Gerador de Informes", layout="wide")
 
 st.title("📄 Gerador de Informe de Rendimentos")
 
-# --- LOCALIZAÇÃO DO TEMPLATE ---
-# 1. Definimos o nome exato que aparece no seu print
+# --- CONFIGURAÇÃO DO NOME DO ARQUIVO (IDÊNTICO AO GITHUB) ---
 NOME_DO_ARQUIVO = "INFORME-RENDIMENTO-EDITAVEL-2026-1 (1).docx"
 
-# 2. Pegamos o caminho da pasta onde este script (.py) está (que é a /pages)
-caminho_da_pagina = os.path.dirname(os.path.abspath(__file__))
+# Localização: volta um nível para sair da pasta /pages e chegar na raiz
+current_dir = os.path.dirname(os.path.abspath(__file__))
+template_path = os.path.join(current_dir, "..", NOME_DO_ARQUIVO)
 
-# 3. Subimos um nível (..) para chegar na raiz e encontrar o Word
-template_path = os.path.join(caminho_da_pagina, "..", NOME_DO_ARQUIVO)
-
-# --- VERIFICAÇÃO VISUAL ---
+# --- VERIFICAÇÃO DE SEGURANÇA ---
 if os.path.exists(template_path):
-    st.success(f"✅ Arquivo detectado com sucesso na raiz!")
+    st.success(f"✅ Arquivo encontrado: {NOME_DO_ARQUIVO}")
 else:
-    st.error(f"❌ O arquivo não foi encontrado.")
-    st.info(f"O Python tentou procurar em: {template_path}")
-    st.stop() # Para o código aqui se não achar, evitando erro de sistema
-# -------------------------------
+    st.error(f"❌ Arquivo NÃO encontrado na raiz do GitHub.")
+    st.info(f"Certifique-se de que o nome no GitHub seja exatamente: {NOME_DO_ARQUIVO}")
+    st.stop()
+# -----------------------------------------------------------
 
 uploaded_file = st.file_uploader("Suba sua planilha de Aluguéis (Excel)", type=["xlsx"])
 
@@ -44,8 +41,7 @@ if uploaded_file:
                     
                     # Converte a linha do Excel em dados para o Word
                     context = row.to_dict()
-                    
-                    # Adiciona a data de emissão fixa
+                    # Adiciona a data fixa de emissão
                     context['data_emissao'] = "31/12/2025"
                     
                     doc.render(context)
@@ -57,7 +53,7 @@ if uploaded_file:
                     nome_benef = str(row['nome_beneficiario']).strip().replace(" ", "_")
                     zip_file.writestr(f"Informe_{nome_benef}.docx", doc_io.getvalue())
             
-            st.success("Processamento concluído!")
+            st.success("Documentos gerados com sucesso!")
             st.download_button(
                 label="📥 Baixar Todos os Informes",
                 data=zip_buffer.getvalue(),
