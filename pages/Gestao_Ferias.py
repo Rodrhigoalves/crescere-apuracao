@@ -73,7 +73,7 @@ with tab_publica:
 with tab_privada:
     senha = st.text_input("Digite a senha de acesso do Líder:", type="password")
     
-    if senha == "SUA_SENHA_AQUI": # Defina sua senha aqui
+    if senha == "lider2026": # Defina sua senha aqui
         st.success("Acesso Autorizado")
         
         menu_lider = st.radio("O que deseja fazer?", ["Aprovar Pedidos", "Gestão de Equipe", "Histórico de Saldos"], horizontal=True)
