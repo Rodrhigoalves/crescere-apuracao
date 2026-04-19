@@ -1,171 +1,165 @@
 import streamlit as st
 import sys
 import os
+import datetime
 
-# 1. AJUSTE DE CAMINHO E IMPORTAÇÃO
+# 1. CONEXÃO E CAMINHOS
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 try:
     from database import query_banco
 except ImportError:
-    st.error("Erro: O arquivo 'database.py' não foi encontrado na raiz do projeto.")
+    st.error("Erro: O arquivo 'database.py' não foi encontrado na raiz.")
     st.stop()
 
-# 2. CONFIGURAÇÃO DA PÁGINA
-st.set_page_config(page_title="Gestão de Férias", layout="wide")
+# 2. FUNÇÃO PARA CAPTURAR IP
+def get_remote_ip():
+    # Tenta capturar o IP real do usuário (funciona no Streamlit Cloud e Local)
+    try:
+        # No Streamlit Cloud, o IP vem no cabeçalho X-Forwarded-For
+        ip = st.context.headers.get("X-Forwarded-For", "127.0.0.1").split(',')[0]
+        return ip
+    except:
+        return "127.0.0.1"
 
-st.markdown("""
-    <style>
-    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
-    .stTabs [data-baseweb="tab"] { 
-        background-color: #f0f2f6; 
-        border-radius: 5px; 
-        padding: 10px 20px;
-    }
-    .stTabs [aria-selected="true"] { 
-        background-color: #007bff; 
-        color: white !important; 
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# 3. CONFIGURAÇÕES INICIAIS
+st.set_page_config(page_title="Gestão de Férias", layout="wide")
+current_ip = get_remote_ip()
 
 st.title("📅 Sistema de Controle de Férias")
+st.caption(f"Seu endereço IP atual: {current_ip}")
 
-# 3. CARREGAMENTO DE DADOS INICIAIS
+# Busca dados atualizados
 try:
-    # Busca funcionários ativos
     funcionarios_db = query_banco("SELECT * FROM rh_funcionarios WHERE is_ativo = True ORDER BY nome ASC")
-except Exception as e:
-    st.error(f"Erro ao acessar o banco de dados: {e}")
+except:
+    st.error("Erro ao carregar banco de dados. Verifique se as colunas ip_maquina e pode_vender_ferias foram criadas.")
     st.stop()
 
 tab_func, tab_lider = st.tabs(["👤 Espaço do Funcionário", "🔒 Área Restrita (Líder)"])
 
-# --- 4. ÁREA DO FUNCIONÁRIO (PÚBLICA) ---
+# --- 4. ESPAÇO DO FUNCIONÁRIO (TRAVA POR IP) ---
 with tab_func:
     if not funcionarios_db:
-        st.info("Nenhum funcionário cadastrado no sistema.")
+        st.info("Nenhum funcionário cadastrado.")
     else:
         nomes = [f['nome'] for f in funcionarios_db]
-        selecionado = st.selectbox("Selecione seu nome para solicitar férias:", [""] + nomes)
+        selecionado = st.selectbox("Selecione seu nome para acessar seu painel:", [""] + nomes)
 
         if selecionado:
-            # Localiza o usuário selecionado na lista
             user = next(item for item in funcionarios_db if item["nome"] == selecionado)
             
-            # REGRA DE BLOQUEIO: Só acessa se tiver e-mail corporativo cadastrado
-            if user['email_corporativo'] is None or user['email_corporativo'].strip() == "":
-                st.error(f"⚠️ Acesso Bloqueado para {selecionado}.")
-                st.warning("Motivo: Seu e-mail corporativo ainda não foi cadastrado. O agendamento só é liberado após a ativação do e-mail pelo seu líder.")
+            # TRAVA DE PRIVACIDADE: Compara o IP da máquina com o IP cadastrado pelo Líder
+            if user['ip_maquina'] != current_ip:
+                st.error("🚫 ACESSO NEGADO: Máquina não autorizada.")
+                st.warning(f"O colaborador **{selecionado}** está vinculado a outro endereço IP. Se você mudou de máquina ou de cabo de rede, solicite ao seu líder a atualização do seu IP de acesso.")
+                st.info(f"IP desta máquina: {current_ip}")
+            
+            elif not user['email_corporativo']:
+                st.error("Acesso Bloqueado: E-mail corporativo não identificado.")
+            
             else:
-                st.info(f"Conectado como: {user['email_corporativo']}")
-                with st.form("solicita_ferias", clear_on_submit=True):
+                st.success(f"Identidade validada via Protocolo de IP ({current_ip})")
+                with st.form("solicitacao_ferias", clear_on_submit=True):
                     col1, col2 = st.columns(2)
                     d_ini = col1.date_input("Data de Início")
-                    d_fim = col2.date_input("Data de Término (Último dia de descanso)")
-                    abono = st.checkbox("Desejo vender 10 dias (Abono Pecuniário)")
+                    d_fim = col2.date_input("Data de Término")
                     
-                    if st.form_submit_button("Enviar Solicitação"):
+                    # Regra do Abono: Só aparece se o líder habilitou para este funcionário
+                    permite_venda = bool(user['pode_vender_ferias'])
+                    if permite_venda:
+                        abono = st.checkbox("Desejo vender 10 dias (Abono Pecuniário)")
+                    else:
+                        abono = False
+                        st.info("Opção de venda de férias não disponível para seu perfil.")
+
+                    if st.form_submit_button("Enviar Solicitação Oficial"):
                         total_dias = (d_fim - d_ini).days + 1
-                        
                         if total_dias < 5:
-                            st.error("Erro: Pela CLT, o período mínimo de férias deve ser de 5 dias.")
+                            st.error("Erro: O período mínimo deve ser de 5 dias.")
                         else:
-                            # SQL para gravar a solicitação
-                            sql_solicitacao = f"""
+                            # Grava IP e Horário no Protocolo
+                            sql_sol = f"""
                                 INSERT INTO rh_movimentacao_ferias 
-                                (id_funcionario, data_inicio, data_fim, dias_corridos, abono_pecuniario, status)
-                                VALUES ({user['id_funcionario']}, '{d_ini}', '{d_fim}', {total_dias}, {abono}, 'Pendente')
+                                (id_funcionario, data_inicio, data_fim, dias_corridos, abono_pecuniario, ip_registro, status)
+                                VALUES ({user['id_funcionario']}, '{d_ini}', '{d_fim}', {total_dias}, {abono}, '{current_ip}', 'Pendente')
                             """
-                            query_banco(sql_solicitacao)
-                            st.success("✅ Solicitação enviada com sucesso! Seu líder receberá uma notificação.")
+                            query_banco(sql_sol)
+                            st.success(f"✅ Solicitação enviada! Registrada sob o IP {current_ip} em {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
-# --- 5. ÁREA DO LÍDER (PROTEGIDA POR SENHA) ---
+# --- 5. ÁREA RESTRITA (LÍDER) ---
 with tab_lider:
-    # DICA: Use st.secrets para a senha em produção
-    senha_acesso = st.text_input("Digite a senha de Gestão:", type="password")
+    senha_lider = st.text_input("Senha de Gestão:", type="password")
     
-    if senha_acesso == "123": # <--- ALTERE SUA SENHA AQUI
+    if senha_lider == "123": # <--- Altere sua senha aqui
         st.divider()
-        menu = st.radio("Escolha uma opção:", ["Aprovações Pendentes", "Gerenciar Equipe"], horizontal=True)
+        menu_lider = st.radio("Selecione a tarefa:", ["Aprovações", "Gestão de Equipe", "Vínculo de IPs"], horizontal=True)
 
-        # 5.1 APROVAÇÕES
-        if menu == "Aprovações Pendentes":
-            pendentes = query_banco("""
+        if menu_lider == "Aprovações":
+            pedidos = query_banco("""
                 SELECT f.nome, m.* FROM rh_movimentacao_ferias m 
-                JOIN rh_funcionarios f ON m.id_funcionario = f.id_funcionario
+                JOIN rh_funcionarios f ON m.id_funcionario = f.id_funcionario 
                 WHERE m.status = 'Pendente'
             """)
-            
-            if not pendentes:
-                st.info("Não há solicitações aguardando análise no momento.")
+            if not pedidos:
+                st.info("Sem pendências.")
             else:
-                for p in pendentes:
-                    with st.expander(f"Pedido de {p['nome']} - {p['dias_corridos']} dias"):
-                        st.write(f"**Período:** {p['data_inicio'].strftime('%d/%m/%Y')} até {p['data_fim'].strftime('%d/%m/%Y')}")
-                        st.write(f"**Abono Pecuniário:** {'Sim' if p['abono_pecuniario'] else 'Não'}")
+                for p in pedidos:
+                    with st.expander(f"Solicitação: {p['nome']} (IP de Origem: {p['ip_registro']})"):
+                        st.write(f"**Período:** {p['data_inicio'].strftime('%d/%m/%Y')} a {p['data_fim'].strftime('%d/%m/%Y')} ({p['dias_corridos']} dias)")
+                        st.write(f"**Abono:** {'Sim' if p['abono_pecuniario'] else 'Não'}")
                         
-                        col_a, col_r = st.columns(2)
-                        if col_a.button("✅ Aprovar e Notificar RH", key=f"aprov_{p['id_movimento']}"):
+                        ca, cr = st.columns(2)
+                        if ca.button("✅ Aprovar", key=f"aprova_{p['id_movimento']}"):
                             query_banco(f"UPDATE rh_movimentacao_ferias SET status='Aprovado' WHERE id_movimento={p['id_movimento']}")
-                            st.success(f"Férias de {p['nome']} aprovadas! O RH e os setores ligados serão avisados.")
                             st.rerun()
-                            
-                        if col_r.button("❌ Recusar Pedido", key=f"rec_{p['id_movimento']}"):
+                        if cr.button("❌ Recusar", key=f"recusa_{p['id_movimento']}"):
                             query_banco(f"UPDATE rh_movimentacao_ferias SET status='Recusado' WHERE id_movimento={p['id_movimento']}")
-                            st.warning("Solicitação recusada.")
                             st.rerun()
 
-        # 5.2 GERENCIAR EQUIPE
-        elif menu == "Gerenciar Equipe":
-            st.subheader("Novas Admissões e Controle de Acesso")
-            
-            # Formulário de Cadastro
-            with st.expander("➕ Cadastrar Novo Funcionário"):
-                with st.form("cad_novo_func", clear_on_submit=True):
-                    n_nome = st.text_input("Nome Completo")
-                    n_adm = st.date_input("Data de Admissão")
-                    n_setor = st.selectbox("Setor", ["Contabilidade", "RH", "Fiscal"])
-                    
-                    if st.form_submit_button("Salvar no Banco"):
-                        if n_nome:
-                            # Limpeza de aspas simples para evitar erro de SQL
-                            n_nome_safe = n_nome.replace("'", "''")
-                            sql_cad = f"""
-                                INSERT INTO rh_funcionarios (nome, data_admissao, setor, is_ativo) 
-                                VALUES ('{n_nome_safe}', '{n_adm}', '{n_setor}', True)
-                            """
-                            query_banco(sql_cad)
-                            st.success(f"Funcionário {n_nome} cadastrado com sucesso!")
-                            st.rerun()
-                        else:
-                            st.error("O campo Nome é obrigatório.")
+        elif menu_lider == "Gestão de Equipe":
+            # CADASTRO E CONTROLE DE ABONO
+            with st.expander("➕ Admitir Novo Funcionário"):
+                with st.form("cad_novo"):
+                    n_nome = st.text_input("Nome").replace("'", "''")
+                    n_adm = st.date_input("Admissão")
+                    if st.form_submit_button("Cadastrar"):
+                        query_banco(f"INSERT INTO rh_funcionarios (nome, data_admissao, is_ativo) VALUES ('{n_nome}', '{n_adm}', True)")
+                        st.rerun()
 
-            st.divider()
-            st.subheader("Lista de Colaboradores e Ativação de E-mail")
-            
-            # Lista de funcionários para ativação de email ou desligamento
+            st.write("### Lista de Colaboradores")
             for f in funcionarios_db:
                 with st.container():
-                    c1, c2, c3 = st.columns([2, 2, 1])
+                    c1, c2, c3 = st.columns([2, 1, 1])
                     c1.write(f"**{f['nome']}**")
                     
-                    # Logica para cadastrar e-mail (Liberação de acesso)
-                    if not f['email_corporativo']:
-                        novo_mail = c2.text_input("Cadastrar E-mail Corporativo", key=f"in_mail_{f['id_funcionario']}")
-                        if c2.button("Ativar Acesso", key=f"btn_mail_{f['id_funcionario']}"):
-                            if "@" in novo_mail:
-                                query_banco(f"UPDATE rh_funcionarios SET email_corporativo='{novo_mail}' WHERE id_funcionario={f['id_funcionario']}")
-                                st.rerun()
-                            else:
-                                st.error("E-mail inválido.")
-                    else:
-                        c2.write(f"📧 {f['email_corporativo']}")
-                    
-                    # Botão de Desligamento (Inativa o funcionário)
-                    if c3.button("Desligar", key=f"del_{f['id_funcionario']}", help="Inativa o funcionário no sistema"):
-                        query_banco(f"UPDATE rh_funcionarios SET is_ativo=False WHERE id_funcionario={f['id_funcionario']}")
+                    # Toggle para o líder permitir abono
+                    valor_abono = bool(f['pode_vender_ferias'])
+                    novo_venda = c2.toggle("Permitir Abono", value=valor_abono, key=f"tgl_{f['id_funcionario']}")
+                    if novo_venda != valor_abono:
+                        query_banco(f"UPDATE rh_funcionarios SET pode_vender_ferias={novo_venda} WHERE id_funcionario={f['id_funcionario']}")
                         st.rerun()
-                    st.divider()
 
-    elif senha_acesso != "":
-        st.error("Senha de acesso incorreta. Tente novamente.")
+                    # CADEADO DE EXCLUSÃO
+                    if c3.button("🗑️ Excluir", key=f"del_{f['id_funcionario']}"):
+                        st.error(f"ATENÇÃO: Para excluir permanentemente {f['nome']}, digite CONFIRMO abaixo:")
+                        confirmacao = st.text_input("Digite aqui:", key=f"confirm_{f['id_funcionario']}")
+                        if confirmacao == "CONFIRMO":
+                            query_banco(f"DELETE FROM rh_funcionarios WHERE id_funcionario={f['id_funcionario']}")
+                            st.success("Excluído!")
+                            st.rerun()
+                st.divider()
+
+        elif menu_lider == "Vínculo de IPs":
+            st.subheader("Configuração de Segurança por Máquina")
+            st.info(f"O IP da sua máquina atual é: **{current_ip}**")
+            
+            for f in funcionarios_db:
+                col_n, col_i, col_b = st.columns([2, 2, 1])
+                col_n.write(f['nome'])
+                ip_input = col_i.text_input("IP da Máquina Fixa", value=f['ip_maquina'] or "", key=f"ipinput_{f['id_funcionario']}")
+                if col_b.button("Salvar IP", key=f"btnsaveip_{f['id_funcionario']}"):
+                    query_banco(f"UPDATE rh_funcionarios SET ip_maquina='{ip_input}' WHERE id_funcionario={f['id_funcionario']}")
+                    st.success(f"IP vinculado a {f['nome']}!")
+    
+    elif senha_lider != "":
+        st.error("Senha incorreta.")
