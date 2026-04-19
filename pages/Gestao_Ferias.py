@@ -14,7 +14,6 @@ except ImportError:
 
 def get_remote_ip():
     try:
-        # Captura o IP (funciona no Streamlit Cloud e Local)
         return st.context.headers.get("X-Forwarded-For", "127.0.0.1").split(',')[0]
     except:
         return "127.0.0.1"
@@ -44,149 +43,109 @@ with tab_func:
         if selecionado:
             user = next(item for item in funcionarios_db if item["nome"] == selecionado)
             
-            # LÓGICA DE AUTO-VÍNCULO NO PRIMEIRO ACESSO
             if not user['ip_maquina'] or user['ip_maquina'] == "":
                 st.warning("⚠️ ATENÇÃO: PRIMEIRO ACESSO DETECTADO")
-                st.markdown(f"""
-                Para sua segurança e privacidade, o sistema vinculará seu perfil permanentemente a esta máquina (IP: **{current_ip}**).
-                
-                **Antes de confirmar, certifique-se:** Você selecionou o nome **{selecionado}** corretamente?
-                """)
-                if st.button("Sim, confirmar minha identidade e vincular esta máquina"):
+                st.markdown(f"O sistema vinculará seu perfil permanentemente a esta máquina (IP: **{current_ip}**).")
+                if st.button("Sim, confirmar identidade e vincular máquina"):
                     query_banco(f"UPDATE rh_funcionarios SET ip_maquina='{current_ip}' WHERE id_funcionario={user['id_funcionario']}")
-                    st.success("Máquina vinculada com sucesso! Atualizando...")
                     st.rerun()
             
-            # VALIDAÇÃO DE IP JÁ VINCULADO
             elif user['ip_maquina'] != current_ip:
-                st.error(f"🚫 ACESSO NEGADO: Esta máquina ({current_ip}) não é sua estação autorizada.")
-                st.info(f"O colaborador {selecionado} está vinculado a outro IP. Se você mudou de lugar, peça ao seu líder para resetar seu acesso.")
+                st.error(f"🚫 ACESSO NEGADO: Máquina ({current_ip}) não autorizada.")
             
-            # ACESSO LIBERADO
             else:
-                st.success(f"Identidade validada via Protocolo de IP ({current_ip})")
+                st.success(f"Identidade validada (IP: {current_ip})")
                 with st.form("form_solic_ferias", clear_on_submit=True):
                     col1, col2 = st.columns(2)
                     d_ini = col1.date_input("Data de Início")
                     d_fim = col2.date_input("Data de Retorno")
+                    abono = st.checkbox("Desejo vender 10 dias") if bool(user['pode_vender_ferias']) else False
                     
-                    # O Abono só aparece se o líder habilitou para este usuário no banco
-                    if bool(user['pode_vender_ferias']):
-                        abono = st.checkbox("Desejo vender 10 dias (Abono Pecuniário)")
-                    else:
-                        abono = False
-                        st.info("Opção de venda de férias não disponível para seu perfil.")
-                        
-                    if st.form_submit_button("Enviar Solicitação Oficial"):
+                    if st.form_submit_button("Enviar Solicitação"):
                         total_dias = (d_fim - d_ini).days + 1
                         if total_dias < 5:
-                            st.error("O período mínimo de férias deve ser de 5 dias.")
+                            st.error("Mínimo de 5 dias.")
                         else:
-                            # Grava a solicitação com IP e Horário para o Dossiê
-                            query_banco(f"""
-                                INSERT INTO rh_movimentacao_ferias 
-                                (id_funcionario, data_inicio, data_fim, dias_corridos, abono_pecuniario, ip_registro, status) 
-                                VALUES ({user['id_funcionario']}, '{d_ini}', '{d_fim}', {total_dias}, {abono}, '{current_ip}', 'Pendente')
-                            """)
-                            st.success("✅ Solicitação enviada! Protocolo registrado com sucesso.")
+                            query_banco(f"INSERT INTO rh_movimentacao_ferias (id_funcionario, data_inicio, data_fim, dias_corridos, abono_pecuniario, ip_registro, status) VALUES ({user['id_funcionario']}, '{d_ini}', '{d_fim}', {total_dias}, {abono}, '{current_ip}', 'Pendente')")
+                            st.success("✅ Enviado!")
 
 # --- 4. ÁREA RESTRITA (LÍDER) ---
 with tab_lider:
     senha_lider = st.text_input("Senha de Gestão:", type="password")
-    if senha_lider == "123": # <--- Altere sua senha aqui
+    if senha_lider == "123":
         st.divider()
-        menu = st.sidebar.radio("Navegação:", ["Aprovações Pendentes", "Dossiê e Histórico", "Gerenciar Equipe"])
+        menu = st.sidebar.radio("Navegação:", ["Aprovações Pendentes", "Dossiê por Setor", "Gerenciar Equipe"])
 
-        # 4.1 PAINEL DE APROVAÇÕES
+        # 4.1 APROVAÇÕES COM JUSTIFICATIVA OBRIGATÓRIA
         if menu == "Aprovações Pendentes":
             st.subheader("📩 Solicitações para Análise")
-            pendentes = query_banco("""
-                SELECT f.nome, m.* FROM rh_movimentacao_ferias m 
-                JOIN rh_funcionarios f ON m.id_funcionario = f.id_funcionario 
-                WHERE m.status = 'Pendente'
-            """)
+            pendentes = query_banco("SELECT f.nome, m.* FROM rh_movimentacao_ferias m JOIN rh_funcionarios f ON m.id_funcionario = f.id_funcionario WHERE m.status = 'Pendente'")
+            
             if not pendentes:
                 st.info("Nenhuma solicitação pendente.")
             else:
                 for p in pendentes:
-                    with st.expander(f"Pedido: {p['nome']} (IP de Origem: {p['ip_registro']})"):
-                        st.write(f"**Período:** {p['data_inicio'].strftime('%d/%m/%Y')} a {p['data_fim'].strftime('%d/%m/%Y')} ({p['dias_corridos']} dias)")
-                        st.write(f"**Venda de 10 dias:** {'Sim' if p['abono_pecuniario'] else 'Não'}")
+                    with st.expander(f"Pedido: {p['nome']} ({p['dias_corridos']} dias)"):
+                        st.write(f"**Período:** {p['data_inicio'].strftime('%d/%m/%Y')} a {p['data_fim'].strftime('%d/%m/%Y')}")
+                        
                         col_a, col_r = st.columns(2)
                         if col_a.button("✅ Aprovar", key=f"ap_{p['id_movimento']}"):
                             query_banco(f"UPDATE rh_movimentacao_ferias SET status='Aprovado' WHERE id_movimento={p['id_movimento']}")
                             st.rerun()
-                        if col_r.button("❌ Recusar", key=f"re_{p['id_movimento']}"):
-                            query_banco(f"UPDATE rh_movimentacao_ferias SET status='Recusado' WHERE id_movimento={p['id_movimento']}")
-                            st.rerun()
+                        
+                        # Interface de Recusa
+                        st.write("---")
+                        motivo = st.text_input("Justificativa para Recusa (Obrigatório):", key=f"mot_{p['id_movimento']}")
+                        if col_r.button("❌ Recusar Pedido", key=f"re_{p['id_movimento']}"):
+                            if motivo:
+                                query_banco(f"UPDATE rh_movimentacao_ferias SET status='Recusado', motivo_recusa='{motivo}' WHERE id_movimento={p['id_movimento']}")
+                                st.rerun()
+                            else:
+                                st.warning("Para recusar, você deve preencher a justificativa acima.")
 
-        # 4.2 DOSSIÊ E INTELIGÊNCIA (CONTADOR E HISTÓRICO)
-        elif menu == "Dossiê e Histórico":
-            st.subheader("📊 Inteligência de Prazos e Histórico")
-            for f in funcionarios_db:
-                # Cálculo de Vencimento (Projeção de 23 meses a partir da admissão)
-                data_limite = f['data_admissao'] + datetime.timedelta(days=700) 
-                hoje = datetime.date.today()
-                dias_restantes = (data_limite - hoje).days
-                meses_restantes = dias_restantes // 30
-                
-                with st.expander(f"👤 {f['nome']} (Admissão: {f['data_admissao'].strftime('%d/%m/%Y')})"):
-                    c1, c2 = st.columns([1, 2])
-                    
-                    # Alerta Visual do Contador
-                    if dias_restantes < 90:
-                        c1.error(f"🚨 CRÍTICO: {meses_restantes} meses para multa!")
-                    elif dias_restantes < 180:
-                        c1.warning(f"⚠️ ATENÇÃO: {meses_restantes} meses restantes.")
-                    else:
-                        c1.success(f"✅ Seguro: {meses_restantes} meses para o limite.")
-                    
-                    # Tabela de Histórico Real
-                    hist = query_banco(f"SELECT data_inicio, data_fim, dias_corridos, status FROM rh_movimentacao_ferias WHERE id_funcionario={f['id_funcionario']} ORDER BY data_inicio DESC")
-                    if hist:
-                        c2.dataframe(pd.DataFrame(hist), use_container_width=True)
-                    else:
-                        c2.info("Nenhum histórico de férias registrado.")
-
-        # 4.3 GERENCIAR EQUIPE E SEGURANÇA
-        elif menu == "Gerenciar Equipe":
-            st.subheader("⚙️ Configurações e Manutenção")
+        # 4.2 DOSSIÊ DIVIDIDO POR SETORES
+        elif menu == "Dossiê por Setor":
+            setor_sel = st.selectbox("Filtrar Dossiê por Setor:", ["Todos", "Contabilidade", "RH", "Fiscal"])
             
+            # Filtra a lista de funcionários para o Dossiê
+            funcs_filtrados = [f for f in funcionarios_db if f['setor'] == setor_sel] if setor_sel != "Todos" else funcionarios_db
+            
+            for f in funcs_filtrados:
+                data_limite = f['data_admissao'] + datetime.timedelta(days=700) 
+                meses_restantes = (data_limite - datetime.date.today()).days // 30
+                
+                with st.expander(f"[{f['setor']}] {f['nome']} - Admissão: {f['data_admissao'].strftime('%d/%m/%Y')}"):
+                    c1, c2 = st.columns([1, 2])
+                    if meses_restantes < 3: c1.error(f"🚨 Crítico: {meses_restantes} meses")
+                    else: c1.success(f"✅ {meses_restantes} meses restantes")
+                    
+                    hist = query_banco(f"SELECT data_inicio, data_fim, status, motivo_recusa FROM rh_movimentacao_ferias WHERE id_funcionario={f['id_funcionario']} ORDER BY data_inicio DESC")
+                    if hist: c2.dataframe(pd.DataFrame(hist))
+                    else: c2.info("Sem histórico.")
+
+        # 4.3 GERENCIAR EQUIPE (CADASTRO COM SETOR)
+        elif menu == "Gerenciar Equipe":
             with st.expander("➕ Admitir Novo Funcionário"):
                 with st.form("cad_novo"):
                     n_nome = st.text_input("Nome").replace("'", "''")
                     n_adm = st.date_input("Admissão")
+                    n_setor = st.selectbox("Setor", ["Contabilidade", "RH", "Fiscal"])
                     if st.form_submit_button("Cadastrar"):
-                        query_banco(f"INSERT INTO rh_funcionarios (nome, data_admissao, is_ativo) VALUES ('{n_nome}', '{n_adm}', True)")
+                        query_banco(f"INSERT INTO rh_funcionarios (nome, data_admissao, setor, is_ativo) VALUES ('{n_nome}', '{n_adm}', '{n_setor}', True)")
                         st.rerun()
 
-            st.divider()
             for f in funcionarios_db:
                 with st.container():
                     col_n, col_v, col_ip, col_del = st.columns([2, 1, 1, 1])
-                    col_n.write(f"**{f['nome']}**")
-                    
-                    # Controle Seletivo de Abono
-                    venda_ativada = bool(f['pode_vender_ferias'])
-                    if col_v.toggle("Abono", value=venda_ativada, key=f"v_{f['id_funcionario']}"):
-                        if not venda_ativada:
-                            query_banco(f"UPDATE rh_funcionarios SET pode_vender_ferias = 1 WHERE id_funcionario={f['id_funcionario']}")
-                            st.rerun()
-                    else:
-                        if venda_ativada:
-                            query_banco(f"UPDATE rh_funcionarios SET pode_vender_ferias = 0 WHERE id_funcionario={f['id_funcionario']}")
-                            st.rerun()
-                    
-                    # Reset IP (Caso mude de máquina ou cabo)
+                    col_n.write(f"**{f['nome']}** ({f['setor']})")
+                    if col_v.toggle("Abono", value=bool(f['pode_vender_ferias']), key=f"v_{f['id_funcionario']}") != bool(f['pode_vender_ferias']):
+                        query_banco(f"UPDATE rh_funcionarios SET pode_vender_ferias = NOT pode_vender_ferias WHERE id_funcionario={f['id_funcionario']}")
+                        st.rerun()
                     if col_ip.button("Resetar IP", key=f"ip_{f['id_funcionario']}"):
                         query_banco(f"UPDATE rh_funcionarios SET ip_maquina=NULL WHERE id_funcionario={f['id_funcionario']}")
-                        st.success("IP Resetado!")
-                    
-                    # Excluir com Cadeado de Segurança
+                        st.rerun()
                     if col_del.button("🗑️", key=f"del_{f['id_funcionario']}"):
-                        st.error("Para excluir permanentemente, digite CONFIRMO:")
-                        confirm = st.text_input("Confirmação", key=f"conf_{f['id_funcionario']}")
-                        if confirm == "CONFIRMO":
+                        if st.text_input("Confirme com CONFIRMO", key=f"c_{f['id_funcionario']}") == "CONFIRMO":
                             query_banco(f"DELETE FROM rh_funcionarios WHERE id_funcionario={f['id_funcionario']}")
                             st.rerun()
                 st.divider()
