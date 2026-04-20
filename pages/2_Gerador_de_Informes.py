@@ -15,7 +15,7 @@ st.markdown("---")
 # --- FUNÇÕES DE FORMATAÇÃO E TRATAMENTO ---
 
 def formatar_moeda(valor):
-    """Garante o formato 6.500,00 ou 0,00 sem o R$ para evitar quebras de layout"""
+    """Garante o formato 6.500,00 ou 0,00 sem o R$"""
     try:
         if pd.isna(valor) or valor == "" or valor == 0:
             return "0,00"
@@ -24,19 +24,38 @@ def formatar_moeda(valor):
         return "0,00"
 
 def formatar_documento(doc):
-    """Aplica máscara de CPF ou CNPJ garantindo todos os dígitos (inclusive os últimos)"""
-    # Remove qualquer carater que não seja número para evitar erros de fatiamento
+    """Aplica máscara de CPF/CNPJ garantindo zeros à esquerda"""
     doc = re.sub(r'\D', '', str(doc)).strip()
-    
-    if len(doc) == 11: # CPF
+    if not doc:
+        return ""
+
+    if len(doc) <= 11:
+        doc = doc.zfill(11)
         return f"{doc[:3]}.{doc[3:6]}.{doc[6:9]}-{doc[9:]}"
-    elif len(doc) == 14: # CNPJ
-        # O fatiamento [12:] garante que os dois últimos dígitos apareçam após o hífen
+    elif len(doc) <= 14:
+        doc = doc.zfill(14)
         return f"{doc[:2]}.{doc[2:5]}.{doc[5:8]}/{doc[8:12]}-{doc[12:]}"
     return doc
 
+def formatar_data_br(data_valor):
+    """
+    Trata a data individualmente para cada linha:
+    Converte para o padrão dd/mm/aaaa, aceitando objetos de data ou strings.
+    """
+    try:
+        if pd.isna(data_valor) or str(data_valor).strip() == "":
+            return None # Retorna None para indicar que deve usar o padrão do código
+        
+        # Converte para datetime (trata tanto o formato do Excel quanto strings isoladas)
+        dt = pd.to_datetime(data_valor)
+        return dt.strftime('%d/%m/%Y')
+    except:
+        # Se for uma string que já está no formato manual, limpa possíveis horas
+        s_data = str(data_valor).strip()
+        return s_data.split(' ')[0] if ' ' in s_data else s_data
+
 def localizar_template():
-    """Busca automática de qualquer ficheiro .docx na raiz do repositório no GitHub"""
+    """Busca automática de qualquer arquivo .docx na raiz do repositório no GitHub"""
     current_dir = os.path.dirname(os.path.abspath(__file__))
     raiz = os.path.normpath(os.path.join(current_dir, ".."))
     try:
@@ -53,22 +72,24 @@ def localizar_template():
 template_path = localizar_template()
 
 if template_path:
-    st.success(f"✅ Template detetado: **{os.path.basename(template_path)}**")
+    st.success(f"✅ Template detectado: **{os.path.basename(template_path)}**")
 else:
-    st.error("❌ Erro: Nenhum ficheiro .docx encontrado na raiz do projeto no GitHub.")
+    st.error("❌ Erro: Nenhum arquivo .docx encontrado na raiz do projeto no GitHub.")
     st.stop()
 
 # --- INTERFACE E PROCESSAMENTO ---
 
-uploaded_file = st.file_uploader("Carrega a tua planilha Excel", type=["xlsx"])
+uploaded_file = st.file_uploader("Carregue a planilha Excel", type=["xlsx"])
 
 if uploaded_file:
     try:
-        df = pd.read_excel(uploaded_file)
-        st.write(f"Registos encontrados: {len(df)}")
+        # Lendo o Excel preservando zeros à esquerda e garantindo que campos de data não sejam corrompidos
+        df = pd.read_excel(uploaded_file, dtype={'cnpj_fonte': str, 'cpf_beneficiario': str})
+        
+        st.write(f"Registros encontrados: {len(df)}")
         st.dataframe(df.head())
 
-        if st.button("🚀 Gerar Informes (ZIP com Nomes)"):
+        if st.button("🚀 Gerar Informes (ZIP com Datas Individuais)"):
             zip_buffer = io.BytesIO()
             
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zip_file:
@@ -87,8 +108,7 @@ if uploaded_file:
                         else:
                             context[k] = v
 
-                    # 2. Aplicação das Formatações (Moeda e Documentos)
-                    # Certifica-te que os nomes das colunas abaixo batem com o teu Excel
+                    # 2. Aplicação das Formatações de Moeda e Documentos
                     context['valor_aluguel'] = formatar_moeda(context.get('valor_aluguel'))
                     context['ir_retido'] = formatar_moeda(context.get('ir_retido'))
                     
@@ -97,20 +117,29 @@ if uploaded_file:
                     if 'cpf_beneficiario' in context:
                         context['cpf_beneficiario'] = formatar_documento(context['cpf_beneficiario'])
                     
-                    context['data_emissao'] = "31/12/2025"
+                    # --- LÓGICA DE DATA POR LINHA (REVISADA) ---
+                    # Pegamos o valor bruto da coluna 'data_emissao' desta linha específica
+                    valor_data_linha = row.get('data_emissao')
+                    data_formatada = formatar_data_br(valor_data_linha)
+                    
+                    if data_formatada:
+                        # Se a linha tem data, usa a data da linha formatada
+                        context['data_emissao'] = data_formatada
+                    else:
+                        # Se a linha está vazia, usa a data padrão do sistema
+                        context['data_emissao'] = "27/02/2026"
 
-                    # 3. Renderização do Word
+                    # 3. Renderização e Salvamento
                     doc_tpl.render(context)
                     
-                    # 4. Gravação em Memória
                     doc_io = io.BytesIO()
                     doc_tpl.save(doc_io)
                     
-                    # 5. Nomeação do Ficheiro com o Nome do Beneficiário
+                    # Nomeação do Arquivo com o Nome do Beneficiário
                     nome_pessoa = str(row.get('nome_beneficiario', f"Informe_{index}")).strip().replace(" ", "_")
-                    nome_ficheiro_individual = f"Informe_{nome_pessoa}.docx"
+                    nome_arquivo_individual = f"Informe_{nome_pessoa}.docx"
                     
-                    zip_file.writestr(nome_ficheiro_individual, doc_io.getvalue())
+                    zip_file.writestr(nome_arquivo_individual, doc_io.getvalue())
                     
                     barra.progress((index + 1) / len(df))
 
@@ -118,7 +147,7 @@ if uploaded_file:
             st.download_button(
                 label="📥 Baixar ZIP com Informes Nomeados",
                 data=zip_buffer.getvalue(),
-                file_name="Informes_Rendimentos_2025.zip",
+                file_name="Informes_Rendimentos_Custom.zip",
                 mime="application/zip"
             )
                 
