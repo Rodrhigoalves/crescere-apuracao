@@ -152,3 +152,12 @@ with tab_lider:
                 if c2.button("Reset IP", key=f"rs_{f['id_funcionario']}"):
                     query_banco(f"UPDATE rh_funcionarios SET ip_maquina=NULL WHERE id_funcionario={f['id_funcionario']}")
                     st.rerun()
+                    st.sidebar.divider()
+st.sidebar.subheader("🧪 Teste de Comunicação")
+email_teste = st.sidebar.text_input("E-mail para teste:")
+if st.sidebar.button("Enviar E-mail de Teste"):
+    sucesso = enviar_email(email_teste, "Teste de Conexão", "O sistema de e-mail está operando!")
+    if sucesso:
+        st.sidebar.success("E-mail enviado! Verifique a caixa de entrada (e o Spam).")
+    else:
+        st.sidebar.error("Falha no envio. Verifique o console/logs do Streamlit.")
