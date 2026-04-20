@@ -1,16 +1,19 @@
 import smtplib
+import streamlit as st
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 def enviar_email(destinatario, assunto, corpo):
-    SMTP_SERVER = "smtp.gmail.com"
-    SMTP_PORT = 587
-    SMTP_USER = "seu-email@gmail.com"
-    SMTP_PASSWORD = "sua-senha-de-app" # Certifique-se de que são 16 letras sem espaços aqui
-
     if not destinatario or "@" not in str(destinatario):
         return False
+
     try:
+        # Puxando as credenciais seguras configuradas na nuvem
+        SMTP_SERVER = "smtp.gmail.com"
+        SMTP_PORT = 587
+        SMTP_USER = st.secrets["email"]["user"]
+        SMTP_PASSWORD = st.secrets["email"]["password"]
+
         msg = MIMEMultipart()
         msg['From'] = SMTP_USER
         msg['To'] = destinatario
@@ -24,5 +27,5 @@ def enviar_email(destinatario, assunto, corpo):
         server.quit()
         return True
     except Exception as e:
-        print(f"Erro: {e}")
+        print(f"Erro no envio de e-mail: {e}")
         return False
