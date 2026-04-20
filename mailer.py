@@ -8,7 +8,6 @@ def enviar_email(destinatario, assunto, corpo):
         return False
 
     try:
-        # Puxando as credenciais seguras configuradas na nuvem
         SMTP_SERVER = "smtp.gmail.com"
         SMTP_PORT = 587
         SMTP_USER = st.secrets["email"]["user"]
