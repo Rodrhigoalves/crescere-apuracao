@@ -127,11 +127,25 @@ with tab_lider:
                     n_n = st.text_input("Nome")
                     e_n = st.text_input("E-mail")
                     a_n = st.date_input("Admissão")
+                    
                     if st.form_submit_button("Finalizar"):
-                        sql = f"INSERT INTO rh_funcionarios (nome, email_corporativo, data_admissao, setor, is_ativo) VALUES ('{n_n.replace("'", "''")}', '{e_n}', '{a_n}', '{setor_trabalho}', 1)"
-                        query_banco(sql)
-                        st.success("Cadastrado!")
-                        st.rerun()
+                        # 1. Tratamento seguro separado (evita o erro de aspas do Python/MySQL)
+                        nome_seguro = n_n.replace("'", "''")
+                        data_segura = a_n.strftime('%Y-%m-%d')
+                        
+                        # 2. Montagem da Query limpa
+                        sql = f"INSERT INTO rh_funcionarios (nome, email_corporativo, data_admissao, setor, is_ativo) VALUES ('{nome_seguro}', '{e_n}', '{data_segura}', '{setor_trabalho}', 1)"
+                        
+                        # 3. Tratamento de erro explícito
+                        try:
+                            query_banco(sql)
+                            st.success("Cadastrado com sucesso!")
+                            st.rerun()
+                        except Exception as erro_real:
+                            st.error(f"ERRO EXATO DO BANCO: {erro_real}")
+            
+            # Listagem da Equipe
+            st.write("### Equipe Atual")
             for f in funcs_setor:
                 c1, c2 = st.columns([4, 1])
                 c1.write(f"**{f['nome']}** - {f['email_corporativo']}")
