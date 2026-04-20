@@ -152,37 +152,4 @@ with tab_lider:
                 if c2.button("Reset IP", key=f"rs_{f['id_funcionario']}"):
                     query_banco(f"UPDATE rh_funcionarios SET ip_maquina=NULL WHERE id_funcionario={f['id_funcionario']}")
                     st.rerun()
-                    st.sidebar.divider()
-st.sidebar.subheader("🧪 Diagnóstico de E-mail")
-email_teste = st.sidebar.text_input("E-mail para teste:")
-
-if st.sidebar.button("Forçar Envio e Ver Erro"):
-    import smtplib
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
-    
-    try:
-        # Puxando as credenciais do seu secrets
-        user = st.secrets["email"]["user"]
-        pwd = st.secrets["email"]["password"]
-        
-        # Tentativa de conexão manual passo a passo
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(user, pwd)
-        
-        # Se passar do login, tenta enviar
-        msg = MIMEMultipart()
-        msg['From'] = user
-        msg['To'] = email_teste
-        msg['Subject'] = "Teste de Diagnóstico"
-        msg.attach(MIMEText("Se você recebeu isso, a porta foi liberada!", 'plain'))
-        
-        server.send_message(msg)
-        server.quit()
-        st.sidebar.success("✅ SUCESSO! O e-mail passou.")
-        
-    except Exception as erro_smtp:
-        # Aqui está o pulo do gato: vai mostrar o código do erro do Google na sua tela
-        st.sidebar.error("❌ O GOOGLE REJEITOU A CONEXÃO:")
-        st.sidebar.code(erro_smtp)
+                    
