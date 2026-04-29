@@ -219,7 +219,6 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
 # DEFESAS CONTRA EXCEL BANCÁRIO BLINDADAS
 # =============================================================================
 def converter_data_excel(data_raw):
-    """Motor blindado de conversão de data, limpa horas e serial de Excel"""
     data_raw = str(data_raw).strip()
     if data_raw.upper() == 'NAN' or data_raw == '': 
         return None
@@ -248,13 +247,8 @@ def converter_data_excel(data_raw):
     return None
 
 def ler_planilha_robusto(file_bytes, nome_arquivo):
-    """
-    Motor definitivo de leitura. Tenta de todas as formas conhecidas (Excel, HTML e CSV)
-    Garante que colunas únicas não sejam condensadas num bloco só devido a separador errado.
-    """
     nome_min = nome_arquivo.lower()
     
-    # 1. Tentar ler como Excel Real (se for .xls ou .xlsx)
     if nome_min.endswith(('.xlsx', '.xls')):
         try: 
             df = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
@@ -262,7 +256,6 @@ def ler_planilha_robusto(file_bytes, nome_arquivo):
         except Exception:
             pass
 
-    # 2. Tentar ler como HTML disfarçado (Comum em Itaú e Bradesco)
     for enc in ['utf-8', 'latin1']:
         try:
             dfs = pd.read_html(io.BytesIO(file_bytes), encoding=enc, decimal=',', thousands='.')
@@ -272,13 +265,11 @@ def ler_planilha_robusto(file_bytes, nome_arquivo):
         except:
             pass
             
-    # 3. Tentar ler como CSV ou TXT (mesmo que a extensão seja .xls)
-    # Tenta vários separadores até descobrir o correto para o banco
     for sep in [';', ',', '\t']:
         for enc in ['utf-8', 'latin1', 'cp1252']:
             try:
                 df = pd.read_csv(io.BytesIO(file_bytes), sep=sep, header=None, dtype=str, encoding=enc)
-                if not df.empty and df.shape[1] > 1: # Só aceita se quebrou em mais de 1 coluna
+                if not df.empty and df.shape[1] > 1:
                     return df
             except:
                 pass
@@ -798,7 +789,7 @@ def extrair_texto_ofx(file_bytes):
     return pd.DataFrame(dados_extraidos)
 
 # ==========================================
-# O LEITOR CAÇADOR DO BANCO DO BRASIL (CORRIGIDO PARA CAPTURAR SINAL 'INF.')
+# O LEITOR CAÇADOR DO BANCO DO BRASIL (TRITURADOR DE ASTERISCOS ATIVADO)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
@@ -835,7 +826,6 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         col_detalhe = next((c for c in colunas_unicas if any(w in c for w in ['DETALHE', 'COMPLEMENTO', 'DOCTO'])), None)
         col_valor = next((c for c in colunas_unicas if 'VALOR' in c), None)
         
-        # Correção aqui: Verifica se "INF" ou "SINAL" faz parte do nome da coluna (ex: INF.)
         col_inf = next((c for c in colunas_unicas if 'INF' in c or 'SINAL' in c or 'TIPO' in c), None)
 
         if not col_data or not col_valor: return pd.DataFrame()
@@ -858,12 +848,15 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
                 
             if eh_linha_de_saldo(desc_limpa): continue
 
+            # Aqui entra a limpeza agressiva da coluna de VALOR
             valor_bruto = str(row[col_valor]).upper().strip()
             if pd.isna(row[col_valor]) or valor_bruto == 'NAN' or valor_bruto == '': continue
 
+            # Remove os asteriscos e caracteres lixo forçados pelo Excel
+            valor_bruto = valor_bruto.replace('*', '').replace(' ', '').strip()
+
             is_credit = True
 
-            # Confirma o sinal do lançamento (Crédito ou Débito) baseando-se na coluna de Informação "INF."
             if col_inf and pd.notna(row[col_inf]):
                 inf_val = str(row[col_inf]).upper().strip()
                 if 'D' in inf_val or '-' in inf_val:
@@ -898,7 +891,7 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         return pd.DataFrame()
 
 # ==========================================
-# O LEITOR CAÇADOR DO BRADESCO
+# O LEITOR CAÇADOR DO BRADESCO (ARMADILHA DO 'SALDO' REMOVIDA)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bradesco(file_bytes, nome_arquivo):
@@ -934,14 +927,19 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
         
         dados = []
         for idx, row in df_raw.iterrows():
-            check_end = str(row[col_data]) + " " + str(row[col_lanc])
-            if 'TOTAL' in check_end.upper() or 'SALDO' in check_end.upper(): break
+            # A armadilha estava aqui. O robô via "SALDO ANTERIOR" e abortava a leitura.
+            # Agora ele só aborta se for a palavra "TOTAL" sozinha na linha final do Excel.
+            check_end = str(row[col_data]).upper() + " " + str(row[col_lanc]).upper()
+            if 'TOTAL' in check_end and 'SALDO' not in check_end: 
+                break
                 
             data_val = converter_data_excel(str(row[col_data]))
             if not data_val: continue
                 
             desc_raw = str(row[col_lanc]).strip()
             desc_limpa = padronizar_texto(desc_raw)
+            
+            # Pula naturalmente as linhas de "SALDO ANTERIOR" sem encerrar a leitura
             if eh_linha_de_saldo(desc_limpa): continue
                 
             valor_final = 0.0
@@ -1157,7 +1155,6 @@ with tab_conciliacao:
     # =============================================================================
     uploaded_files  = st.file_uploader("1. Arraste seus extratos (PDF, OFX, XLS, XLSX, CSV)", type=["pdf", "ofx", "xls", "xlsx", "csv"], accept_multiple_files=True)
     
-    # CHAVE DE CONTROLE (TOGGLE)
     forcar_universal = st.checkbox("🔄 Forçar Conversão Universal (OFX) em todos os arquivos lidos", value=False, help="Ligue isso caso o arquivo esteja com um layout estranho. Desligue (Padrão) para preservar detalhes como Histórico + CNPJ em arquivos Excel.")
     
     indice_sugerido = 0
@@ -1316,7 +1313,7 @@ with tab_conciliacao:
         st.error("Configure a conta contábil antes de processar.")
 
     # =============================================================================
-    # PASSO 5: RESULTADOS + MESA DE TREINAMENTO (INALTERADO)
+    # PASSO 5: RESULTADOS + MESA DE TREINAMENTO
     # =============================================================================
     if not st.session_state.df_bruto.empty:
         st.divider()
@@ -1344,7 +1341,7 @@ with tab_conciliacao:
         c3.metric("🔴 Saídas Válidas",        formatar_moeda(total_s))
         c4.metric("⚖️ Saldo Final Calculado", formatar_moeda(saldo_final_calculado))
 
-        # Detetive e Auditoria (Simplificado para espaço)
+        # Detetive e Auditoria
         with st.expander("➕ Adicionar / Excluir Lançamentos Manuais (Ajuste de Saldo)", expanded=False):
             st.info("Utilize as opções abaixo se for necessário compensar alguma diferença detectada pelo Detetive.")
             col_ajuste1, col_ajuste2 = st.columns(2)
