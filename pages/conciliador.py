@@ -219,7 +219,17 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
 # DEFESAS CONTRA EXCEL BANCÁRIO
 # =============================================================================
 def converter_data_excel(data_raw):
+    """
+    Motor blindado de conversão de data. Resolve problemas com datas transformadas 
+    em números de série pelo Excel (ex: 45321) e remove resíduos como horas.
+    """
     data_raw = str(data_raw).strip()
+    if data_raw.upper() == 'NAN' or data_raw == '': 
+        return None
+        
+    if " " in data_raw:
+        data_raw = data_raw.split(" ")[0]
+        
     match = re.search(r'^(\d{2})/(\d{2})/(\d{2,4})', data_raw)
     if match:
         ano = match.group(3)
@@ -230,9 +240,21 @@ def converter_data_excel(data_raw):
     if match:
         return f"{match.group(3)}/{match.group(2)}/{match.group(1)}"
         
+    try:
+        num = float(data_raw)
+        if 30000 < num < 60000:
+            dt = pd.to_datetime('1899-12-30') + pd.to_timedelta(num, unit='D')
+            return dt.strftime('%d/%m/%Y')
+    except Exception:
+        pass
+        
     return None
 
 def ler_planilha_robusto(file_bytes, nome_arquivo):
+    """
+    Se o banco mandar um HTML disfarçado de XLS (comum no Bradesco e Itaú), 
+    juntamos todas as tabelas ocultas em uma só para não perder nada.
+    """
     nome_min = nome_arquivo.lower()
     if nome_min.endswith('.csv'):
         try: return pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str, encoding='utf-8')
@@ -243,13 +265,15 @@ def ler_planilha_robusto(file_bytes, nome_arquivo):
         except Exception:
             try:
                 dfs = pd.read_html(io.BytesIO(file_bytes), encoding='utf-8', decimal=',', thousands='.')
-                return dfs[0].astype(str) if dfs else pd.DataFrame()
+                if dfs: return pd.concat(dfs, ignore_index=True).astype(str)
             except:
-                try:
-                    dfs = pd.read_html(io.BytesIO(file_bytes), encoding='latin1', decimal=',', thousands='.')
-                    return dfs[0].astype(str) if dfs else pd.DataFrame()
-                except:
-                    return pd.DataFrame()
+                pass
+            try:
+                dfs = pd.read_html(io.BytesIO(file_bytes), encoding='latin1', decimal=',', thousands='.')
+                if dfs: return pd.concat(dfs, ignore_index=True).astype(str)
+            except:
+                pass
+            return pd.DataFrame()
 
 # =============================================================================
 # 3. INTELIGÊNCIA: AUTO-LEITURA E EXTRAÇÃO
@@ -763,18 +787,22 @@ def extrair_texto_ofx(file_bytes):
         logging.exception("Erro na extração OFX")
     return pd.DataFrame(dados_extraidos)
 
-# O LEITOR CAÇADOR DO BANCO DO BRASIL (COM FUSÃO LIMPA)
+# ==========================================
+# O LEITOR CAÇADOR DO BANCO DO BRASIL (COM FUSÃO LIMPA E CHECAGEM DE COLUNA INF.)
+# ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
     try:
         df_full = ler_planilha_robusto(file_bytes, nome_arquivo)
         if df_full.empty: return pd.DataFrame()
         
-        # Caçador de Cabeçalho: Desce linha por linha ignorando logos/lixo
         header_idx = -1
         for idx, row in df_full.iterrows():
-            row_str = padronizar_texto(" ".join([str(x) for x in row.values if pd.notna(x)]))
-            if 'DATA' in row_str and ('HIST' in row_str or 'LANC' in row_str) and ('VALOR' in row_str or 'CRED' in row_str):
+            row_vals = [str(x).upper() for x in row.values if pd.notna(x) and str(x).strip().upper() != 'NAN']
+            row_str = padronizar_texto(" ".join(row_vals))
+            
+            # Condição ampla para encontrar a linha título
+            if 'DATA' in row_str and ('HIST' in row_str or 'LANC' in row_str or 'DESCR' in row_str) and ('VALOR' in row_str or 'R$' in row_str or 'CRED' in row_str or 'DEB' in row_str):
                 header_idx = idx
                 break
         
@@ -793,8 +821,13 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         
         col_data = next((c for c in colunas_unicas if 'DATA' in c), colunas_unicas[0])
         col_hist = next((c for c in colunas_unicas if 'HIST' in c and 'COD' not in c), None)
+        if not col_hist: col_hist = next((c for c in colunas_unicas if 'LANC' in c or 'DESCR' in c), None)
+        
         col_detalhe = next((c for c in colunas_unicas if any(w in c for w in ['DETALHE', 'COMPLEMENTO', 'DOCTO'])), None)
         col_valor = next((c for c in colunas_unicas if 'VALOR' in c), None)
+        
+        # O pulo do gato: Achar a coluna de Informação (C ou D)
+        col_inf = next((c for c in colunas_unicas if c == 'INF' or c == 'I' or 'SINAL' in c or 'TIPO' in c), None)
 
         if not col_data or not col_valor: return pd.DataFrame()
 
@@ -809,34 +842,41 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
             texto_detalhe = str(row[col_detalhe]).strip() if (col_detalhe and pd.notna(row[col_detalhe])) else ""
             if texto_detalhe.upper() == 'NAN': texto_detalhe = ""
             
-            # ESTRATÉGIA FUSÃO BB (Sem números, sem símbolos chatos)
+            # ESTRATÉGIA FUSÃO (Sem números, sem símbolos chatos)
             desc_raw = f"{texto_historico} {texto_detalhe}".strip()
-            desc_limpa = re.sub(r'\d+', '', desc_raw) # Arranca os números (CNPJ, DOC, valores perdidos)
-            desc_limpa = re.sub(r'[^\w\s]', ' ', desc_limpa) # Arranca os pontos e barras
-            desc_limpa = padronizar_texto(re.sub(r'\s+', ' ', desc_limpa).strip()) # Limpa os buracos de espaço
+            desc_limpa = re.sub(r'\d+', '', desc_raw)
+            desc_limpa = re.sub(r'[^\w\s]', ' ', desc_limpa) 
+            desc_limpa = padronizar_texto(re.sub(r'\s+', ' ', desc_limpa).strip()) 
                 
             if eh_linha_de_saldo(desc_limpa): continue
 
             valor_bruto = str(row[col_valor]).upper().strip()
             if pd.isna(row[col_valor]) or valor_bruto == 'NAN' or valor_bruto == '': continue
 
-            is_credit = False
-            is_debit = False
+            is_credit = True
 
-            if 'C' in valor_bruto or '+' in valor_bruto: is_credit = True
-            elif 'D' in valor_bruto or '-' in valor_bruto: is_debit = True
+            # Lê o sinal a partir da coluna Inf (C/D)
+            if col_inf and pd.notna(row[col_inf]):
+                inf_val = str(row[col_inf]).upper().strip()
+                if 'D' in inf_val or '-' in inf_val:
+                    is_credit = False
+            else:
+                if 'D' in valor_bruto or '-' in valor_bruto: 
+                    is_credit = False
 
             valor_limpo = re.sub(r'[^\d.,]', '', valor_bruto)
             if not valor_limpo: continue
 
-            if ',' in valor_limpo and '.' in valor_limpo: valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
-            elif ',' in valor_limpo: valor_limpo = valor_limpo.replace(',', '.')
+            # Corrige números com mais de um separador (ex: 1.200,50 vira 1200.50)
+            if ',' in valor_limpo and '.' in valor_limpo: 
+                valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
+            elif ',' in valor_limpo: 
+                valor_limpo = valor_limpo.replace(',', '.')
 
             try: valor_num = float(valor_limpo)
             except ValueError: continue
 
             if valor_num == 0: continue
-            if not is_credit and not is_debit: is_credit = True
 
             dados.append({
                 'Data': data_raw,
@@ -850,7 +890,9 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         logging.exception(f"Erro BB Excel: {e}")
         return pd.DataFrame()
 
+# ==========================================
 # O LEITOR CAÇADOR DO BRADESCO (COM COLUNAS DE SINAL SEPARADAS)
+# ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bradesco(file_bytes, nome_arquivo):
     try:
