@@ -300,7 +300,6 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
             if not texto_teste or len(texto_teste.strip()) < 10:
                 if HAS_OCR:
                     st.toast("📷 PDF de imagem detectado. Extrator nativo acionado, aguardando OCR...")
-                # Mantemos o retorno vazio para forçar o tratamento no fallback legado caso seja ilegível.
                 return pd.DataFrame(), ign
                     
             # --- Lógica de Geometria e Tabelas ---
@@ -315,7 +314,6 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
                         linha = [str(item).strip() if item else "" for item in linha]
                         if not linha or len(linha) < 2: continue
                         
-                        # Ajuste: Busca a data olhando o conjunto inicial para flexibilizar a detecção
                         texto_busca = " ".join(linha[:2])
                         match_data = re.search(r'(\d{2}/\d{2}(?:/\d{4})?)', texto_busca)
                         
@@ -338,8 +336,6 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
                             
                             desc = padronizar_texto(linha[1])
                             
-                            # Ajuste: Remoção da trava prematura de saldo!
-                            # O consolidado fará a filtragem global de forma mais confiável no final do fluxo.
                             transacao_atual = {
                                 'Data': data_f,
                                 'Descricao': desc,
@@ -347,7 +343,6 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
                                 'Sinal': sinal
                             }
                         elif transacao_atual and len(linha) > 1 and linha[1]:
-                            # Fusão de Históricos contínuos
                             texto_extra = padronizar_texto(linha[1])
                             if texto_extra:
                                 transacao_atual['Descricao'] += f" {texto_extra}"
@@ -429,22 +424,28 @@ def extrair_por_recintos(file_bytes):
 
 def processar_bloco_sicoob(bloco, ano, dados):
     texto_bloco = " ".join(bloco)
-    match_data = re.search(r'^(\d{2}/\d{2})\b', texto_bloco)
+    
+    # Flexibiliza para encontrar DD/MM ou DD/MM/AAAA
+    match_data = re.search(r'^(\d{2}/\d{2}(?:/\d{4})?)\b', texto_bloco)
     if not match_data: return
-    data_ext = f"{match_data.group(1)}/{ano}"
+    
+    data_ext = match_data.group(1)
+    if len(data_ext) == 5: data_ext = f"{data_ext}/{ano}"
     
     matches_valor = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]?)', texto_bloco, re.IGNORECASE))
     if not matches_valor: return
         
-    match_v = matches_valor[0]
+    # CORREÇÃO CREDIMATA: Pega sempre o ÚLTIMO match do bloco.
+    # Evita confundir números do histórico (ex: DOC 100,00) com o valor da transação.
+    match_v = matches_valor[-1] 
     valor_str = match_v.group(1)
     sinal_str = match_v.group(2).upper()
     
     valor_num = float(valor_str.replace('.', '').replace(',', '.'))
     desc_limpa = texto_bloco[match_data.end():].strip()
     
-    for m in matches_valor:
-        desc_limpa = desc_limpa.replace(m.group(0), ' ')
+    # Remove o valor extraído da string limpa de forma segura
+    desc_limpa = desc_limpa.replace(match_v.group(0), ' ')
         
     desc_limpa = re.sub(r'\*+\.\d{3}\.\d{3}-\*+', '', desc_limpa) 
     desc_limpa = re.sub(r'\bDOC\.?:?\b', 'DOC', desc_limpa, flags=re.IGNORECASE)
@@ -474,9 +475,9 @@ def extrair_pdf_sicoob(file_bytes):
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             ano = str(pd.Timestamp.now().year)
             bloco_atual = []
+            in_resumo = False
 
             for page in pdf.pages:
-                in_table = False 
                 texto = page.extract_text()
                 if not texto: continue
                 
@@ -488,18 +489,20 @@ def extrair_pdf_sicoob(file_bytes):
                     linha_strip = linha.strip()
                     linha_norm = padronizar_texto(linha_strip)
                     
-                    if 'HISTORICO DE MOVIMENTACAO' in linha_norm or ('DATA' in linha_norm and 'HISTORICO' in linha_norm):
-                        in_table = True
-                        continue 
-                        
-                    if in_table and any(x in linha_norm for x in ['RESUMO', 'SALDOS', 'TOTAIS', 'OUVIDORIA', 'LANCAMENTOS FUTUROS']):
-                        in_table = False
+                    # Trava para não ler resumos no fim da página/extrato
+                    if any(x in linha_norm for x in ['RESUMO CONTA CORRENTE', 'SALDOS E LIMITES', 'LANCAMENTOS FUTUROS', 'OUVIDORIA', 'TOTAIS']):
+                        in_resumo = True
                         if bloco_atual:
                             processar_bloco_sicoob(bloco_atual, ano, dados)
                             bloco_atual = []
                         continue
                         
-                    if not in_table:
+                    # Volta a ler se encontrar o cabeçalho mestre
+                    if 'HISTORICO DE MOVIMENTACAO' in linha_norm or ('DATA' in linha_norm and 'HISTORICO' in linha_norm):
+                        in_resumo = False
+                        continue 
+                        
+                    if in_resumo:
                         continue
                         
                     if eh_linha_de_saldo(linha_norm):
@@ -510,12 +513,14 @@ def extrair_pdf_sicoob(file_bytes):
                         
                     if len(linha_strip) < 3: continue
 
-                    match_data = re.search(r'^(\d{2}/\d{2})\b', linha_strip)
+                    match_data = re.search(r'^(\d{2}/\d{2}(?:/\d{4})?)\b', linha_strip)
                     if match_data:
                         if bloco_atual: processar_bloco_sicoob(bloco_atual, ano, dados)
                         bloco_atual = [linha_strip]
                     elif bloco_atual:
-                        bloco_atual.append(linha_strip)
+                        # Impede que números de páginas se juntem ao bloco de histórico
+                        if "SICOOB" not in linha_norm and "PAGINA" not in linha_norm:
+                            bloco_atual.append(linha_strip)
 
             if bloco_atual:
                 processar_bloco_sicoob(bloco_atual, ano, dados)
@@ -1044,18 +1049,22 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                     banco_pdf = identificar_banco_no_pdf(file.getvalue())
                     banco_alvo = banco_selecionado if banco_selecionado != "DESCONHECIDO" else banco_pdf
                     
-                    df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
-                    
-                    if df_ex.empty:
-                        logging.info("Motor inteligente retornou vazio, acionando fallback legado...")
-                        if banco_pdf == 'CAIXA' or banco_selecionado == 'CAIXA':
-                            df_ex, ign = extrair_pdf_caixa(file.getvalue())
-                        elif banco_pdf == 'SICOOB' or banco_selecionado == 'SICOOB':
-                            df_ex, ign = extrair_pdf_sicoob(file.getvalue())
-                        elif banco_pdf == 'ITAU' or banco_selecionado == 'ITAU':
-                            df_ex, ign = extrair_pdf_itau(file.getvalue())
-                        else:
-                            df_ex, ign = extrair_por_recintos(file.getvalue())
+                    # ROTA DE EMERGÊNCIA: Sicoob tem bloqueios de tabela invisíveis. Forçamos o motor nativo.
+                    if banco_alvo == 'SICOOB':
+                        df_ex, ign = extrair_pdf_sicoob(file.getvalue())
+                        if df_ex.empty: # Fallback caso o nativo falhe completamente
+                            df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
+                    else:
+                        df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
+                        
+                        if df_ex.empty:
+                            logging.info("Motor inteligente retornou vazio, acionando fallback legado...")
+                            if banco_pdf == 'CAIXA' or banco_selecionado == 'CAIXA':
+                                df_ex, ign = extrair_pdf_caixa(file.getvalue())
+                            elif banco_pdf == 'ITAU' or banco_selecionado == 'ITAU':
+                                df_ex, ign = extrair_pdf_itau(file.getvalue())
+                            else:
+                                df_ex, ign = extrair_por_recintos(file.getvalue())
                     
                     if not df_ex.empty:
                         lista_dfs.append(df_ex)
