@@ -11,13 +11,17 @@ from ofxparse import OfxParser
 import logging
 import time
 
+# =============================================================================
 # Novas importações para o Motor de Conversão Universal (OCR e Imagens)
+# =============================================================================
 try:
     from pdf2image import convert_from_bytes
     import pytesseract
     from PIL import Image
-    # Aponta para o motor de OCR que acabamos de instalar no Windows
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    
+    # Aponta para o motor de OCR instalado no Windows
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    
     HAS_OCR = True
 except ImportError:
     HAS_OCR = False
@@ -359,7 +363,6 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_por_recintos(file_bytes):
-    # (Código original mantido intacto)
     texto_completo = ""
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
@@ -1110,7 +1113,7 @@ if uploaded_files and conta_banco_fixa != 'N/A':
             if not st.session_state.df_bruto.empty:
                 aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
                 st.success("Processamento concluído!")
-                time.sleep(1) # Aguarda um instante para leitura de avisos
+                time.sleep(1)
                 st.rerun()
             elif houve_falha_pdf:
                 # Interrompe o progresso sem crashar para que o usuário veja o botão
@@ -1225,7 +1228,6 @@ if not st.session_state.df_bruto.empty:
             )
         else:
             st.info("Nenhuma movimentação processada para calcular o saldo diário.")
-
 
     # ==========================================
     # PAINÉIS DE AJUSTE DE SALDO (INCLUIR / EXCLUIR)
