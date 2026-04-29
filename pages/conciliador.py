@@ -7,20 +7,20 @@ import re
 import unicodedata
 import uuid
 import os
+import tempfile
 from thefuzz import fuzz
 from ofxparse import OfxParser
 import logging
 import time
 
 # =============================================================================
-# CONFIGURAÇÃO DE OCR (NUVEM VS LOCAL)
+# CONFIGURAÇÃO DE OCR E PDF (NUVEM VS LOCAL)
 # =============================================================================
 try:
     from pdf2image import convert_from_bytes
     import pytesseract
     from PIL import Image
     
-    # Detecção automática: Se o caminho do Windows existir, usa ele. Senão, confia no Linux (Nuvem).
     caminho_tesseract_windows = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
     if os.path.exists(caminho_tesseract_windows):
         pytesseract.pytesseract.tesseract_cmd = caminho_tesseract_windows
@@ -29,6 +29,13 @@ try:
 except ImportError:
     HAS_OCR = False
     logging.warning("Bibliotecas pdf2image ou pytesseract não instaladas. OCR desativado.")
+
+try:
+    from fpdf import FPDF
+    HAS_FPDF = True
+except ImportError:
+    HAS_FPDF = False
+    logging.warning("Biblioteca fpdf não instalada. Conversor OFX->PDF desativado.")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -285,10 +292,6 @@ def buscar_conta_por_banco(id_empresa, nome_banco):
 # ==========================================
 @st.cache_data(show_spinner=False)
 def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
-    """
-    Motor híbrido: Tenta extrair tabelas por geometria (resolve quebras de linha do Sicoob)
-    e possui gatilho para OCR caso o PDF seja uma imagem. Limpa sujeira antes da data (Itaú).
-    """
     dados = []
     ign = {"criticas": [], "comuns": []}
     
@@ -296,13 +299,11 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             texto_teste = pdf.pages[0].extract_text()
             
-            # --- Lógica OCR ---
             if not texto_teste or len(texto_teste.strip()) < 10:
                 if HAS_OCR:
                     st.toast("📷 PDF de imagem detectado. Extrator nativo acionado, aguardando OCR...")
                 return pd.DataFrame(), ign
                     
-            # --- Lógica de Geometria e Tabelas ---
             ano_atual = str(pd.Timestamp.now().year)
             for page in pdf.pages:
                 tabelas = page.extract_tables()
@@ -424,8 +425,6 @@ def extrair_por_recintos(file_bytes):
 
 def processar_bloco_sicoob(bloco, ano, dados):
     texto_bloco = " ".join(bloco)
-    
-    # Flexibiliza para encontrar DD/MM ou DD/MM/AAAA
     match_data = re.search(r'^(\d{2}/\d{2}(?:/\d{4})?)\b', texto_bloco)
     if not match_data: return
     
@@ -435,8 +434,6 @@ def processar_bloco_sicoob(bloco, ano, dados):
     matches_valor = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]?)', texto_bloco, re.IGNORECASE))
     if not matches_valor: return
         
-    # CORREÇÃO CREDIMATA: Pega sempre o ÚLTIMO match do bloco.
-    # Evita confundir números do histórico (ex: DOC 100,00) com o valor da transação.
     match_v = matches_valor[-1] 
     valor_str = match_v.group(1)
     sinal_str = match_v.group(2).upper()
@@ -444,9 +441,7 @@ def processar_bloco_sicoob(bloco, ano, dados):
     valor_num = float(valor_str.replace('.', '').replace(',', '.'))
     desc_limpa = texto_bloco[match_data.end():].strip()
     
-    # Remove o valor extraído da string limpa de forma segura
     desc_limpa = desc_limpa.replace(match_v.group(0), ' ')
-        
     desc_limpa = re.sub(r'\*+\.\d{3}\.\d{3}-\*+', '', desc_limpa) 
     desc_limpa = re.sub(r'\bDOC\.?:?\b', 'DOC', desc_limpa, flags=re.IGNORECASE)
     desc_limpa = re.sub(r'\b[CD]\b', '', desc_limpa) 
@@ -489,7 +484,6 @@ def extrair_pdf_sicoob(file_bytes):
                     linha_strip = linha.strip()
                     linha_norm = padronizar_texto(linha_strip)
                     
-                    # Trava para não ler resumos no fim da página/extrato
                     if any(x in linha_norm for x in ['RESUMO CONTA CORRENTE', 'SALDOS E LIMITES', 'LANCAMENTOS FUTUROS', 'OUVIDORIA', 'TOTAIS']):
                         in_resumo = True
                         if bloco_atual:
@@ -497,7 +491,6 @@ def extrair_pdf_sicoob(file_bytes):
                             bloco_atual = []
                         continue
                         
-                    # Volta a ler se encontrar o cabeçalho mestre
                     if 'HISTORICO DE MOVIMENTACAO' in linha_norm or ('DATA' in linha_norm and 'HISTORICO' in linha_norm):
                         in_resumo = False
                         continue 
@@ -518,7 +511,6 @@ def extrair_pdf_sicoob(file_bytes):
                         if bloco_atual: processar_bloco_sicoob(bloco_atual, ano, dados)
                         bloco_atual = [linha_strip]
                     elif bloco_atual:
-                        # Impede que números de páginas se juntem ao bloco de histórico
                         if "SICOOB" not in linha_norm and "PAGINA" not in linha_norm:
                             bloco_atual.append(linha_strip)
 
@@ -910,6 +902,74 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
         logging.exception(f"Erro Bradesco: {e}")
         return pd.DataFrame()
 
+
+# =============================================================================
+# NOVA FUNÇÃO: GERADOR DE PDF A PARTIR DO OFX
+# =============================================================================
+def gerar_pdf_do_ofx(file_bytes, nome_arquivo):
+    try:
+        ofx_text = file_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        ofx_text = file_bytes.decode('latin-1', errors='ignore')
+        
+    ofx = OfxParser.parse(io.BytesIO(ofx_text.encode('utf-8')))
+    
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Função para limpar texto e garantir que o FPDF não quebre com caracteres especiais
+    def safe_text(txt):
+        if not txt: return ""
+        return unicodedata.normalize('NFKD', str(txt)).encode('ASCII', 'ignore').decode('ASCII')
+        
+    pdf.set_font("Arial", 'B', 14)
+    
+    banco_nome = safe_text(ofx.account.institution.organization) if ofx.account.institution else "BANCO DESCONHECIDO"
+    conta_id = safe_text(ofx.account.account_id) if ofx.account else "N/A"
+    
+    pdf.cell(0, 10, f"EXTRATO BANCARIO FORMATADO - {banco_nome}", ln=True, align='C')
+    pdf.set_font("Arial", '', 10)
+    pdf.cell(0, 8, f"Conta: {conta_id} | Arquivo Original: {safe_text(nome_arquivo)}", ln=True, align='C')
+    pdf.ln(5)
+    
+    # Tabela Cabeçalho
+    pdf.set_font("Arial", 'B', 9)
+    pdf.cell(25, 8, "DATA", border=1, align='C')
+    pdf.cell(130, 8, "DESCRICAO", border=1)
+    pdf.cell(35, 8, "VALOR (R$)", border=1, ln=True, align='C')
+    
+    # Tabela Dados
+    pdf.set_font("Arial", '', 8)
+    
+    txs = []
+    if hasattr(ofx.account, 'statement') and ofx.account.statement:
+        txs = ofx.account.statement.transactions
+        
+    for tx in txs:
+        data_str = tx.date.strftime("%d/%m/%Y") if tx.date else ""
+        desc = safe_text(tx.memo if tx.memo else tx.payee)[:85]
+        valor = float(tx.amount)
+        
+        valor_str = f"{abs(valor):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+        if valor > 0:
+            valor_str = "+ " + valor_str
+        else:
+            valor_str = "- " + valor_str
+            
+        pdf.cell(25, 6, data_str, border=1, align='C')
+        pdf.cell(130, 6, desc, border=1)
+        pdf.cell(35, 6, valor_str, border=1, ln=True, align='R')
+        
+    # Salva em arquivo temporário e lê em bytes de forma segura para compatibilidade
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        pdf.output(tmp.name)
+        tmp.seek(0)
+        pdf_bytes = tmp.read()
+        
+    os.unlink(tmp.name)
+    return pdf_bytes
+
+
 # =============================================================================
 # 4. CARGA DE DADOS DO BANCO E DE REGRAS
 # =============================================================================
@@ -965,700 +1025,729 @@ for key, val in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
-st.title("🏦 Conciliação Bancária")
-
 df_empresas = carregar_empresas()
 if df_empresas.empty:
     st.error("Nenhuma empresa ativa encontrada no banco de dados.")
     st.stop()
 
-# =============================================================================
-# PASSO 1 E 2: UPLOAD E PRÉ-SELEÇÃO
-# =============================================================================
-uploaded_files  = st.file_uploader("1. Arraste seus extratos (PDF, OFX, XLS, XLSX, CSV)", type=["pdf", "ofx", "xls", "xlsx", "csv"], accept_multiple_files=True)
-indice_sugerido = 0
 
-if uploaded_files:
-    mensagens_auto = []
-    for file in uploaded_files:
-        if file.name.lower().endswith('.pdf'):
-            cnpj_lido = identificar_cnpj_no_pdf(file.getvalue())
-            if cnpj_lido:
-                empresa_detectada_data = buscar_empresa_por_cnpj_otimizado(cnpj_lido, df_empresas)
-                if empresa_detectada_data:
-                    idx_encontrado  = df_empresas[df_empresas['id'] == empresa_detectada_data['id']].index[0]
-                    indice_sugerido = int(idx_encontrado)
-                    st.session_state.empresa_detectada_data = empresa_detectada_data
-                    if f"Empresa '{empresa_detectada_data['nome']}' reconhecida" not in mensagens_auto:
-                        mensagens_auto.append(f"Empresa '{empresa_detectada_data['nome']}' reconhecida pelo CNPJ")
+# CRIANDO O SISTEMA DE ABAS (ISOLANDO AS FUNCIONALIDADES)
+tab_conciliacao, tab_conversor = st.tabs(["🏦 Conciliação Bancária", "🧰 Conversor OFX -> PDF"])
 
-            banco_detectado = identificar_banco_no_pdf(file.getvalue())
-            if banco_detectado != "DESCONHECIDO":
-                st.session_state.banco_detectado = banco_detectado
-                if f"Banco '{banco_detectado}'" not in mensagens_auto:
-                    mensagens_auto.append(f"Banco '{banco_detectado}' identificado")
-            break
-            
-    if mensagens_auto:
-        st.success("✅ " + " | ".join(mensagens_auto))
-
-# =============================================================================
-# PASSO 3: PAINEL DE CONFIGURAÇÕES
-# =============================================================================
-st.markdown("### 2. Confirme os Dados")
-col_cfg1, col_cfg2, col_cfg3 = st.columns([2, 1, 1])
-
-empresa_sel_display = col_cfg1.selectbox("Empresa / Filial", df_empresas['display_nome'], index=indice_sugerido)
-empresa_data        = df_empresas[df_empresas['display_nome'] == empresa_sel_display].iloc[0].to_dict()
-id_empresa          = int(empresa_data['id'])
-
-bancos_disponiveis = sorted(list(BANCOS_KEYWORDS.keys()) + [st.session_state.banco_detectado])
-bancos_disponiveis = list(dict.fromkeys([b for b in bancos_disponiveis if b != "DESCONHECIDO"]))
-banco_index        = (bancos_disponiveis.index(st.session_state.banco_detectado) if st.session_state.banco_detectado in bancos_disponiveis else 0)
-banco_selecionado  = col_cfg2.selectbox("Banco do Extrato", bancos_disponiveis, index=banco_index)
-
-conta_banco_fixa = buscar_conta_por_banco(id_empresa, banco_selecionado)
-if not conta_banco_fixa:
-    conta_banco_fixa = empresa_data.get('conta_contabil', 'N/A')
-
-col_cfg2.text_input("Conta Banco (Âncora)", value=conta_banco_fixa, disabled=True)
-
-col_saldos1, col_saldos2 = col_cfg3.columns(2)
-saldo_anterior_informado = col_saldos1.number_input("Saldo Anterior (R$)", value=0.00, step=100.00, format="%.2f")
-saldo_final_informado = col_saldos2.number_input("Saldo Final (Opcional)", value=0.00, step=100.00, format="%.2f", help="Informe o saldo final real do extrato para checagem do sistema.")
-
-# =============================================================================
-# PASSO 4: PROCESSAMENTO E BOTÃO DE CONTINGÊNCIA
-# =============================================================================
-if uploaded_files and conta_banco_fixa != 'N/A':
-    if st.button("⚙️ Processar Extratos"):
+with tab_conversor:
+    st.markdown("### 🧰 Conversor de Leitura: OFX para PDF")
+    st.info("Utilize esta ferramenta para transformar arquivos OFX brutos (que você recebe de clientes) em documentos PDF formatados com tabela, facilitando a busca e a conferência visual.")
+    
+    if HAS_FPDF:
+        ofx_upload = st.file_uploader("Selecione o arquivo .OFX", type=["ofx"], key="uploader_ofx_pdf")
         
-        st.session_state.inicio_operacao = time.time()
-        st.session_state.tempo_conclusao = None
-        st.session_state.lancamentos_manuais = [] 
-        st.session_state.linhas_ignoradas_regras = [] 
-        
-        with st.spinner("Lendo e classificando extratos..."):
-            lista_dfs, criticas, comuns = [], [], []
-            houve_falha_pdf = False
-            
-            for file in uploaded_files:
-                extensao = file.name.lower()
-                
-                if extensao.endswith('.pdf'):
-                    banco_pdf = identificar_banco_no_pdf(file.getvalue())
-                    banco_alvo = banco_selecionado if banco_selecionado != "DESCONHECIDO" else banco_pdf
-                    
-                    # ROTA DE EMERGÊNCIA: Sicoob tem bloqueios de tabela invisíveis. Forçamos o motor nativo.
-                    if banco_alvo == 'SICOOB':
-                        df_ex, ign = extrair_pdf_sicoob(file.getvalue())
-                        if df_ex.empty: # Fallback caso o nativo falhe completamente
-                            df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
-                    else:
-                        df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
+        if ofx_upload:
+            if st.button("Gerar PDF Formatado", type="primary"):
+                with st.spinner("Lendo OFX e desenhando PDF..."):
+                    try:
+                        pdf_gerado_bytes = gerar_pdf_do_ofx(ofx_upload.getvalue(), ofx_upload.name)
+                        st.success("Conversão concluída com sucesso!")
                         
-                        if df_ex.empty:
-                            logging.info("Motor inteligente retornou vazio, acionando fallback legado...")
-                            if banco_pdf == 'CAIXA' or banco_selecionado == 'CAIXA':
-                                df_ex, ign = extrair_pdf_caixa(file.getvalue())
-                            elif banco_pdf == 'ITAU' or banco_selecionado == 'ITAU':
-                                df_ex, ign = extrair_pdf_itau(file.getvalue())
-                            else:
-                                df_ex, ign = extrair_por_recintos(file.getvalue())
-                    
-                    if not df_ex.empty:
-                        lista_dfs.append(df_ex)
-                        criticas.extend(ign['criticas'])
-                        comuns.extend(ign['comuns'])
-                    else:
-                        houve_falha_pdf = True
-                        st.error(f"⚠️ O sistema não conseguiu extrair transações do arquivo: {file.name}")
-                        st.markdown(
-                            f"""
-                            <div style="text-align: center; padding: 15px; margin: 15px 0; border: 2px dashed #ff4b4b; border-radius: 8px; background-color: #fff0f0;">
-                                <h4 style="color: #ff4b4b; margin-top:0;">Layout Desconhecido ou PDF Ilegível (Imagem)</h4>
-                                <p style="color: #333; margin-bottom: 15px;">Utilize nossa ferramenta de contingência para converter este PDF em OFX e suba o OFX gerado aqui no sistema.</p>
-                                <a href="https://www.ofxfacil.com.br/pdf-ofx" target="_blank" style="text-decoration: none;">
-                                    <button style="background-color: #ff4b4b; color: white; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 16px;">
-                                        🚀 Abrir Conversor Externo (OFX Fácil)
-                                    </button>
-                                </a>
-                            </div>
-                            """, unsafe_allow_html=True
+                        st.download_button(
+                            label="📥 BAIXAR EXTRATO PDF",
+                            data=pdf_gerado_bytes,
+                            file_name=f"{ofx_upload.name.split('.')[0]}_Formatado.pdf",
+                            mime="application/pdf"
                         )
-                        
-                elif extensao.endswith(('.xlsx', '.xls', '.csv')):
-                    if banco_selecionado == 'BRADESCO':
-                        df_ex = extrair_planilha_bradesco(file.getvalue(), file.name)
-                    else:
-                        df_ex = extrair_planilha_bb(file.getvalue(), file.name)
-                        
-                    if not df_ex.empty:
-                        lista_dfs.append(df_ex)
-                    else:
-                        st.warning(f"⚠️ Extrator Excel/CSV não encontrou transações na planilha: {file.name}")
-                        
-                elif extensao.endswith('.ofx'):
-                    df_ex = extrair_texto_ofx(file.getvalue())
-                    if not df_ex.empty:
-                        lista_dfs.append(df_ex)
-                    else:
-                        st.warning(f"⚠️ Extrator OFX não encontrou transações em: {file.name}")
+                    except Exception as e:
+                        st.error(f"Erro ao converter o arquivo. O arquivo OFX pode estar corrompido. Detalhe: {e}")
+    else:
+        st.error("⚠️ A biblioteca 'fpdf' não está instalada no servidor. Por favor, instale executando `pip install fpdf` para ativar esta funcionalidade.")
 
-            if lista_dfs:
-                df_consolidado = pd.concat(lista_dfs, ignore_index=True)
-                df_consolidado['Valor'] = pd.to_numeric(df_consolidado['Valor'], errors='coerce').fillna(0.0)
-                df_consolidado['Sinal'] = df_consolidado['Sinal'].astype(str).apply(lambda x: '+' if '+' in x else '-')
+
+with tab_conciliacao:
+    st.title("🏦 Conciliação Bancária")
+
+    # =============================================================================
+    # PASSO 1 E 2: UPLOAD E PRÉ-SELEÇÃO
+    # =============================================================================
+    uploaded_files  = st.file_uploader("1. Arraste seus extratos (PDF, OFX, XLS, XLSX, CSV)", type=["pdf", "ofx", "xls", "xlsx", "csv"], accept_multiple_files=True)
+    indice_sugerido = 0
+
+    if uploaded_files:
+        mensagens_auto = []
+        for file in uploaded_files:
+            if file.name.lower().endswith('.pdf'):
+                cnpj_lido = identificar_cnpj_no_pdf(file.getvalue())
+                if cnpj_lido:
+                    empresa_detectada_data = buscar_empresa_por_cnpj_otimizado(cnpj_lido, df_empresas)
+                    if empresa_detectada_data:
+                        idx_encontrado  = df_empresas[df_empresas['id'] == empresa_detectada_data['id']].index[0]
+                        indice_sugerido = int(idx_encontrado)
+                        st.session_state.empresa_detectada_data = empresa_detectada_data
+                        if f"Empresa '{empresa_detectada_data['nome']}' reconhecida" not in mensagens_auto:
+                            mensagens_auto.append(f"Empresa '{empresa_detectada_data['nome']}' reconhecida pelo CNPJ")
+
+                banco_detectado = identificar_banco_no_pdf(file.getvalue())
+                if banco_detectado != "DESCONHECIDO":
+                    st.session_state.banco_detectado = banco_detectado
+                    if f"Banco '{banco_detectado}'" not in mensagens_auto:
+                        mensagens_auto.append(f"Banco '{banco_detectado}' identificado")
+                break
                 
-                # APLICAÇÃO FINAL DA TRAVA DE SALDO EM TODOS OS EXTRATORES
-                df_consolidado = df_consolidado[~df_consolidado['Descricao'].apply(eh_linha_de_saldo)].reset_index(drop=True)
+        if mensagens_auto:
+            st.success("✅ " + " | ".join(mensagens_auto))
+
+    # =============================================================================
+    # PASSO 3: PAINEL DE CONFIGURAÇÕES
+    # =============================================================================
+    st.markdown("### 2. Confirme os Dados")
+    col_cfg1, col_cfg2, col_cfg3 = st.columns([2, 1, 1])
+
+    empresa_sel_display = col_cfg1.selectbox("Empresa / Filial", df_empresas['display_nome'], index=indice_sugerido)
+    empresa_data        = df_empresas[df_empresas['display_nome'] == empresa_sel_display].iloc[0].to_dict()
+    id_empresa          = int(empresa_data['id'])
+
+    bancos_disponiveis = sorted(list(BANCOS_KEYWORDS.keys()) + [st.session_state.banco_detectado])
+    bancos_disponiveis = list(dict.fromkeys([b for b in bancos_disponiveis if b != "DESCONHECIDO"]))
+    banco_index        = (bancos_disponiveis.index(st.session_state.banco_detectado) if st.session_state.banco_detectado in bancos_disponiveis else 0)
+    banco_selecionado  = col_cfg2.selectbox("Banco do Extrato", bancos_disponiveis, index=banco_index)
+
+    conta_banco_fixa = buscar_conta_por_banco(id_empresa, banco_selecionado)
+    if not conta_banco_fixa:
+        conta_banco_fixa = empresa_data.get('conta_contabil', 'N/A')
+
+    col_cfg2.text_input("Conta Banco (Âncora)", value=conta_banco_fixa, disabled=True)
+
+    col_saldos1, col_saldos2 = col_cfg3.columns(2)
+    saldo_anterior_informado = col_saldos1.number_input("Saldo Anterior (R$)", value=0.00, step=100.00, format="%.2f")
+    saldo_final_informado = col_saldos2.number_input("Saldo Final (Opcional)", value=0.00, step=100.00, format="%.2f", help="Informe o saldo final real do extrato para checagem do sistema.")
+
+    # =============================================================================
+    # PASSO 4: PROCESSAMENTO E BOTÃO DE CONTINGÊNCIA
+    # =============================================================================
+    if uploaded_files and conta_banco_fixa != 'N/A':
+        if st.button("⚙️ Processar Extratos"):
+            
+            st.session_state.inicio_operacao = time.time()
+            st.session_state.tempo_conclusao = None
+            st.session_state.lancamentos_manuais = [] 
+            st.session_state.linhas_ignoradas_regras = [] 
+            
+            with st.spinner("Lendo e classificando extratos..."):
+                lista_dfs, criticas, comuns = [], [], []
+                houve_falha_pdf = False
                 
-                st.session_state.df_bruto = df_consolidado
-            else:
-                st.session_state.df_bruto = pd.DataFrame()
-                
-            st.session_state.skipped_indices = []
-            st.session_state.criticas        = criticas
-            st.session_state.comuns          = comuns
-            st.session_state.busca_fila      = ''
-            undo_manager.clear()
-
-            if not st.session_state.df_bruto.empty:
-                aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                st.success("Processamento concluído!")
-                time.sleep(1)
-                st.rerun()
-            elif houve_falha_pdf:
-                st.stop()
-                
-elif conta_banco_fixa == 'N/A':
-    st.error("Configure a conta contábil antes de processar.")
-
-# =============================================================================
-# PASSO 5: RESULTADOS + DETETIVE + AUDITORIA + INCLUSÕES/EXCLUSÕES
-# =============================================================================
-if not st.session_state.df_bruto.empty:
-    st.divider()
-
-    df_validos = st.session_state.df_bruto[
-        ~st.session_state.df_bruto.index.isin(st.session_state.linhas_ignoradas_regras)
-    ]
-    
-    total_e               = float(df_validos[df_validos['Sinal'] == '+']['Valor'].sum())
-    total_s               = float(df_validos[df_validos['Sinal'] == '-']['Valor'].sum())
-    
-    if 'lancamentos_manuais' in st.session_state and st.session_state.lancamentos_manuais:
-        for m_item in st.session_state.lancamentos_manuais:
-            val_m = float(str(m_item['Valor']).replace('.', '').replace(',', '.'))
-            if m_item['Debito'] == conta_banco_fixa: # Entrada
-                total_e += val_m
-            else:
-                total_s += val_m
-
-    saldo_final_calculado = saldo_anterior_informado + total_e - total_s
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Saldo Anterior",           formatar_moeda(saldo_anterior_informado))
-    c2.metric("🟢 Entradas Válidas",      formatar_moeda(total_e))
-    c3.metric("🔴 Saídas Válidas",        formatar_moeda(total_s))
-    c4.metric("⚖️ Saldo Final Calculado", formatar_moeda(saldo_final_calculado))
-
-    # O DETETIVE
-    diferenca_existente = False
-    if saldo_final_informado != 0.00:
-        diferenca = round(abs(saldo_final_calculado - saldo_final_informado), 2)
-        if diferenca > 0.01:
-            diferenca_existente = True
-            st.error(f"⚠️ **Atenção!** Há uma diferença de **{formatar_moeda(diferenca)}** entre o saldo calculado e o que você informou.")
-            
-            encontrou_pista = False
-            suspeitos_bruto = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == diferenca]
-            if not suspeitos_bruto.empty:
-                st.info(f"💡 **PISTA 1:** Encontrei {len(suspeitos_bruto)} lançamento(s) na fila com o valor exato da diferença. Vá em '🗑️ Excluir Lançamento' abaixo para descartá-lo, se for o caso.")
-                encontrou_pista = True
-                
-            metade = round(diferenca / 2, 2)
-            suspeitos_metade = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == metade]
-            if not suspeitos_metade.empty:
-                st.info(f"💡 **PISTA 2:** Há um lançamento na fila de **{formatar_moeda(metade)}**. Se o sinal dele estiver invertido, ele gera exatamente essa diferença!")
-                encontrou_pista = True
-
-            str_diff_br = f"{diferenca:.2f}".replace('.', ',')
-            suspeitos_lixo = [l for l in st.session_state.criticas if str_diff_br in l]
-            if suspeitos_lixo:
-                st.info(f"💡 **PISTA 3:** O valor de {formatar_moeda(diferenca)} aparece nas linhas que o extrator de PDF não conseguiu ler direito (Ignorados Brutos). Adicione este valor em '➕ Adicionar Lançamento Manual'!")
-                encontrou_pista = True
-
-            if not encontrou_pista:
-                st.info("💡 **PISTA:** Não encontrei um culpado exato com esse valor. Essa diferença deve ser a soma de múltiplos lançamentos que faltaram ou vieram a mais.")
-        else:
-            st.success("✅ **O Saldo Final Calculado bateu perfeitamente com o Saldo Final Informado!**")
-
-    # ==========================================
-    # RESUMO DIÁRIO (BATER SALDO POR DIA)
-    # ==========================================
-    with st.expander("📅 Movimentação Dia a Dia (Bater com o Banco)", expanded=diferenca_existente):
-        st.caption("Compare a coluna 'Saldo Final do Dia' com o seu extrato bancário para achar exatamente onde a diferença começou.")
-        
-        df_daily = df_validos[['Data', 'Valor', 'Sinal']].copy()
-        
-        manuais_list = []
-        if 'lancamentos_manuais' in st.session_state and st.session_state.lancamentos_manuais:
-            for m in st.session_state.lancamentos_manuais:
-                val_m = float(str(m['Valor']).replace('.', '').replace(',', '.'))
-                sinal_m = '+' if m['Debito'] == conta_banco_fixa else '-'
-                manuais_list.append({'Data': m['Data'], 'Valor': val_m, 'Sinal': sinal_m})
-                
-        if manuais_list:
-            df_daily = pd.concat([df_daily, pd.DataFrame(manuais_list)], ignore_index=True)
-            
-        if not df_daily.empty:
-            df_daily['Data_dt'] = pd.to_datetime(df_daily['Data'], format='%d/%m/%Y', errors='coerce')
-            df_daily = df_daily.dropna(subset=['Data_dt'])
-            
-            df_daily['Entradas'] = df_daily.apply(lambda x: x['Valor'] if x['Sinal'] == '+' else 0.0, axis=1)
-            df_daily['Saidas'] = df_daily.apply(lambda x: x['Valor'] if x['Sinal'] == '-' else 0.0, axis=1)
-            
-            resumo_diario = df_daily.groupby('Data_dt').agg({'Entradas': 'sum', 'Saidas': 'sum'}).reset_index()
-            resumo_diario = resumo_diario.sort_values('Data_dt')
-            
-            resumo_diario['Movimentação Líquida'] = resumo_diario['Entradas'] - resumo_diario['Saidas']
-            resumo_diario['Saldo Final do Dia'] = saldo_anterior_informado + resumo_diario['Movimentação Líquida'].cumsum()
-            
-            resumo_diario['Data'] = resumo_diario['Data_dt'].dt.strftime('%d/%m/%Y')
-            resumo_fmt = resumo_diario[['Data', 'Entradas', 'Saidas', 'Movimentação Líquida', 'Saldo Final do Dia']].copy()
-            
-            st.dataframe(
-                resumo_fmt.style.format({
-                    "Entradas": "R$ {:,.2f}",
-                    "Saidas": "R$ {:,.2f}",
-                    "Movimentação Líquida": "R$ {:,.2f}",
-                    "Saldo Final do Dia": "R$ {:,.2f}"
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
-        else:
-            st.info("Nenhuma movimentação processada para calcular o saldo diário.")
-
-    # ==========================================
-    # PAINÉIS DE AJUSTE DE SALDO (INCLUIR / EXCLUIR)
-    # ==========================================
-    col_ajuste1, col_ajuste2 = st.columns(2)
-
-    with col_ajuste1.expander("➕ Adicionar Lançamento Manual (Ajuste de Saldo)", expanded=False):
-        st.caption("Faltou alguma coisa? Insira aqui e o saldo recalcula na hora.")
-        m_data = st.text_input("Data (DD/MM/AAAA)")
-        m_desc = st.text_input("Descrição do Lançamento")
-        m_valor = st.number_input("Valor (R$)", step=0.01, format="%.2f")
-        m_sinal = st.selectbox("Tipo", ["- (Saída)", "+ (Entrada)"])
-        m_conta = st.text_input("Conta Contrapartida")
-        
-        if st.button("Adicionar Lançamento Manual", type="primary"):
-            if m_data and m_desc and m_valor > 0 and m_conta:
-                sinal_final = '+' if '+' in m_sinal else '-'
-                novo_item = {
-                    'idx_original':  f"manual_{uuid.uuid4().hex}",
-                    'Debito':  conta_banco_fixa if sinal_final == '+' else m_conta,
-                    'Credito': m_conta if sinal_final == '+' else conta_banco_fixa,
-                    'Data':    m_data,
-                    'Valor':   f"{m_valor:.2f}".replace('.', ','),
-                    'Cod_Historico': "",
-                    'Historico': m_desc.upper()
-                }
-                if 'lancamentos_manuais' not in st.session_state:
-                    st.session_state.lancamentos_manuais = []
-                st.session_state.lancamentos_manuais.append(novo_item)
-                
-                aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                st.toast("Lançamento inserido e saldo atualizado!")
-                st.rerun()
-            else:
-                st.error("Preencha todos os campos corretamente.")
-
-    with col_ajuste2.expander("🗑️ Excluir Lançamento (Ajuste de Saldo)", expanded=False):
-        st.caption("Selecione lançamentos do banco (ou inseridos manualmente) que devem ser **ignorados na conta matemática e no ERP**.")
-        
-        opcoes_exclusao = []
-        if not df_validos.empty:
-            for idx, row in df_validos.iterrows():
-                tipo_str = "Entrada" if row['Sinal'] == '+' else "Saída"
-                opcoes_exclusao.append(f"[{idx}] {row['Data']} - {tipo_str} - R$ {row['Valor']:.2f} - {row['Descricao']}")
-                
-        if 'lancamentos_manuais' in st.session_state and st.session_state.lancamentos_manuais:
-            for m in st.session_state.lancamentos_manuais:
-                s_m = "+" if m['Debito'] == conta_banco_fixa else "-"
-                tipo_str_m = "Entrada" if s_m == '+' else "Saída"
-                opcoes_exclusao.append(f"[{m['idx_original']}] {m['Data']} - {tipo_str_m} - R$ {m['Valor']} - MANUAL: {m['Historico']}")
-
-        if opcoes_exclusao:
-            itens_para_excluir = st.multiselect("Pesquise e selecione os itens:", opcoes_exclusao)
-            
-            if st.button("❌ Confirmar Exclusão e Recalcular", type="primary"):
-                for item in itens_para_excluir:
-                    idx_str = item.split(']')[0][1:] 
+                for file in uploaded_files:
+                    extensao = file.name.lower()
                     
-                    if str(idx_str).startswith('manual_'):
-                        st.session_state.lancamentos_manuais = [m for m in st.session_state.lancamentos_manuais if m['idx_original'] != idx_str]
-                    else:
-                        st.session_state.linhas_ignoradas_regras.append(int(idx_str))
-                
-                aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                st.toast("Lançamentos excluídos com sucesso! Saldo recalculado.")
-                st.rerun()
-        else:
-            st.info("Não há lançamentos disponíveis para exclusão.")
+                    if extensao.endswith('.pdf'):
+                        banco_pdf = identificar_banco_no_pdf(file.getvalue())
+                        banco_alvo = banco_selecionado if banco_selecionado != "DESCONHECIDO" else banco_pdf
+                        
+                        if banco_alvo == 'SICOOB':
+                            df_ex, ign = extrair_pdf_sicoob(file.getvalue())
+                            if df_ex.empty:
+                                df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
+                        else:
+                            df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
+                            
+                            if df_ex.empty:
+                                logging.info("Motor inteligente retornou vazio, acionando fallback legado...")
+                                if banco_pdf == 'CAIXA' or banco_selecionado == 'CAIXA':
+                                    df_ex, ign = extrair_pdf_caixa(file.getvalue())
+                                elif banco_pdf == 'ITAU' or banco_selecionado == 'ITAU':
+                                    df_ex, ign = extrair_pdf_itau(file.getvalue())
+                                else:
+                                    df_ex, ign = extrair_por_recintos(file.getvalue())
+                        
+                        if not df_ex.empty:
+                            lista_dfs.append(df_ex)
+                            criticas.extend(ign['criticas'])
+                            comuns.extend(ign['comuns'])
+                        else:
+                            houve_falha_pdf = True
+                            st.error(f"⚠️ O sistema não conseguiu extrair transações do arquivo: {file.name}")
+                            st.markdown(
+                                f"""
+                                <div style="text-align: center; padding: 15px; margin: 15px 0; border: 2px dashed #ff4b4b; border-radius: 8px; background-color: #fff0f0;">
+                                    <h4 style="color: #ff4b4b; margin-top:0;">Layout Desconhecido ou PDF Ilegível (Imagem)</h4>
+                                    <p style="color: #333; margin-bottom: 15px;">Utilize nossa ferramenta de contingência para converter este PDF em OFX e suba o OFX gerado aqui no sistema.</p>
+                                    <a href="https://www.ofxfacil.com.br/pdf-ofx" target="_blank" style="text-decoration: none;">
+                                        <button style="background-color: #ff4b4b; color: white; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 16px;">
+                                            🚀 Abrir Conversor Externo (OFX Fácil)
+                                        </button>
+                                    </a>
+                                </div>
+                                """, unsafe_allow_html=True
+                            )
+                            
+                    elif extensao.endswith(('.xlsx', '.xls', '.csv')):
+                        if banco_selecionado == 'BRADESCO':
+                            df_ex = extrair_planilha_bradesco(file.getvalue(), file.name)
+                        else:
+                            df_ex = extrair_planilha_bb(file.getvalue(), file.name)
+                            
+                        if not df_ex.empty:
+                            lista_dfs.append(df_ex)
+                        else:
+                            st.warning(f"⚠️ Extrator Excel/CSV não encontrou transações na planilha: {file.name}")
+                            
+                    elif extensao.endswith('.ofx'):
+                        df_ex = extrair_texto_ofx(file.getvalue())
+                        if not df_ex.empty:
+                            lista_dfs.append(df_ex)
+                        else:
+                            st.warning(f"⚠️ Extrator OFX não encontrou transações em: {file.name}")
 
-    # PAINEL OCULTO DE AUDITORIA
-    with st.expander("🔍 Auditoria: Ver tudo que foi Lido e Ignorado (Bruto)"):
-        st.markdown("### 📊 Dados Lidos e Capturados")
-        st.dataframe(st.session_state.df_bruto, use_container_width=True)
+                if lista_dfs:
+                    df_consolidado = pd.concat(lista_dfs, ignore_index=True)
+                    df_consolidado['Valor'] = pd.to_numeric(df_consolidado['Valor'], errors='coerce').fillna(0.0)
+                    df_consolidado['Sinal'] = df_consolidado['Sinal'].astype(str).apply(lambda x: '+' if '+' in x else '-')
+                    
+                    df_consolidado = df_consolidado[~df_consolidado['Descricao'].apply(eh_linha_de_saldo)].reset_index(drop=True)
+                    
+                    st.session_state.df_bruto = df_consolidado
+                else:
+                    st.session_state.df_bruto = pd.DataFrame()
+                    
+                st.session_state.skipped_indices = []
+                st.session_state.criticas        = criticas
+                st.session_state.comuns          = comuns
+                st.session_state.busca_fila      = ''
+                undo_manager.clear()
+
+                if not st.session_state.df_bruto.empty:
+                    aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                    st.success("Processamento concluído!")
+                    time.sleep(1)
+                    st.rerun()
+                elif houve_falha_pdf:
+                    st.stop()
+                    
+    elif conta_banco_fixa == 'N/A':
+        st.error("Configure a conta contábil antes de processar.")
+
+    # =============================================================================
+    # PASSO 5: RESULTADOS + DETETIVE + AUDITORIA + INCLUSÕES/EXCLUSÕES
+    # =============================================================================
+    if not st.session_state.df_bruto.empty:
+        st.divider()
+
+        df_validos = st.session_state.df_bruto[
+            ~st.session_state.df_bruto.index.isin(st.session_state.linhas_ignoradas_regras)
+        ]
         
-        st.markdown("### 🗑️ Linhas Ignoradas (Lixo)")
-        if st.session_state.criticas or st.session_state.comuns:
-            if st.session_state.criticas:
-                st.error("Linhas descartadas que possuíam valores (Podem conter erros de leitura):")
-                for l in list(dict.fromkeys(st.session_state.criticas)): st.code(l)
-            if st.session_state.comuns:
-                st.info("Linhas de texto descartadas (Ruído de cabeçalho):")
-                for l in list(dict.fromkeys(st.session_state.comuns))[:30]: st.text(l)
+        total_e               = float(df_validos[df_validos['Sinal'] == '+']['Valor'].sum())
+        total_s               = float(df_validos[df_validos['Sinal'] == '-']['Valor'].sum())
+        
+        if 'lancamentos_manuais' in st.session_state and st.session_state.lancamentos_manuais:
+            for m_item in st.session_state.lancamentos_manuais:
+                val_m = float(str(m_item['Valor']).replace('.', '').replace(',', '.'))
+                if m_item['Debito'] == conta_banco_fixa: 
+                    total_e += val_m
+                else:
+                    total_s += val_m
+
+        saldo_final_calculado = saldo_anterior_informado + total_e - total_s
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Saldo Anterior",           formatar_moeda(saldo_anterior_informado))
+        c2.metric("🟢 Entradas Válidas",      formatar_moeda(total_e))
+        c3.metric("🔴 Saídas Válidas",        formatar_moeda(total_s))
+        c4.metric("⚖️ Saldo Final Calculado", formatar_moeda(saldo_final_calculado))
+
+        # O DETETIVE
+        diferenca_existente = False
+        if saldo_final_informado != 0.00:
+            diferenca = round(abs(saldo_final_calculado - saldo_final_informado), 2)
+            if diferenca > 0.01:
+                diferenca_existente = True
+                st.error(f"⚠️ **Atenção!** Há uma diferença de **{formatar_moeda(diferenca)}** entre o saldo calculado e o que você informou.")
+                
+                encontrou_pista = False
+                suspeitos_bruto = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == diferenca]
+                if not suspeitos_bruto.empty:
+                    st.info(f"💡 **PISTA 1:** Encontrei {len(suspeitos_bruto)} lançamento(s) na fila com o valor exato da diferença. Vá em '🗑️ Excluir Lançamento' abaixo para descartá-lo, se for o caso.")
+                    encontrou_pista = True
+                    
+                metade = round(diferenca / 2, 2)
+                suspeitos_metade = st.session_state.df_bruto[st.session_state.df_bruto['Valor'] == metade]
+                if not suspeitos_metade.empty:
+                    st.info(f"💡 **PISTA 2:** Há um lançamento na fila de **{formatar_moeda(metade)}**. Se o sinal dele estiver invertido, ele gera exatamente essa diferença!")
+                    encontrou_pista = True
+
+                str_diff_br = f"{diferenca:.2f}".replace('.', ',')
+                suspeitos_lixo = [l for l in st.session_state.criticas if str_diff_br in l]
+                if suspeitos_lixo:
+                    st.info(f"💡 **PISTA 3:** O valor de {formatar_moeda(diferenca)} aparece nas linhas que o extrator de PDF não conseguiu ler direito (Ignorados Brutos). Adicione este valor em '➕ Adicionar Lançamento Manual'!")
+                    encontrou_pista = True
+
+                if not encontrou_pista:
+                    st.info("💡 **PISTA:** Não encontrei um culpado exato com esse valor. Essa diferença deve ser a soma de múltiplos lançamentos que faltaram ou vieram a mais.")
+            else:
+                st.success("✅ **O Saldo Final Calculado bateu perfeitamente com o Saldo Final Informado!**")
+
+        # ==========================================
+        # RESUMO DIÁRIO (BATER SALDO POR DIA)
+        # ==========================================
+        with st.expander("📅 Movimentação Dia a Dia (Bater com o Banco)", expanded=diferenca_existente):
+            st.caption("Compare a coluna 'Saldo Final do Dia' com o seu extrato bancário para achar exatamente onde a diferença começou.")
+            
+            df_daily = df_validos[['Data', 'Valor', 'Sinal']].copy()
+            
+            manuais_list = []
+            if 'lancamentos_manuais' in st.session_state and st.session_state.lancamentos_manuais:
+                for m in st.session_state.lancamentos_manuais:
+                    val_m = float(str(m['Valor']).replace('.', '').replace(',', '.'))
+                    sinal_m = '+' if m['Debito'] == conta_banco_fixa else '-'
+                    manuais_list.append({'Data': m['Data'], 'Valor': val_m, 'Sinal': sinal_m})
+                    
+            if manuais_list:
+                df_daily = pd.concat([df_daily, pd.DataFrame(manuais_list)], ignore_index=True)
+                
+            if not df_daily.empty:
+                df_daily['Data_dt'] = pd.to_datetime(df_daily['Data'], format='%d/%m/%Y', errors='coerce')
+                df_daily = df_daily.dropna(subset=['Data_dt'])
+                
+                df_daily['Entradas'] = df_daily.apply(lambda x: x['Valor'] if x['Sinal'] == '+' else 0.0, axis=1)
+                df_daily['Saidas'] = df_daily.apply(lambda x: x['Valor'] if x['Sinal'] == '-' else 0.0, axis=1)
+                
+                resumo_diario = df_daily.groupby('Data_dt').agg({'Entradas': 'sum', 'Saidas': 'sum'}).reset_index()
+                resumo_diario = resumo_diario.sort_values('Data_dt')
+                
+                resumo_diario['Movimentação Líquida'] = resumo_diario['Entradas'] - resumo_diario['Saidas']
+                resumo_diario['Saldo Final do Dia'] = saldo_anterior_informado + resumo_diario['Movimentação Líquida'].cumsum()
+                
+                resumo_diario['Data'] = resumo_diario['Data_dt'].dt.strftime('%d/%m/%Y')
+                resumo_fmt = resumo_diario[['Data', 'Entradas', 'Saidas', 'Movimentação Líquida', 'Saldo Final do Dia']].copy()
+                
+                st.dataframe(
+                    resumo_fmt.style.format({
+                        "Entradas": "R$ {:,.2f}",
+                        "Saidas": "R$ {:,.2f}",
+                        "Movimentação Líquida": "R$ {:,.2f}",
+                        "Saldo Final do Dia": "R$ {:,.2f}"
+                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("Nenhuma movimentação processada para calcular o saldo diário.")
+
+        # ==========================================
+        # PAINÉIS DE AJUSTE DE SALDO (INCLUIR / EXCLUIR)
+        # ==========================================
+        col_ajuste1, col_ajuste2 = st.columns(2)
+
+        with col_ajuste1.expander("➕ Adicionar Lançamento Manual (Ajuste de Saldo)", expanded=False):
+            st.caption("Faltou alguma coisa? Insira aqui e o saldo recalcula na hora.")
+            m_data = st.text_input("Data (DD/MM/AAAA)")
+            m_desc = st.text_input("Descrição do Lançamento")
+            m_valor = st.number_input("Valor (R$)", step=0.01, format="%.2f")
+            m_sinal = st.selectbox("Tipo", ["- (Saída)", "+ (Entrada)"])
+            m_conta = st.text_input("Conta Contrapartida")
+            
+            if st.button("Adicionar Lançamento Manual", type="primary"):
+                if m_data and m_desc and m_valor > 0 and m_conta:
+                    sinal_final = '+' if '+' in m_sinal else '-'
+                    novo_item = {
+                        'idx_original':  f"manual_{uuid.uuid4().hex}",
+                        'Debito':  conta_banco_fixa if sinal_final == '+' else m_conta,
+                        'Credito': m_conta if sinal_final == '+' else conta_banco_fixa,
+                        'Data':    m_data,
+                        'Valor':   f"{m_valor:.2f}".replace('.', ','),
+                        'Cod_Historico': "",
+                        'Historico': m_desc.upper()
+                    }
+                    if 'lancamentos_manuais' not in st.session_state:
+                        st.session_state.lancamentos_manuais = []
+                    st.session_state.lancamentos_manuais.append(novo_item)
+                    
+                    aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                    st.toast("Lançamento inserido e saldo atualizado!")
+                    st.rerun()
+                else:
+                    st.error("Preencha todos os campos corretamente.")
+
+        with col_ajuste2.expander("🗑️ Excluir Lançamento (Ajuste de Saldo)", expanded=False):
+            st.caption("Selecione lançamentos do banco (ou inseridos manualmente) que devem ser **ignorados na conta matemática e no ERP**.")
+            
+            opcoes_exclusao = []
+            if not df_validos.empty:
+                for idx, row in df_validos.iterrows():
+                    tipo_str = "Entrada" if row['Sinal'] == '+' else "Saída"
+                    opcoes_exclusao.append(f"[{idx}] {row['Data']} - {tipo_str} - R$ {row['Valor']:.2f} - {row['Descricao']}")
+                    
+            if 'lancamentos_manuais' in st.session_state and st.session_state.lancamentos_manuais:
+                for m in st.session_state.lancamentos_manuais:
+                    s_m = "+" if m['Debito'] == conta_banco_fixa else "-"
+                    tipo_str_m = "Entrada" if s_m == '+' else "Saída"
+                    opcoes_exclusao.append(f"[{m['idx_original']}] {m['Data']} - {tipo_str_m} - R$ {m['Valor']} - MANUAL: {m['Historico']}")
+
+            if opcoes_exclusao:
+                itens_para_excluir = st.multiselect("Pesquise e selecione os itens:", opcoes_exclusao)
+                
+                if st.button("❌ Confirmar Exclusão e Recalcular", type="primary"):
+                    for item in itens_para_excluir:
+                        idx_str = item.split(']')[0][1:] 
+                        
+                        if str(idx_str).startswith('manual_'):
+                            st.session_state.lancamentos_manuais = [m for m in st.session_state.lancamentos_manuais if m['idx_original'] != idx_str]
+                        else:
+                            st.session_state.linhas_ignoradas_regras.append(int(idx_str))
+                    
+                    aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                    st.toast("Lançamentos excluídos com sucesso! Saldo recalculado.")
+                    st.rerun()
+            else:
+                st.info("Não há lançamentos disponíveis para exclusão.")
+
+        # PAINEL OCULTO DE AUDITORIA
+        with st.expander("🔍 Auditoria: Ver tudo que foi Lido e Ignorado (Bruto)"):
+            st.markdown("### 📊 Dados Lidos e Capturados")
+            st.dataframe(st.session_state.df_bruto, use_container_width=True)
+            
+            st.markdown("### 🗑️ Linhas Ignoradas (Lixo)")
+            if st.session_state.criticas or st.session_state.comuns:
+                if st.session_state.criticas:
+                    st.error("Linhas descartadas que possuíam valores (Podem conter erros de leitura):")
+                    for l in list(dict.fromkeys(st.session_state.criticas)): st.code(l)
+                if st.session_state.comuns:
+                    st.info("Linhas de texto descartadas (Ruído de cabeçalho):")
+                    for l in list(dict.fromkeys(st.session_state.comuns))[:30]: st.text(l)
+            else:
+                st.write("Nenhuma linha foi descartada.")
+
+        # =========================================================================
+        # MESA DE TREINAMENTO
+        # =========================================================================
+        df_p = st.session_state.pendentes
+        fila = df_p[~df_p['idx_original'].isin(st.session_state.skipped_indices)] if not df_p.empty else pd.DataFrame()
+
+        if not fila.empty:
+            st.subheader("🎓 Mesa de Treinamento")
+
+            col_busca, col_limpar, col_total = st.columns([3, 1, 1])
+            busca_fila = col_busca.text_input("🔍 Buscar na fila (opcional)", value=st.session_state.busca_fila)
+            st.session_state.busca_fila = busca_fila
+
+            if col_limpar.button("✖ Limpar busca", disabled=not busca_fila):
+                st.session_state.busca_fila = ''
+                st.rerun()
+
+            fila_filtrada = fila
+            if busca_fila.strip():
+                termo_busca   = padronizar_texto(busca_fila.strip())
+                fila_filtrada = fila[fila['Descricao'].str.contains(re.escape(termo_busca), case=False, na=False)]
+
+            col_total.metric("📋 Pendentes", f"{len(fila_filtrada)} / {len(fila)}" if busca_fila.strip() else len(fila))
+
+            if fila_filtrada.empty:
+                st.warning("Nenhum lançamento encontrado.")
+            else:
+                item = fila_filtrada.iloc[0]
+
+                m1, m2, m3, m4, m5 = st.columns([1, 1, 1, 3, 1])
+                m1.metric("📅 Data",  item['Data'])
+                m2.metric("💰 Valor", formatar_moeda(item['Valor']))
+                m3.metric("↕️ Tipo",  "🟢 Entrada" if item['Sinal'] == '+' else "🔴 Saída")
+                m4.write(f"**Descrição Extraída:** {item['Descricao']}")
+
+                if not undo_manager.is_empty():
+                    if m5.button("↩️ Desfazer Ação", type="primary"):
+                        ultima_acao = undo_manager.pop()
+                        conn = None
+                        try:
+                            conn = get_connection()
+                            cursor = conn.cursor()
+                            t, d   = ultima_acao['type'], ultima_acao['data']
+
+                            if t in ('salvar_regra', 'ignorar_lixo'):
+                                cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (d['id_regra'],))
+                                conn.commit()
+                                aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                                st.toast("Ação desfeita!")
+                            elif t == 'pular':
+                                if d['idx'] in st.session_state.skipped_indices:
+                                    st.session_state.skipped_indices.remove(d['idx'])
+                        except mysql.connector.Error as err: st.error(f"Erro: {err}")
+                        finally:
+                            if conn: conn.close()
+                        st.rerun()
+
+                with st.expander("🛠️ Corrigir Leitura (Caso o extrator tenha confundido saldo/valor/texto)", expanded=False):
+                    st.caption("Altere os dados abaixo e clique em Salvar para corrigir este lançamento definitivamente na fila.")
+                    ce1, ce2, ce3 = st.columns([3, 1, 1])
+                    nova_desc = ce1.text_input("Descrição Correta", value=item['Descricao'], key=f"nd_{item['idx_original']}")
+                    novo_val = ce2.number_input("Valor Correto", value=float(item['Valor']), step=0.01, format="%.2f", key=f"nv_{item['idx_original']}")
+                    novo_sin = ce3.selectbox("Sinal Correto", ['+', '-'], index=0 if item['Sinal']=='+' else 1, key=f"ns_{item['idx_original']}")
+                    
+                    if st.button("💾 Aplicar Correção Permanente", type="primary"):
+                        st.session_state.df_bruto.at[item['idx_original'], 'Descricao'] = nova_desc
+                        st.session_state.df_bruto.at[item['idx_original'], 'Valor'] = float(novo_val)
+                        st.session_state.df_bruto.at[item['idx_original'], 'Sinal'] = novo_sin
+                        aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                        st.toast("Lançamento corrigido com sucesso!")
+                        st.rerun()
+
+                palavras_desc = item['Descricao'].split()
+                selecionadas  = st.pills("Selecione os termos-chave:", palavras_desc, selection_mode="multi")
+                termo_final = " ".join(selecionadas) if selecionadas else item['Descricao']
+
+                if termo_final:
+                    palavras_busca = termo_final.split()
+                    mascara = pd.Series([True] * len(df_p), index=df_p.index)
+                    for palavra in palavras_busca:
+                        mascara &= df_p['Descricao'].str.contains(re.escape(palavra), case=False, na=False)
+                    
+                    df_impactados = df_p[mascara]
+                    impacto = len(df_impactados)
+                    
+                    if impacto > 0:
+                        with st.expander(f"🎯 Visão de Raio-X: Esta regra vai automatizar {impacto} operação(ões) pendente(s).", expanded=False):
+                            st.dataframe(
+                                df_impactados[['Data', 'Descricao', 'Valor', 'Sinal']].style.format({"Valor": "R$ {:.2f}"}),
+                                use_container_width=True,
+                                hide_index=True
+                            )
+
+                with st.form("form_treino"):
+                    f1, f2, f3 = st.columns(3)
+                    contra = f1.text_input("Contrapartida (Conta Contábil)")
+                    cod_h  = f2.text_input("Cód. Hist. Alterdata (Opcional)")
+                    txt_h  = f3.text_input("Histórico Padrão (Opcional)")
+                    b1, b2, b3, b4 = st.columns(4)
+
+                    if b1.form_submit_button("✅ Salvar Regra"):
+                        if contra:
+                            conn = None
+                            try:
+                                cod_h_val = cod_h if cod_h.strip() else None
+                                txt_h_val = txt_h if txt_h.strip() else None
+
+                                conn = get_connection()
+                                cursor = conn.cursor()
+                                cursor.execute(
+                                    "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil, cod_historico_erp, historico_padrao) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                                    (id_empresa, banco_selecionado, termo_final, item['Sinal'], contra, cod_h_val, txt_h_val)
+                                )
+                                id_inserido = cursor.lastrowid
+                                conn.commit()
+                                undo_manager.push('salvar_regra', {'id_regra': id_inserido})
+                                aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                                st.success("Regra salva!")
+                            except mysql.connector.Error as err: st.error(f"Erro ao salvar regra: {err}")
+                            finally:
+                                if conn: conn.close()
+                            st.rerun()
+                        else:
+                            st.error("Preencha a conta de contrapartida.")
+
+                    if b2.form_submit_button("🗑️ Ignorar Lixo"):
+                        conn = None
+                        try:
+                            conn = get_connection()
+                            cursor = conn.cursor()
+                            cursor.execute(
+                                "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil) VALUES (%s,%s,%s,%s,%s)",
+                                (id_empresa, banco_selecionado, termo_final, item['Sinal'], 'IGNORAR')
+                            )
+                            id_inserido = cursor.lastrowid
+                            conn.commit()
+                            undo_manager.push('ignorar_lixo', {'id_regra': id_inserido})
+                            aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                            st.success("Lançamento ignorado!")
+                        except mysql.connector.Error as err: st.error(f"Erro ao ignorar: {err}")
+                        finally:
+                            if conn: conn.close()
+                        st.rerun()
+
+                    if b3.form_submit_button("⏭️ Pular"):
+                        st.session_state.skipped_indices.append(item['idx_original'])
+                        undo_manager.push('pular', {'idx': item['idx_original']})
+                        st.rerun()
+
+                    if b4.form_submit_button("🔄 Resetar Fila"):
+                        st.session_state.skipped_indices = []
+                        st.session_state.busca_fila      = ''
+                        undo_manager.clear()
+                        st.rerun()
         else:
-            st.write("Nenhuma linha foi descartada.")
+            if st.session_state.inicio_operacao is not None and st.session_state.tempo_conclusao is None:
+                st.session_state.tempo_conclusao = time.time() - st.session_state.inicio_operacao
+                
+            st.success("🎉 Todos os lançamentos pendentes foram mapeados! Exportação liberada.")
+            
+            if st.session_state.tempo_conclusao is not None:
+                minutos = int(st.session_state.tempo_conclusao // 60)
+                segundos = int(st.session_state.tempo_conclusao % 60)
+                st.info(f"⏱️ **Produtividade:** Operação concluída em {minutos} minuto(s) e {segundos} segundo(s).")
 
-    # =========================================================================
-    # MESA DE TREINAMENTO
-    # =========================================================================
-    df_p = st.session_state.pendentes
-    fila = df_p[~df_p['idx_original'].isin(st.session_state.skipped_indices)] if not df_p.empty else pd.DataFrame()
+            if st.session_state.prontos:
+                df_prontos = pd.DataFrame(st.session_state.prontos)
+                
+                if 'idx_original' in df_prontos.columns:
+                    df_prontos = df_prontos.drop(columns=['idx_original'])
+                    
+                if 'Debito' in df_prontos.columns:
+                    idx_debito = df_prontos.columns.get_loc('Debito')
+                    df_prontos.insert(idx_debito, ' ', '')
+                
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df_prontos.to_excel(writer, index=False, sheet_name='Conciliacao')
+                
+                st.download_button(
+                    label="📥 BAIXAR EXCEL PARA ERP",
+                    data=output.getvalue(),
+                    file_name=f"conciliacao_{empresa_data['apelido_unidade']}_{banco_selecionado}_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
-    if not fila.empty:
-        st.subheader("🎓 Mesa de Treinamento")
+    # =============================================================================
+    # GERENCIAMENTO DE REGRAS E CONTAS
+    # =============================================================================
+    st.divider()
+    with st.expander("📚 Gerenciar Regras Cadastradas", expanded=False):
+        conn = None
+        try:
+            conn = get_connection()
+            regras_v = pd.read_sql(
+                "SELECT * FROM tb_extratos_regras WHERE id_empresa = %s AND banco_nome = %s ORDER BY id DESC",
+                conn, params=(id_empresa, banco_selecionado)
+            )
 
-        col_busca, col_limpar, col_total = st.columns([3, 1, 1])
-        busca_fila = col_busca.text_input("🔍 Buscar na fila (opcional)", value=st.session_state.busca_fila)
-        st.session_state.busca_fila = busca_fila
+            busca_regra = st.text_input("🔍 Buscar por termo chave ou conta contábil...", key="busca_regra")
+            if busca_regra:
+                regras_v = regras_v[
+                    regras_v['termo_chave'].str.contains(busca_regra, case=False, na=False) |
+                    regras_v['conta_contabil'].str.contains(busca_regra, case=False, na=False)
+                ]
 
-        if col_limpar.button("✖ Limpar busca", disabled=not busca_fila):
-            st.session_state.busca_fila = ''
-            st.rerun()
+            if not regras_v.empty:
+                for _, r in regras_v.iterrows():
+                    col_r = st.columns([3, 2, 1, 1])
+                    col_r[0].write(f"**{r['termo_chave']}**")
+                    col_r[1].write(f"Conta: {r['conta_contabil']} ({r['sinal_esperado']})")
+                    if col_r[2].button("✏️", key=f"e_regra_{r['id']}"):
+                        st.session_state.editando_regra_id = r['id']
+                        st.rerun()
+                    if col_r[3].button("🗑️", key=f"d_regra_{r['id']}"):
+                        cursor = conn.cursor()
+                        cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (int(r['id']),))
+                        conn.commit()
+                        aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                        st.toast("Regra deletada!")
+                        st.rerun()
+            else:
+                st.info("Nenhuma regra encontrada para este banco e empresa.")
+        except mysql.connector.Error as err:
+            st.error(f"Erro ao carregar regras: {err}")
+        finally:
+            if conn: conn.close()
 
-        fila_filtrada = fila
-        if busca_fila.strip():
-            termo_busca   = padronizar_texto(busca_fila.strip())
-            fila_filtrada = fila[fila['Descricao'].str.contains(re.escape(termo_busca), case=False, na=False)]
+        if st.session_state.editando_regra_id and not regras_v.empty:
+            linha_editar = regras_v[regras_v['id'] == st.session_state.editando_regra_id]
+            if not linha_editar.empty:
+                regra_para_editar = linha_editar.iloc[0]
+                st.subheader(f"Editar Regra ID: {regra_para_editar['id']}")
+                with st.form(key=f"form_editar_regra_{regra_para_editar['id']}"):
+                    col_er1, col_er2 = st.columns(2)
+                    novo_termo    = col_er1.text_input("Termo Chave",    value=regra_para_editar['termo_chave'])
+                    nova_conta    = col_er2.text_input("Conta Contábil", value=regra_para_editar['conta_contabil'])
+                    novo_sinal    = st.selectbox("Sinal", ['+', '-'], index=0 if regra_para_editar['sinal_esperado'] == '+' else 1)
+                    novo_cod_hist = st.text_input("Cód. Histórico Alterdata", value=str(regra_para_editar.get('cod_historico_erp', '') or ''))
+                    novo_hist     = st.text_area("Histórico Padrão",    value=str(regra_para_editar.get('historico_padrao', '') or ''))
+                    if st.form_submit_button("Salvar Edição"):
+                        conn = None
+                        try:
+                            novo_cod_hist_val = novo_cod_hist if novo_cod_hist.strip() else None
+                            novo_hist_val = novo_hist if novo_hist.strip() else None
+                            
+                            conn = get_connection()
+                            cursor = conn.cursor()
+                            cursor.execute(
+                                "UPDATE tb_extratos_regras SET termo_chave=%s, conta_contabil=%s, sinal_esperado=%s, cod_historico_erp=%s, historico_padrao=%s WHERE id=%s",
+                                (novo_termo, nova_conta, novo_sinal, novo_cod_hist_val, novo_hist_val, regra_para_editar['id'])
+                            )
+                            conn.commit()
+                            st.session_state.editando_regra_id = None
+                            aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                            st.success("Regra atualizada!")
+                        except mysql.connector.Error as err: st.error(f"Erro ao atualizar: {err}")
+                        finally:
+                            if conn: conn.close()
+                        st.rerun()
+                    if st.form_submit_button("Cancelar"):
+                        st.session_state.editando_regra_id = None
+                        st.rerun()
 
-        col_total.metric("📋 Pendentes", f"{len(fila_filtrada)} / {len(fila)}" if busca_fila.strip() else len(fila))
+    st.divider()
+    with st.expander("📊 Gerenciar Contas Contábeis por Banco", expanded=False):
+        df_contas_banco = carregar_contas_por_banco(id_empresa)
 
-        if fila_filtrada.empty:
-            st.warning("Nenhum lançamento encontrado.")
-        else:
-            item = fila_filtrada.iloc[0]
-
-            m1, m2, m3, m4, m5 = st.columns([1, 1, 1, 3, 1])
-            m1.metric("📅 Data",  item['Data'])
-            m2.metric("💰 Valor", formatar_moeda(item['Valor']))
-            m3.metric("↕️ Tipo",  "🟢 Entrada" if item['Sinal'] == '+' else "🔴 Saída")
-            m4.write(f"**Descrição Extraída:** {item['Descricao']}")
-
-            if not undo_manager.is_empty():
-                if m5.button("↩️ Desfazer Ação", type="primary"):
-                    ultima_acao = undo_manager.pop()
+        st.subheader("Contas Cadastradas")
+        if not df_contas_banco.empty:
+            for _, c in df_contas_banco.iterrows():
+                col_c = st.columns([2, 2, 1, 1])
+                col_c[0].write(f"**Banco:** {c['nome_banco']}")
+                col_c[1].write(f"**Conta Contábil:** {c['conta_contabil']}")
+                if col_c[2].button("✏️", key=f"e_conta_{c['id']}"):
+                    st.session_state.editando_conta_banco_id = c['id']
+                    st.rerun()
+                if col_c[3].button("🗑️", key=f"d_conta_{c['id']}"):
                     conn = None
                     try:
                         conn = get_connection()
                         cursor = conn.cursor()
-                        t, d   = ultima_acao['type'], ultima_acao['data']
-
-                        if t in ('salvar_regra', 'ignorar_lixo'):
-                            cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (d['id_regra'],))
-                            conn.commit()
-                            aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                            st.toast("Ação desfeita!")
-                        elif t == 'pular':
-                            if d['idx'] in st.session_state.skipped_indices:
-                                st.session_state.skipped_indices.remove(d['idx'])
+                        cursor.execute("DELETE FROM empresa_banco_contas WHERE id = %s", (int(c['id']),))
+                        conn.commit()
+                        st.toast("Conta deletada!")
                     except mysql.connector.Error as err: st.error(f"Erro: {err}")
                     finally:
                         if conn: conn.close()
                     st.rerun()
 
-            with st.expander("🛠️ Corrigir Leitura (Caso o extrator tenha confundido saldo/valor/texto)", expanded=False):
-                st.caption("Altere os dados abaixo e clique em Salvar para corrigir este lançamento definitivamente na fila.")
-                ce1, ce2, ce3 = st.columns([3, 1, 1])
-                nova_desc = ce1.text_input("Descrição Correta", value=item['Descricao'], key=f"nd_{item['idx_original']}")
-                novo_val = ce2.number_input("Valor Correto", value=float(item['Valor']), step=0.01, format="%.2f", key=f"nv_{item['idx_original']}")
-                novo_sin = ce3.selectbox("Sinal Correto", ['+', '-'], index=0 if item['Sinal']=='+' else 1, key=f"ns_{item['idx_original']}")
-                
-                if st.button("💾 Aplicar Correção Permanente", type="primary"):
-                    st.session_state.df_bruto.at[item['idx_original'], 'Descricao'] = nova_desc
-                    st.session_state.df_bruto.at[item['idx_original'], 'Valor'] = float(novo_val)
-                    st.session_state.df_bruto.at[item['idx_original'], 'Sinal'] = novo_sin
-                    aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                    st.toast("Lançamento corrigido com sucesso!")
-                    st.rerun()
+        st.subheader("Adicionar / Editar Conta por Banco")
+        with st.form("form_conta_banco"):
+            current_nome_banco     = ""
+            current_conta_contabil = ""
+            if st.session_state.editando_conta_banco_id and not df_contas_banco.empty:
+                linha_conta = df_contas_banco[df_contas_banco['id'] == st.session_state.editando_conta_banco_id]
+                if not linha_conta.empty:
+                    current_nome_banco     = linha_conta.iloc[0]['nome_banco']
+                    current_conta_contabil = linha_conta.iloc[0]['conta_contabil']
 
-            palavras_desc = item['Descricao'].split()
-            selecionadas  = st.pills("Selecione os termos-chave:", palavras_desc, selection_mode="multi")
-            termo_final = " ".join(selecionadas) if selecionadas else item['Descricao']
+            banco_options = sorted(list(BANCOS_KEYWORDS.keys()))
+            banco_idx     = banco_options.index(current_nome_banco) if current_nome_banco in banco_options else 0
 
-            if termo_final:
-                palavras_busca = termo_final.split()
-                mascara = pd.Series([True] * len(df_p), index=df_p.index)
-                for palavra in palavras_busca:
-                    mascara &= df_p['Descricao'].str.contains(re.escape(palavra), case=False, na=False)
-                
-                df_impactados = df_p[mascara]
-                impacto = len(df_impactados)
-                
-                if impacto > 0:
-                    with st.expander(f"🎯 Visão de Raio-X: Esta regra vai automatizar {impacto} operação(ões) pendente(s).", expanded=False):
-                        st.dataframe(
-                            df_impactados[['Data', 'Descricao', 'Valor', 'Sinal']].style.format({"Valor": "R$ {:.2f}"}),
-                            use_container_width=True,
-                            hide_index=True
-                        )
+            novo_nome_banco     = st.selectbox("Nome do Banco", banco_options, index=banco_idx)
+            nova_conta_contabil = st.text_input("Conta Contábil", value=current_conta_contabil)
 
-            with st.form("form_treino"):
-                f1, f2, f3 = st.columns(3)
-                contra = f1.text_input("Contrapartida (Conta Contábil)")
-                cod_h  = f2.text_input("Cód. Hist. Alterdata (Opcional)")
-                txt_h  = f3.text_input("Histórico Padrão (Opcional)")
-                b1, b2, b3, b4 = st.columns(4)
-
-                if b1.form_submit_button("✅ Salvar Regra"):
-                    if contra:
-                        conn = None
-                        try:
-                            cod_h_val = cod_h if cod_h.strip() else None
-                            txt_h_val = txt_h if txt_h.strip() else None
-
-                            conn = get_connection()
-                            cursor = conn.cursor()
+            col_cb1, col_cb2 = st.columns(2)
+            if col_cb1.form_submit_button("Salvar Conta"):
+                if novo_nome_banco and nova_conta_contabil:
+                    conn = None
+                    try:
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        if st.session_state.editando_conta_banco_id:
                             cursor.execute(
-                                "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil, cod_historico_erp, historico_padrao) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                                (id_empresa, banco_selecionado, termo_final, item['Sinal'], contra, cod_h_val, txt_h_val)
+                                "UPDATE empresa_banco_contas SET nome_banco=%s, conta_contabil=%s WHERE id=%s",
+                                (novo_nome_banco, nova_conta_contabil, st.session_state.editando_conta_banco_id)
                             )
-                            id_inserido = cursor.lastrowid
-                            conn.commit()
-                            undo_manager.push('salvar_regra', {'id_regra': id_inserido})
-                            aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                            st.success("Regra salva!")
-                        except mysql.connector.Error as err: st.error(f"Erro ao salvar regra: {err}")
-                        finally:
-                            if conn: conn.close()
-                        st.rerun()
-                    else:
-                        st.error("Preencha a conta de contrapartida.")
-
-                if b2.form_submit_button("🗑️ Ignorar Lixo"):
-                    conn = None
-                    try:
-                        conn = get_connection()
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "INSERT INTO tb_extratos_regras (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil) VALUES (%s,%s,%s,%s,%s)",
-                            (id_empresa, banco_selecionado, termo_final, item['Sinal'], 'IGNORAR')
-                        )
-                        id_inserido = cursor.lastrowid
+                            st.success("Conta atualizada!")
+                        else:
+                            cursor.execute(
+                                "INSERT INTO empresa_banco_contas (id_empresa, nome_banco, conta_contabil) VALUES (%s,%s,%s)",
+                                (id_empresa, novo_nome_banco, nova_conta_contabil)
+                            )
+                            st.success("Conta adicionada!")
                         conn.commit()
-                        undo_manager.push('ignorar_lixo', {'id_regra': id_inserido})
-                        aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                        st.success("Lançamento ignorado!")
-                    except mysql.connector.Error as err: st.error(f"Erro ao ignorar: {err}")
+                        st.session_state.editando_conta_banco_id = None
+                    except mysql.connector.Error as err: st.error(f"Erro: {err}")
                     finally:
                         if conn: conn.close()
                     st.rerun()
+                else:
+                    st.error("Preencha todos os campos.")
 
-                if b3.form_submit_button("⏭️ Pular"):
-                    st.session_state.skipped_indices.append(item['idx_original'])
-                    undo_manager.push('pular', {'idx': item['idx_original']})
-                    st.rerun()
-
-                if b4.form_submit_button("🔄 Resetar Fila"):
-                    st.session_state.skipped_indices = []
-                    st.session_state.busca_fila      = ''
-                    undo_manager.clear()
-                    st.rerun()
-    else:
-        if st.session_state.inicio_operacao is not None and st.session_state.tempo_conclusao is None:
-            st.session_state.tempo_conclusao = time.time() - st.session_state.inicio_operacao
-            
-        st.success("🎉 Todos os lançamentos pendentes foram mapeados! Exportação liberada.")
-        
-        if st.session_state.tempo_conclusao is not None:
-            minutos = int(st.session_state.tempo_conclusao // 60)
-            segundos = int(st.session_state.tempo_conclusao % 60)
-            st.info(f"⏱️ **Produtividade:** Operação concluída em {minutos} minuto(s) e {segundos} segundo(s).")
-
-        if st.session_state.prontos:
-            df_prontos = pd.DataFrame(st.session_state.prontos)
-            
-            if 'idx_original' in df_prontos.columns:
-                df_prontos = df_prontos.drop(columns=['idx_original'])
-                
-            if 'Debito' in df_prontos.columns:
-                idx_debito = df_prontos.columns.get_loc('Debito')
-                df_prontos.insert(idx_debito, ' ', '')
-            
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_prontos.to_excel(writer, index=False, sheet_name='Conciliacao')
-            
-            st.download_button(
-                label="📥 BAIXAR EXCEL PARA ERP",
-                data=output.getvalue(),
-                file_name=f"conciliacao_{empresa_data['apelido_unidade']}_{banco_selecionado}_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-# =============================================================================
-# GERENCIAMENTO DE REGRAS E CONTAS
-# =============================================================================
-st.divider()
-with st.expander("📚 Gerenciar Regras Cadastradas", expanded=False):
-    conn = None
-    try:
-        conn = get_connection()
-        regras_v = pd.read_sql(
-            "SELECT * FROM tb_extratos_regras WHERE id_empresa = %s AND banco_nome = %s ORDER BY id DESC",
-            conn, params=(id_empresa, banco_selecionado)
-        )
-
-        busca_regra = st.text_input("🔍 Buscar por termo chave ou conta contábil...", key="busca_regra")
-        if busca_regra:
-            regras_v = regras_v[
-                regras_v['termo_chave'].str.contains(busca_regra, case=False, na=False) |
-                regras_v['conta_contabil'].str.contains(busca_regra, case=False, na=False)
-            ]
-
-        if not regras_v.empty:
-            for _, r in regras_v.iterrows():
-                col_r = st.columns([3, 2, 1, 1])
-                col_r[0].write(f"**{r['termo_chave']}**")
-                col_r[1].write(f"Conta: {r['conta_contabil']} ({r['sinal_esperado']})")
-                if col_r[2].button("✏️", key=f"e_regra_{r['id']}"):
-                    st.session_state.editando_regra_id = r['id']
-                    st.rerun()
-                if col_r[3].button("🗑️", key=f"d_regra_{r['id']}"):
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (int(r['id']),))
-                    conn.commit()
-                    aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                    st.toast("Regra deletada!")
-                    st.rerun()
-        else:
-            st.info("Nenhuma regra encontrada para este banco e empresa.")
-    except mysql.connector.Error as err:
-        st.error(f"Erro ao carregar regras: {err}")
-    finally:
-        if conn: conn.close()
-
-    if st.session_state.editando_regra_id and not regras_v.empty:
-        linha_editar = regras_v[regras_v['id'] == st.session_state.editando_regra_id]
-        if not linha_editar.empty:
-            regra_para_editar = linha_editar.iloc[0]
-            st.subheader(f"Editar Regra ID: {regra_para_editar['id']}")
-            with st.form(key=f"form_editar_regra_{regra_para_editar['id']}"):
-                col_er1, col_er2 = st.columns(2)
-                novo_termo    = col_er1.text_input("Termo Chave",    value=regra_para_editar['termo_chave'])
-                nova_conta    = col_er2.text_input("Conta Contábil", value=regra_para_editar['conta_contabil'])
-                novo_sinal    = st.selectbox("Sinal", ['+', '-'], index=0 if regra_para_editar['sinal_esperado'] == '+' else 1)
-                novo_cod_hist = st.text_input("Cód. Histórico Alterdata", value=str(regra_para_editar.get('cod_historico_erp', '') or ''))
-                novo_hist     = st.text_area("Histórico Padrão",    value=str(regra_para_editar.get('historico_padrao', '') or ''))
-                if st.form_submit_button("Salvar Edição"):
-                    conn = None
-                    try:
-                        novo_cod_hist_val = novo_cod_hist if novo_cod_hist.strip() else None
-                        novo_hist_val = novo_hist if novo_hist.strip() else None
-                        
-                        conn = get_connection()
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "UPDATE tb_extratos_regras SET termo_chave=%s, conta_contabil=%s, sinal_esperado=%s, cod_historico_erp=%s, historico_padrao=%s WHERE id=%s",
-                            (novo_termo, nova_conta, novo_sinal, novo_cod_hist_val, novo_hist_val, regra_para_editar['id'])
-                        )
-                        conn.commit()
-                        st.session_state.editando_regra_id = None
-                        aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                        st.success("Regra atualizada!")
-                    except mysql.connector.Error as err: st.error(f"Erro ao atualizar: {err}")
-                    finally:
-                        if conn: conn.close()
-                    st.rerun()
-                if st.form_submit_button("Cancelar"):
-                    st.session_state.editando_regra_id = None
-                    st.rerun()
-
-st.divider()
-with st.expander("📊 Gerenciar Contas Contábeis por Banco", expanded=False):
-    df_contas_banco = carregar_contas_por_banco(id_empresa)
-
-    st.subheader("Contas Cadastradas")
-    if not df_contas_banco.empty:
-        for _, c in df_contas_banco.iterrows():
-            col_c = st.columns([2, 2, 1, 1])
-            col_c[0].write(f"**Banco:** {c['nome_banco']}")
-            col_c[1].write(f"**Conta Contábil:** {c['conta_contabil']}")
-            if col_c[2].button("✏️", key=f"e_conta_{c['id']}"):
-                st.session_state.editando_conta_banco_id = c['id']
+            if col_cb2.form_submit_button("Cancelar"):
+                st.session_state.editando_conta_banco_id = None
                 st.rerun()
-            if col_c[3].button("🗑️", key=f"d_conta_{c['id']}"):
-                conn = None
-                try:
-                    conn = get_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM empresa_banco_contas WHERE id = %s", (int(c['id']),))
-                    conn.commit()
-                    st.toast("Conta deletada!")
-                except mysql.connector.Error as err: st.error(f"Erro: {err}")
-                finally:
-                    if conn: conn.close()
-                st.rerun()
-
-    st.subheader("Adicionar / Editar Conta por Banco")
-    with st.form("form_conta_banco"):
-        current_nome_banco     = ""
-        current_conta_contabil = ""
-        if st.session_state.editando_conta_banco_id and not df_contas_banco.empty:
-            linha_conta = df_contas_banco[df_contas_banco['id'] == st.session_state.editando_conta_banco_id]
-            if not linha_conta.empty:
-                current_nome_banco     = linha_conta.iloc[0]['nome_banco']
-                current_conta_contabil = linha_conta.iloc[0]['conta_contabil']
-
-        banco_options = sorted(list(BANCOS_KEYWORDS.keys()))
-        banco_idx     = banco_options.index(current_nome_banco) if current_nome_banco in banco_options else 0
-
-        novo_nome_banco     = st.selectbox("Nome do Banco", banco_options, index=banco_idx)
-        nova_conta_contabil = st.text_input("Conta Contábil", value=current_conta_contabil)
-
-        col_cb1, col_cb2 = st.columns(2)
-        if col_cb1.form_submit_button("Salvar Conta"):
-            if novo_nome_banco and nova_conta_contabil:
-                conn = None
-                try:
-                    conn = get_connection()
-                    cursor = conn.cursor()
-                    if st.session_state.editando_conta_banco_id:
-                        cursor.execute(
-                            "UPDATE empresa_banco_contas SET nome_banco=%s, conta_contabil=%s WHERE id=%s",
-                            (novo_nome_banco, nova_conta_contabil, st.session_state.editando_conta_banco_id)
-                        )
-                        st.success("Conta atualizada!")
-                    else:
-                        cursor.execute(
-                            "INSERT INTO empresa_banco_contas (id_empresa, nome_banco, conta_contabil) VALUES (%s,%s,%s)",
-                            (id_empresa, novo_nome_banco, nova_conta_contabil)
-                        )
-                        st.success("Conta adicionada!")
-                    conn.commit()
-                    st.session_state.editando_conta_banco_id = None
-                except mysql.connector.Error as err: st.error(f"Erro: {err}")
-                finally:
-                    if conn: conn.close()
-                st.rerun()
-            else:
-                st.error("Preencha todos os campos.")
-
-        if col_cb2.form_submit_button("Cancelar"):
-            st.session_state.editando_conta_banco_id = None
-            st.rerun()
