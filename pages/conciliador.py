@@ -1459,6 +1459,7 @@ with tab_conciliacao:
                     novo_sinal    = st.selectbox("Sinal", ['+', '-'], index=0 if regra_para_editar['sinal_esperado'] == '+' else 1)
                     novo_cod_hist = st.text_input("Cód. Histórico Alterdata", value=str(regra_para_editar.get('cod_historico_erp', '') or ''))
                     novo_hist     = st.text_area("Histórico Padrão",    value=str(regra_para_editar.get('historico_padrao', '') or ''))
+                    
                     if st.form_submit_button("Salvar Edição"):
                         conn = None
                         try:
@@ -1480,9 +1481,105 @@ with tab_conciliacao:
                             if conn: conn.close()
                         time.sleep(0.5)
                         st.rerun()
+                        
                     if st.form_submit_button("Cancelar"):
                         st.session_state.editando_regra_id = None
                         st.rerun()
+
+        # =====================================================================
+        # MÓDULO DE CLONAGEM DE INTELIGÊNCIA (DE/PARA ENTRE EMPRESAS)
+        # =====================================================================
+        st.markdown("---")
+        st.subheader("🔄 Importar Inteligência de Outros Clientes")
+        st.caption("Copie as regras de outro cliente para o banco atual. Ajuste as contas contábeis na tabela abaixo antes de salvar.")
+
+        # Seleciona empresas para importar (excluindo a atual)
+        empresas_origem = df_empresas[df_empresas['id'] != id_empresa]
+        
+        if not empresas_origem.empty:
+            col_imp1, col_imp2 = st.columns([3, 1])
+            empresa_origem_sel = col_imp1.selectbox("Importar regras da empresa:", empresas_origem['display_nome'])
+            
+            if col_imp2.button("🔍 Carregar Regras"):
+                id_origem = int(empresas_origem[empresas_origem['display_nome'] == empresa_origem_sel].iloc[0]['id'])
+                
+                conn = None
+                try:
+                    conn = get_connection()
+                    regras_importadas = pd.read_sql(
+                        "SELECT termo_chave, sinal_esperado, conta_contabil, cod_historico_erp, historico_padrao FROM tb_extratos_regras WHERE id_empresa = %s AND banco_nome = %s",
+                        conn, params=(id_origem, banco_selecionado)
+                    )
+                    if not regras_importadas.empty:
+                        st.session_state.regras_em_edicao = regras_importadas
+                        st.success(f"{len(regras_importadas)} regras carregadas! Revise abaixo:")
+                    else:
+                        st.warning("A empresa selecionada não possui regras cadastradas para este banco.")
+                        if 'regras_em_edicao' in st.session_state:
+                            del st.session_state['regras_em_edicao']
+                except mysql.connector.Error as err:
+                    st.error(f"Erro ao buscar regras: {err}")
+                finally:
+                    if conn: conn.close()
+
+            # Se existirem regras carregadas na memória, exibe o editor interativo
+            if 'regras_em_edicao' in st.session_state and not st.session_state.regras_em_edicao.empty:
+                st.markdown("#### 📝 Tabela de Revisão (Sandbox)")
+                
+                # O data_editor permite alterar os dados diretamente na tela
+                df_editado = st.data_editor(
+                    st.session_state.regras_em_edicao,
+                    column_config={
+                        "termo_chave": st.column_config.TextColumn("Termo Chave", disabled=True),
+                        "sinal_esperado": st.column_config.TextColumn("Sinal", disabled=True),
+                        "conta_contabil": st.column_config.TextColumn("Conta Contábil (Edite se necessário)"),
+                        "cod_historico_erp": st.column_config.TextColumn("Cód. Histórico"),
+                        "historico_padrao": st.column_config.TextColumn("Histórico Padrão")
+                    },
+                    use_container_width=True,
+                    hide_index=True,
+                    key="editor_clonagem"
+                )
+
+                if st.button("📥 Salvar Regras no Cliente Atual", type="primary"):
+                    conn = None
+                    try:
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        
+                        regras_inseridas = 0
+                        # Verifica as regras existentes para evitar duplicidade exata de termo
+                        regras_existentes_list = regras_v['termo_chave'].tolist() if not regras_v.empty else []
+
+                        for _, row in df_editado.iterrows():
+                            termo = row['termo_chave']
+                            if termo not in regras_existentes_list:
+                                cursor.execute(
+                                    """INSERT INTO tb_extratos_regras 
+                                       (id_empresa, banco_nome, termo_chave, sinal_esperado, conta_contabil, cod_historico_erp, historico_padrao) 
+                                       VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                                    (
+                                        id_empresa, 
+                                        banco_selecionado, 
+                                        termo, 
+                                        row['sinal_esperado'], 
+                                        row['conta_contabil'], 
+                                        row['cod_historico_erp'] if pd.notna(row['cod_historico_erp']) else None, 
+                                        row['historico_padrao'] if pd.notna(row['historico_padrao']) else None
+                                    )
+                                )
+                                regras_inseridas += 1
+
+                        conn.commit()
+                        del st.session_state['regras_em_edicao'] # Limpa a memória após salvar
+                        st.success(f"Operação concluída! {regras_inseridas} novas regras foram incorporadas ao cliente atual.")
+                        time.sleep(1.5)
+                        st.rerun()
+                        
+                    except mysql.connector.Error as err:
+                        st.error(f"Erro ao salvar regras clonadas: {err}")
+                    finally:
+                        if conn: conn.close()
 
     with st.expander("➕ Cadastrar Novo Banco Oficial", expanded=False):
         with st.form("form_novo_banco"):
