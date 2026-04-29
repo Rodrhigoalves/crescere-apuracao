@@ -284,10 +284,6 @@ def ler_planilha_robusto(file_bytes, nome_arquivo):
 # LEITOR UNIVERSAL POWER QUERY (Lê formatos de 3 colunas limpas automaticamente)
 # =============================================================================
 def extrair_modelo_power_query(df_full):
-    """
-    Identifica automaticamente se a planilha já está no formato tratado do Power Query
-    (Coluna 0 = Data, Coluna 1 = Descrição, Coluna 2 = Valor).
-    """
     if df_full.empty or df_full.shape[1] < 3:
         return pd.DataFrame()
         
@@ -299,16 +295,14 @@ def extrair_modelo_power_query(df_full):
         
         data_val = converter_data_excel(data_raw)
         if not data_val:
-            continue # Não é uma linha de dados válida
+            continue
             
         desc_limpa = padronizar_texto(desc_raw)
         if eh_linha_de_saldo(desc_limpa) or not desc_limpa or desc_limpa == 'NAN':
             continue
             
-        # Verifica se o valor contém o asterisco de ressalva
         is_asterisk = '*' in val_raw
         
-        # Limpeza agressiva mantendo números, vírgulas, pontos e o sinal de menos
         v_clean = re.sub(r'[^\d.,-]', '', val_raw.replace('*', ''))
         if not v_clean:
             continue
@@ -983,7 +977,7 @@ with tab_conciliacao:
 
                 if not st.session_state.df_bruto.empty:
                     aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                    st.success("Processamento concluído!")
+                    st.success("Processamento concluído com sucesso!")
                     time.sleep(1)
                     st.rerun()
                 elif houve_falha_pdf:
@@ -1035,6 +1029,8 @@ with tab_conciliacao:
                         st.session_state.df_bruto = df_temp
                         # Roda as regras novamente agora que as ressalvas foram decididas
                         aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                        st.success("Ressalvas atualizadas com sucesso!")
+                        time.sleep(1)
                         st.rerun()
             
             # Trava a execução da página aqui para forçar a resolução
@@ -1065,6 +1061,14 @@ with tab_conciliacao:
         c2.metric("🟢 Entradas Válidas",      formatar_moeda(total_e))
         c3.metric("🔴 Saídas Válidas",        formatar_moeda(total_s))
         c4.metric("⚖️ Saldo Final Calculado", formatar_moeda(saldo_final_calculado))
+        
+        # --- MENSAGEM VISUAL DE SUCESSO/DIFERENÇA (RESTAURADA) ---
+        if saldo_final_informado != 0.0:
+            if abs(saldo_final_calculado - saldo_final_informado) < 0.01:
+                st.success(f"✅ SUCESSO! O Saldo Final Calculado ({formatar_moeda(saldo_final_calculado)}) bateu perfeitamente com o Saldo Final Informado!")
+            else:
+                diferenca = saldo_final_calculado - saldo_final_informado
+                st.error(f"⚠️ DIVERGÊNCIA! O Saldo Calculado ({formatar_moeda(saldo_final_calculado)}) não fechou com o Saldo Informado ({formatar_moeda(saldo_final_informado)}). Diferença a investigar: {formatar_moeda(diferenca)}.")
 
         with st.expander("➕ Adicionar / Excluir Lançamentos Manuais (Ajuste de Saldo)", expanded=False):
             st.info("Utilize as opções abaixo se for necessário compensar alguma diferença detectada pelo Detetive.")
@@ -1091,14 +1095,19 @@ with tab_conciliacao:
                         if 'lancamentos_manuais' not in st.session_state: st.session_state.lancamentos_manuais = []
                         st.session_state.lancamentos_manuais.append(novo_item)
                         aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                        st.success("Lançamento manual adicionado!")
+                        time.sleep(1)
                         st.rerun()
 
             with col_ajuste2:
                 st.write("**Excluir**")
                 opcoes_exclusao = []
+                # --- HISTÓRICO/DESCRIÇÃO RESTAURADO NA LISTA DE EXCLUSÃO ---
                 for idx, row in df_validos.iterrows():
-                    opcoes_exclusao.append(f"[{idx}] {row['Data']} - R$ {row['Valor']:.2f}")
+                    opcoes_exclusao.append(f"[{idx}] {row['Data']} - {row['Descricao']} - R$ {row['Valor']:.2f}")
+                
                 itens_para_excluir = st.multiselect("Selecione os itens:", opcoes_exclusao)
+                
                 if st.button("Excluir e Recalcular"):
                     for item in itens_para_excluir:
                         idx_str = item.split(']')[0][1:] 
@@ -1107,6 +1116,8 @@ with tab_conciliacao:
                         else:
                             st.session_state.linhas_ignoradas_regras.append(int(idx_str))
                     aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                    st.success("Lançamentos excluídos e saldo recalculado!")
+                    time.sleep(1)
                     st.rerun()
 
         # =========================================================================
@@ -1157,7 +1168,7 @@ with tab_conciliacao:
                                 cursor.execute("DELETE FROM tb_extratos_regras WHERE id = %s", (d['id_regra'],))
                                 conn.commit()
                                 aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                                st.toast("Ação desfeita!")
+                                st.toast("Ação desfeita com sucesso!")
                             elif t == 'pular':
                                 if d['idx'] in st.session_state.skipped_indices:
                                     st.session_state.skipped_indices.remove(d['idx'])
@@ -1209,10 +1220,11 @@ with tab_conciliacao:
                                 conn.commit()
                                 undo_manager.push('salvar_regra', {'id_regra': id_inserido})
                                 aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                                st.success("Regra salva!")
+                                st.success("Regra salva com sucesso!")
                             except mysql.connector.Error as err: st.error(f"Erro ao salvar regra: {err}")
                             finally:
                                 if conn: conn.close()
+                            time.sleep(0.5)
                             st.rerun()
                         else: st.error("Preencha a conta de contrapartida.")
 
@@ -1229,10 +1241,11 @@ with tab_conciliacao:
                             conn.commit()
                             undo_manager.push('ignorar_lixo', {'id_regra': id_inserido})
                             aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
-                            st.success("Lançamento ignorado!")
+                            st.success("Lançamento ignorado e regra salva!")
                         except mysql.connector.Error as err: st.error(f"Erro ao ignorar: {err}")
                         finally:
                             if conn: conn.close()
+                        time.sleep(0.5)
                         st.rerun()
 
                     if b3.form_submit_button("⏭️ Pular"):
@@ -1308,7 +1321,7 @@ with tab_conciliacao:
                         cursor = conn.cursor()
                         cursor.execute("DELETE FROM empresa_banco_contas WHERE id = %s", (int(c['id']),))
                         conn.commit()
-                        st.toast("Conta deletada!")
+                        st.toast("Conta deletada com sucesso!")
                     except mysql.connector.Error as err: st.error(f"Erro: {err}")
                     finally:
                         if conn: conn.close()
@@ -1346,12 +1359,13 @@ with tab_conciliacao:
                                 "INSERT INTO empresa_banco_contas (id_empresa, nome_banco, conta_contabil) VALUES (%s,%s,%s)",
                                 (id_empresa, novo_nome_banco, nova_conta_contabil)
                             )
-                            st.success("Conta adicionada!")
+                            st.success("Conta adicionada com sucesso!")
                         conn.commit()
                         st.session_state.editando_conta_banco_id = None
                     except mysql.connector.Error as err: st.error(f"Erro: {err}")
                     finally:
                         if conn: conn.close()
+                    time.sleep(0.5)
                     st.rerun()
                 else: st.error("Preencha todos os campos.")
 
