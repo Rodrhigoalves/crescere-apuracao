@@ -11,3 +11,9 @@ ofxparse
 ofxtools
 xlsxwriter
 docxtpl
+pdf2image
+Pillow
+pytesseract
+lxml
+html5lib
+beautifulsoup4
