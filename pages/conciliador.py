@@ -6,21 +6,24 @@ import io
 import re
 import unicodedata
 import uuid
+import os
 from thefuzz import fuzz
 from ofxparse import OfxParser
 import logging
 import time
 
 # =============================================================================
-# Novas importações para o Motor de Conversão Universal (OCR e Imagens)
+# CONFIGURAÇÃO DE OCR (NUVEM VS LOCAL)
 # =============================================================================
 try:
     from pdf2image import convert_from_bytes
     import pytesseract
     from PIL import Image
     
-    # Aponta para o motor de OCR instalado no Windows
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    # Detecção automática: Se o caminho do Windows existir, usa ele. Senão, confia no Linux (Nuvem).
+    caminho_tesseract_windows = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    if os.path.exists(caminho_tesseract_windows):
+        pytesseract.pytesseract.tesseract_cmd = caminho_tesseract_windows
     
     HAS_OCR = True
 except ImportError:
@@ -95,7 +98,8 @@ def eh_linha_de_saldo(descricao):
     if 'SALDO' in d or 'SDO' in d:
         bloqueios = [
             'SALDO ANTERIOR', 'SALDO FINAL', 'SALDO DO DIA', 'SALDO DIA', 
-            'SALDO EM', 'SDO FINAL', 'SDO ANTERIOR', 'SDO CT', 'SALDO BLOQUEADO'
+            'SALDO EM', 'SDO FINAL', 'SDO ANTERIOR', 'SDO CT', 'SALDO BLOQUEADO',
+            'SALDO APLIC'
         ]
         if any(b in d for b in bloqueios):
             return True
@@ -106,7 +110,6 @@ def eh_linha_de_saldo(descricao):
     return False
 
 def limpar_cod_historico(cod):
-    """Garante que códigos como 207.0 ou 203.0 sejam lidos apenas como 207 ou 203"""
     if not cod or pd.isna(cod) or str(cod).strip() == "" or str(cod).strip().upper() == "NAN":
         return ""
     try:
@@ -284,7 +287,7 @@ def buscar_conta_por_banco(id_empresa, nome_banco):
 def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
     """
     Motor híbrido: Tenta extrair tabelas por geometria (resolve quebras de linha do Sicoob)
-    e possui gatilho para OCR caso o PDF seja uma imagem.
+    e possui gatilho para OCR caso o PDF seja uma imagem. Limpa sujeira antes da data (Itaú).
     """
     dados = []
     ign = {"criticas": [], "comuns": []}
@@ -297,13 +300,10 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
             if not texto_teste or len(texto_teste.strip()) < 10:
                 if HAS_OCR:
                     st.toast("📷 PDF de imagem detectado. OCR ativado (pode demorar).")
-                    # Para um OCR completo e conversão tabular, o algoritmo é complexo.
-                    # Aqui inserimos um aviso e passamos, permitindo que o fallback assuma
-                    # e, se falhar, mostre o botão estratégico.
                 else:
                     return pd.DataFrame(), ign
                     
-            # --- Lógica de Geometria e Tabelas (Resolve Sicoob/Quebras) ---
+            # --- Lógica de Geometria e Tabelas ---
             ano_atual = str(pd.Timestamp.now().year)
             for page in pdf.pages:
                 tabelas = page.extract_tables()
@@ -315,7 +315,8 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
                         linha = [str(item).strip() if item else "" for item in linha]
                         if not linha or len(linha) < 2: continue
                         
-                        match_data = re.search(r'^(\d{2}/\d{2}(?:/\d{4})?)', linha[0])
+                        # Expressão regular ajustada: ignora qualquer coisa antes da data na coluna 0
+                        match_data = re.search(r'^.*?(\d{2}/\d{2}(?:/\d{4})?)', linha[0])
                         
                         if match_data:
                             if transacao_atual:
@@ -333,15 +334,20 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
                             except:
                                 val = 0.0
                                 sinal = '+'
-                                
-                            transacao_atual = {
-                                'Data': data_f,
-                                'Descricao': padronizar_texto(linha[1]),
-                                'Valor': abs(val),
-                                'Sinal': sinal
-                            }
+                            
+                            desc = padronizar_texto(linha[1])
+                            # Aplica trava de saldo imediatamente
+                            if eh_linha_de_saldo(desc):
+                                transacao_atual = None
+                            else:
+                                transacao_atual = {
+                                    'Data': data_f,
+                                    'Descricao': desc,
+                                    'Valor': abs(val),
+                                    'Sinal': sinal
+                                }
                         elif transacao_atual and len(linha) > 1 and linha[1]:
-                            # Fusão de Históricos (A Mágica para o Sicoob e Bradesco)
+                            # Fusão de Históricos
                             texto_extra = padronizar_texto(linha[1])
                             if texto_extra and not eh_linha_de_saldo(texto_extra):
                                 transacao_atual['Descricao'] += f" {texto_extra}"
@@ -352,7 +358,6 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
     except Exception as e:
         logging.warning(f"Motor conversor universal encontrou problema: {e}")
         
-    # Se extraiu menos de 2 transações, consideramos falha para acionar os legados
     if len(dados) < 2:
         return pd.DataFrame(), ign
         
@@ -1039,10 +1044,8 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                     banco_pdf = identificar_banco_no_pdf(file.getvalue())
                     banco_alvo = banco_selecionado if banco_selecionado != "DESCONHECIDO" else banco_pdf
                     
-                    # 1. TENTA O MOTOR INTELIGENTE / UNIVERSAL PRIMEIRO
                     df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
                     
-                    # 2. FALLBACK PARA O LEGADO SE O INTELIGENTE FALHAR OU VOLTAR VAZIO
                     if df_ex.empty:
                         logging.info("Motor inteligente retornou vazio, acionando fallback legado...")
                         if banco_pdf == 'CAIXA' or banco_selecionado == 'CAIXA':
@@ -1061,9 +1064,6 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                     else:
                         houve_falha_pdf = True
                         st.error(f"⚠️ O sistema não conseguiu extrair transações do arquivo: {file.name}")
-                        # ===============================================
-                        # BOTÃO ESTRATÉGICO DE CONTINGÊNCIA (OFX Fácil)
-                        # ===============================================
                         st.markdown(
                             f"""
                             <div style="text-align: center; padding: 15px; margin: 15px 0; border: 2px dashed #ff4b4b; border-radius: 8px; background-color: #fff0f0;">
@@ -1100,6 +1100,10 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                 df_consolidado = pd.concat(lista_dfs, ignore_index=True)
                 df_consolidado['Valor'] = pd.to_numeric(df_consolidado['Valor'], errors='coerce').fillna(0.0)
                 df_consolidado['Sinal'] = df_consolidado['Sinal'].astype(str).apply(lambda x: '+' if '+' in x else '-')
+                
+                # APLICAÇÃO FINAL DA TRAVA DE SALDO EM TODOS OS EXTRATORES
+                df_consolidado = df_consolidado[~df_consolidado['Descricao'].apply(eh_linha_de_saldo)].reset_index(drop=True)
+                
                 st.session_state.df_bruto = df_consolidado
             else:
                 st.session_state.df_bruto = pd.DataFrame()
@@ -1116,7 +1120,6 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                 time.sleep(1)
                 st.rerun()
             elif houve_falha_pdf:
-                # Interrompe o progresso sem crashar para que o usuário veja o botão
                 st.stop()
                 
 elif conta_banco_fixa == 'N/A':
