@@ -178,6 +178,10 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
     for idx, row in df_bruto.iterrows():
         if idx in st.session_state.linhas_ignoradas_regras:
             continue
+            
+        # Pula as ressalvas (*) para não serem processadas nas regras até a decisão do operador
+        if row['Sinal'] == '*':
+            continue
 
         match = False
         for _, r in regras.iterrows():
@@ -277,7 +281,71 @@ def ler_planilha_robusto(file_bytes, nome_arquivo):
     return pd.DataFrame()
 
 # =============================================================================
-# 3. INTELIGÊNCIA: AUTO-LEITURA E EXTRAÇÃO
+# LEITOR UNIVERSAL POWER QUERY (Lê formatos de 3 colunas limpas automaticamente)
+# =============================================================================
+def extrair_modelo_power_query(df_full):
+    """
+    Identifica automaticamente se a planilha já está no formato tratado do Power Query
+    (Coluna 0 = Data, Coluna 1 = Descrição, Coluna 2 = Valor).
+    """
+    if df_full.empty or df_full.shape[1] < 3:
+        return pd.DataFrame()
+        
+    dados = []
+    for idx, row in df_full.iterrows():
+        data_raw = str(row.iloc[0]).strip()
+        desc_raw = str(row.iloc[1]).strip()
+        val_raw = str(row.iloc[2]).strip()
+        
+        data_val = converter_data_excel(data_raw)
+        if not data_val:
+            continue # Não é uma linha de dados válida
+            
+        desc_limpa = padronizar_texto(desc_raw)
+        if eh_linha_de_saldo(desc_limpa) or not desc_limpa or desc_limpa == 'NAN':
+            continue
+            
+        # Verifica se o valor contém o asterisco de ressalva
+        is_asterisk = '*' in val_raw
+        
+        # Limpeza agressiva mantendo números, vírgulas, pontos e o sinal de menos
+        v_clean = re.sub(r'[^\d.,-]', '', val_raw.replace('*', ''))
+        if not v_clean:
+            continue
+            
+        is_negative = '-' in v_clean
+        v_clean = v_clean.replace('-', '')
+        
+        if ',' in v_clean and '.' in v_clean:
+            v_clean = v_clean.replace('.', '').replace(',', '.')
+        elif ',' in v_clean:
+            v_clean = v_clean.replace(',', '.')
+            
+        try:
+            valor_final = float(v_clean)
+        except ValueError:
+            continue
+            
+        if valor_final == 0:
+            continue
+            
+        if is_asterisk:
+            sinal_final = '*' # Vai para a Quarentena (Triage)
+        else:
+            sinal_final = '-' if is_negative else '+'
+            
+        dados.append({
+            'Data': data_val,
+            'Descricao': desc_limpa,
+            'Valor': abs(valor_final),
+            'Sinal': sinal_final
+        })
+        
+    return pd.DataFrame(dados)
+
+
+# =============================================================================
+# 3. INTELIGÊNCIA: AUTO-LEITURA E EXTRAÇÃO PDF/OFX
 # =============================================================================
 BBOX_HEADER_AREA    = (0, 0, 600, 150)
 BBOX_BANK_NAME_AREA = (50, 0, 550, 150)
@@ -341,9 +409,6 @@ def buscar_conta_por_banco(id_empresa, nome_banco):
     finally:
         if conn: conn.close()
 
-# ==========================================
-# NOVO MOTOR DE CONVERSÃO UNIVERSAL (PDF/OCR)
-# ==========================================
 @st.cache_data(show_spinner=False)
 def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
     dados = []
@@ -352,10 +417,7 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             texto_teste = pdf.pages[0].extract_text()
-            
             if not texto_teste or len(texto_teste.strip()) < 10:
-                if HAS_OCR:
-                    st.toast("📷 PDF de imagem detectado. Extrator nativo acionado, aguardando OCR...")
                 return pd.DataFrame(), ign
                     
             ano_atual = str(pd.Timestamp.now().year)
@@ -373,9 +435,7 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
                         match_data = re.search(r'(\d{2}/\d{2}(?:/\d{4})?)', texto_busca)
                         
                         if match_data:
-                            if transacao_atual:
-                                dados.append(transacao_atual)
-                            
+                            if transacao_atual: dados.append(transacao_atual)
                             data_f = match_data.group(1)
                             if len(data_f) == 5: data_f += f"/{ano_atual}"
                             
@@ -390,336 +450,19 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
                                 sinal = '+'
                             
                             desc = padronizar_texto(linha[1])
-                            
                             transacao_atual = {
-                                'Data': data_f,
-                                'Descricao': desc,
-                                'Valor': abs(val),
-                                'Sinal': sinal
+                                'Data': data_f, 'Descricao': desc, 'Valor': abs(val), 'Sinal': sinal
                             }
                         elif transacao_atual and len(linha) > 1 and linha[1]:
                             texto_extra = padronizar_texto(linha[1])
-                            if texto_extra:
-                                transacao_atual['Descricao'] += f" {texto_extra}"
+                            if texto_extra: transacao_atual['Descricao'] += f" {texto_extra}"
                                 
-                    if transacao_atual:
-                        dados.append(transacao_atual)
-                        
+                    if transacao_atual: dados.append(transacao_atual)
     except Exception as e:
         logging.warning(f"Motor conversor universal encontrou problema: {e}")
         
-    if len(dados) < 2:
-        return pd.DataFrame(), ign
-        
+    if len(dados) < 2: return pd.DataFrame(), ign
     return pd.DataFrame(dados), ign
-
-# ==========================================
-# MOTORES LEGAIS E ESPECÍFICOS MANTIDOS
-# ==========================================
-@st.cache_data(show_spinner=False)
-def extrair_por_recintos(file_bytes):
-    texto_completo = ""
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
-            palavras = page.extract_words(x_tolerance=3, y_tolerance=3)
-            linhas_dict = {}
-            for p in palavras:
-                y = round(float(p['top']))
-                encontrou_y = next((k for k in linhas_dict if abs(k - y) <= 3), None)
-                if encontrou_y is not None: linhas_dict[encontrou_y].append(p)
-                else: linhas_dict[y] = [p]
-            for y_key in sorted(linhas_dict.keys()):
-                linha_ordenada = sorted(linhas_dict[y_key], key=lambda x: x['x0'])
-                texto_completo += " ".join([w['text'] for w in linha_ordenada]) + "\n"
-
-    RUIDO_CABECALHO = ["período:", "página", "cnpj", "emitido em", "extrato de conta", "dados da conta", "nome documento", "instituição agência", "contraparte stone"]
-    linhas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
-    dados, ignoradas_raw = [], []
-    regex_data  = r'\d{2}/\d{2}/\d{2,4}'
-    regex_valor = r'-?\s*(?:R\$?\s*)?\d{1,3}(?:\.\d{3})*,\d{2}'
-
-    for linha in linhas:
-        if any(x in linha.lower() for x in RUIDO_CABECALHO): continue
-        match_data = re.search(regex_data, linha)
-        valores    = re.findall(regex_valor, linha)
-
-        if match_data and valores:
-            data        = match_data.group(0)
-            valor_bruto = valores[0]
-            is_negativo = '-' in valor_bruto or bool(re.search(r'\sD$', linha.strip(), re.IGNORECASE))
-            is_positivo = '+' in valor_bruto or bool(re.search(r'\sC$', linha.strip(), re.IGNORECASE))
-
-            valor_str_limpo = re.search(r'\d{1,3}(?:\.\d{3})*,\d{2}', valor_bruto).group(0)
-            valor_num = float(valor_str_limpo.replace('.', '').replace(',', '.'))
-
-            desc_limpa = linha.replace(data, '')
-            for v in valores: desc_limpa = desc_limpa.replace(v, '')
-            desc_limpa = re.sub(r'\b[DC]\b', '', desc_limpa, flags=re.IGNORECASE)
-            desc_limpa = padronizar_texto(desc_limpa.strip())
-
-            if eh_linha_de_saldo(desc_limpa):
-                continue
-
-            if not desc_limpa or len(desc_limpa) < 2: desc_limpa = "SEM DESCRICAO"
-
-            desc_upper = desc_limpa.upper()
-            if is_negativo:   sinal = '-'
-            elif is_positivo: sinal = '+'
-            else: sinal = '+' if any(w in desc_upper for w in ['ENTRADA', 'DEPOSITO', 'DEPÓSITO', 'RECEBIMENTO', 'CREDITO', 'CRÉDITO', 'PIX RECEBIDO', 'RESGATE']) else '-'
-
-            dados.append({'Data': data, 'Descricao': desc_limpa, 'Valor': abs(valor_num), 'Sinal': sinal})
-        elif len(linha) > 8:
-            ignoradas_raw.append(linha)
-
-    ignoradas_unicas    = list(dict.fromkeys(ignoradas_raw))
-    ignoradas_com_valor = [l for l in ignoradas_unicas if re.search(r'\d,\d{2}', l)]
-    ignoradas_texto     = [l for l in ignoradas_unicas if not re.search(r'\d,\d{2}', l)]
-
-    return pd.DataFrame(dados), {"criticas": ignoradas_com_valor, "comuns": ignoradas_texto}
-
-def processar_bloco_sicoob(bloco, ano, dados):
-    texto_bloco = " ".join(bloco)
-    match_data = re.search(r'^(\d{2}/\d{2}(?:/\d{4})?)\b', texto_bloco)
-    if not match_data: return
-    
-    data_ext = match_data.group(1)
-    if len(data_ext) == 5: data_ext = f"{data_ext}/{ano}"
-    
-    matches_valor = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]?)', texto_bloco, re.IGNORECASE))
-    if not matches_valor: return
-        
-    match_v = matches_valor[-1] 
-    valor_str = match_v.group(1)
-    sinal_str = match_v.group(2).upper()
-    
-    valor_num = float(valor_str.replace('.', '').replace(',', '.'))
-    desc_limpa = texto_bloco[match_data.end():].strip()
-    
-    desc_limpa = desc_limpa.replace(match_v.group(0), ' ')
-    desc_limpa = re.sub(r'\*+\.\d{3}\.\d{3}-\*+', '', desc_limpa) 
-    desc_limpa = re.sub(r'\bDOC\.?:?\b', 'DOC', desc_limpa, flags=re.IGNORECASE)
-    desc_limpa = re.sub(r'\b[CD]\b', '', desc_limpa) 
-    desc_limpa = padronizar_texto(desc_limpa)
-    
-    if eh_linha_de_saldo(desc_limpa) or not desc_limpa: return
-        
-    if sinal_str == 'C': sinal = '+'
-    elif sinal_str == 'D': sinal = '-'
-    else:
-        sinal = '-'
-        if any(x in desc_limpa for x in ['RECEB', 'CREDIT', 'DEPOSIT', 'RESGATE', 'ESTORNO', 'DEVOLUCAO', 'PIX A FAVOR']):
-            sinal = '+'
-            
-    dados.append({
-        'Data': data_ext,
-        'Descricao': desc_limpa,
-        'Valor': abs(valor_num),
-        'Sinal': sinal
-    })
-
-@st.cache_data(show_spinner=False)
-def extrair_pdf_sicoob(file_bytes):
-    dados, ignoradas_raw = [], []
-    try:
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            ano = str(pd.Timestamp.now().year)
-            bloco_atual = []
-            in_resumo = False
-
-            for page in pdf.pages:
-                texto = page.extract_text()
-                if not texto: continue
-                
-                match_ano = re.search(r'\b(20[2-9]\d)\b', texto)
-                if match_ano: ano = match_ano.group(1)
-                    
-                linhas = texto.split('\n')
-                for linha in linhas:
-                    linha_strip = linha.strip()
-                    linha_norm = padronizar_texto(linha_strip)
-                    
-                    if any(x in linha_norm for x in ['RESUMO CONTA CORRENTE', 'SALDOS E LIMITES', 'LANCAMENTOS FUTUROS', 'OUVIDORIA', 'TOTAIS']):
-                        in_resumo = True
-                        if bloco_atual:
-                            processar_bloco_sicoob(bloco_atual, ano, dados)
-                            bloco_atual = []
-                        continue
-                        
-                    if 'HISTORICO DE MOVIMENTACAO' in linha_norm or ('DATA' in linha_norm and 'HISTORICO' in linha_norm):
-                        in_resumo = False
-                        continue 
-                        
-                    if in_resumo:
-                        continue
-                        
-                    if eh_linha_de_saldo(linha_norm):
-                        if bloco_atual:
-                            processar_bloco_sicoob(bloco_atual, ano, dados)
-                            bloco_atual = []
-                        continue
-                        
-                    if len(linha_strip) < 3: continue
-
-                    match_data = re.search(r'^(\d{2}/\d{2}(?:/\d{4})?)\b', linha_strip)
-                    if match_data:
-                        if bloco_atual: processar_bloco_sicoob(bloco_atual, ano, dados)
-                        bloco_atual = [linha_strip]
-                    elif bloco_atual:
-                        if "SICOOB" not in linha_norm and "PAGINA" not in linha_norm:
-                            bloco_atual.append(linha_strip)
-
-            if bloco_atual:
-                processar_bloco_sicoob(bloco_atual, ano, dados)
-
-    except Exception as e: 
-        logging.exception(f"Erro no Sicoob: {e}")
-        
-    return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
-
-@st.cache_data(show_spinner=False)
-def extrair_pdf_itau(file_bytes):
-    dados, ignoradas_raw = [], []
-    try:
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            in_movimento = False
-            terminou_leitura = False
-            current_date = None
-            ano = str(pd.Timestamp.now().year)
-            
-            for page in pdf.pages:
-                if terminou_leitura: break
-                
-                texto = page.extract_text()
-                if not texto: continue
-                
-                match_ano = re.search(r'\b(20[2-9]\d)\b', texto)
-                if match_ano:
-                    ano = match_ano.group(1)
-
-                linhas = texto.split('\n')
-                for linha in linhas:
-                    linha_strip = linha.strip()
-                    linha_norm = padronizar_texto(linha_strip)
-                    
-                    if 'DATA' in linha_norm and 'DESCRICAO' in linha_norm and ('ENTRADA' in linha_norm or 'SAIDA' in linha_norm or 'CREDITO' in linha_norm):
-                        in_movimento = True
-                        continue
-                    
-                    if in_movimento:
-                        if eh_linha_de_saldo(linha_norm):
-                            if 'SALDO FINAL' in linha_norm or 'SDO FINAL' in linha_norm:
-                                terminou_leitura = True
-                                break
-                            continue
-
-                        if any(k in linha_norm for k in ['CHEQUE ESPECIAL', 'LIMITE']):
-                            continue
-
-                        match_data = re.search(r'^(\d{2}/\d{2})\b', linha_strip)
-                        if match_data:
-                            current_date = f"{match_data.group(1)}/{ano}"
-                            linha_strip = linha_strip[match_data.end():].strip()
-
-                        if not current_date:
-                            continue
-
-                        matches = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})(-?)', linha_strip))
-                        if matches:
-                            v_match = None
-                            if len(matches) >= 2:
-                                m_last = matches[-1]
-                                m_penult = matches[-2]
-                                
-                                distancia = m_last.start() - m_penult.end()
-                                ta_no_fim = (len(linha_strip) - m_last.end()) <= 10
-                                
-                                if ta_no_fim and distancia <= 25:
-                                    v_match = m_penult
-                                    linha_strip = linha_strip[:m_last.start()].strip()
-                                else:
-                                    v_match = m_last
-                            else:
-                                v_match = matches[0]
-
-                            valor_str = v_match.group(1)
-                            sinal_str = v_match.group(2)
-                            
-                            sinal = '-' if sinal_str == '-' else '+'
-                            valor_num = float(valor_str.replace('.', '').replace(',', '.'))
-                            
-                            desc = linha_strip[:v_match.start()].strip()
-                            desc_limpa = padronizar_texto(desc)
-                            
-                            if desc_limpa and len(desc_limpa) >= 2:
-                                dados.append({
-                                    'Data': current_date,
-                                    'Descricao': desc_limpa,
-                                    'Valor': abs(valor_num),
-                                    'Sinal': sinal
-                                })
-                            else:
-                                ignoradas_raw.append(linha_strip)
-                        else:
-                            ignoradas_raw.append(linha_strip)
-    except Exception as e:
-        logging.exception(f"Erro no Itaú: {e}")
-        
-    return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
-
-@st.cache_data(show_spinner=False)
-def extrair_pdf_caixa(file_bytes):
-    dados, ignoradas_raw = [], []
-    try:
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            for page in pdf.pages:
-                texto = page.extract_text()
-                if not texto: continue
-                
-                linhas = texto.split('\n')
-                for linha in linhas:
-                    linha_strip = linha.strip()
-                    linha_norm = padronizar_texto(linha_strip)
-                    
-                    if 'EXTRATO' in linha_norm or 'DATA MOV' in linha_norm or 'NR. DOC.' in linha_norm:
-                        continue
-                        
-                    if eh_linha_de_saldo(linha_norm):
-                        continue
-
-                    match = re.search(r'^(\d{2}/\d{2}/\d{4})\s+(.*?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD])(?:\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]))?$', linha_strip, re.IGNORECASE)
-                    
-                    if match:
-                        data = match.group(1)
-                        meio = match.group(2)
-                        valor_str = match.group(3)
-                        sinal_str = match.group(4).upper()
-                        
-                        partes = meio.split(maxsplit=1)
-                        if len(partes) > 1 and re.match(r'^\d+$', partes[0]):
-                            desc_limpa = padronizar_texto(partes[1])
-                        else:
-                            desc_limpa = padronizar_texto(meio)
-                            
-                        if eh_linha_de_saldo(desc_limpa):
-                            continue
-                            
-                        valor_num = float(valor_str.replace('.', '').replace(',', '.'))
-                        sinal = '+' if sinal_str == 'C' else '-'
-                        
-                        if desc_limpa and len(desc_limpa) >= 2:
-                            dados.append({
-                                'Data': data,
-                                'Descricao': desc_limpa,
-                                'Valor': abs(valor_num),
-                                'Sinal': sinal
-                            })
-                    else:
-                        if len(linha_strip) > 5:
-                            ignoradas_raw.append(linha_strip)
-    except Exception as e:
-        logging.exception(f"Erro na Caixa: {e}")
-        
-    return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
 
 @st.cache_data(show_spinner=False)
 def extrair_texto_ofx(file_bytes):
@@ -744,7 +487,6 @@ def extrair_texto_ofx(file_bytes):
             memo      = get_campo('MEMO',     bloco)
             name      = get_campo('NAME',     bloco)
             trntype   = get_campo('TRNTYPE',  bloco)
-            fitid     = get_campo('FITID',    bloco)
 
             data_fmt = re.sub(r'[^\d]', '', data_raw)[:8]
             try:
@@ -757,276 +499,207 @@ def extrair_texto_ofx(file_bytes):
             except (ValueError, AttributeError):
                 continue
 
-            VALORES_GENERICOS = {'', 'NONE', 'NULL', '-', 'N/A', 'NAO INFORMADO', 'NAO IDENTIFICADO'}
+            VALORES_GENERICOS = {'', 'NONE', 'NULL', '-', 'N/A', 'NAO INFORMADO'}
             name_pad = padronizar_texto(name)
             memo_pad = padronizar_texto(memo)
 
             partes = []
-            if name_pad and name_pad not in VALORES_GENERICOS:
-                partes.append(name_pad)
+            if name_pad and name_pad not in VALORES_GENERICOS: partes.append(name_pad)
             if memo_pad and memo_pad not in VALORES_GENERICOS and memo_pad != name_pad:
-                if name_pad not in memo_pad and memo_pad not in name_pad:
-                    partes.append(memo_pad)
-                elif len(memo_pad) > len(name_pad):
-                    partes = [memo_pad]
+                if name_pad not in memo_pad and memo_pad not in name_pad: partes.append(memo_pad)
+                elif len(memo_pad) > len(name_pad): partes = [memo_pad]
 
-            if not partes:
-                partes.append(trntype.upper() if trntype else 'SEM DESCRICAO')
+            if not partes: partes.append(trntype.upper() if trntype else 'SEM DESCRICAO')
 
             descricao_final = " | ".join(partes) if partes else "SEM DESCRICAO"
 
-            if eh_linha_de_saldo(descricao_final):
-                continue
+            if eh_linha_de_saldo(descricao_final): continue
 
             dados_extraidos.append({
-                'Data':      data_fmt,
-                'Descricao': descricao_final,
-                'Valor':     abs(valor),
-                'Sinal':     '+' if valor > 0 else '-'
+                'Data': data_fmt, 'Descricao': descricao_final, 'Valor': abs(valor), 'Sinal': '+' if valor > 0 else '-'
             })
     except Exception as e:
         logging.exception("Erro na extração OFX")
     return pd.DataFrame(dados_extraidos)
 
 # ==========================================
-# LEITOR BB CORRIGIDO (Entradas, Saídas e Sinalização C/D)
+# LEITORES DE EXCEL (Integrados com Power Query)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
     try:
-        # Leitura robusta
         df_full = ler_planilha_robusto(file_bytes, nome_arquivo)
-        if df_full.empty:
-            return pd.DataFrame()
+        if df_full.empty: return pd.DataFrame()
         
-        # 1. Detectar cabeçalho com tolerância a acentos e espaços
+        # 1. Tenta o modelo Power Query primeiro (Rápido e Limpo)
+        df_pq = extrair_modelo_power_query(df_full)
+        if not df_pq.empty:
+            return df_pq
+        
+        # 2. Fallback para extrato bruto
         header_idx = -1
         for idx, row in df_full.iterrows():
             row_vals = [str(x).upper() for x in row.values if pd.notna(x) and str(x).strip().upper() not in ['NAN', '']]
             row_str = " ".join(row_vals)
-            # Busca por DATA, HISTORICO e VALOR
             if 'DATA' in row_str and ('HIST' in row_str or 'DESCR' in row_str) and ('VALOR' in row_str or 'R$' in row_str):
                 header_idx = idx
                 break
         
-        if header_idx == -1:
-            return pd.DataFrame()
+        if header_idx == -1: return pd.DataFrame()
 
-        # 2. Preparar DataFrame de dados
         df_raw = df_full.iloc[header_idx+1:].copy()
         colunas_limpas = [padronizar_texto(str(c)) for c in df_full.iloc[header_idx].values]
         
-        # Garantir nomes únicos
         colunas_unicas = []
         for i, col in enumerate(colunas_limpas):
             base = col if col and col != 'NAN' else f"COL_{i}"
-            if base in colunas_unicas:
-                base = f"{base}_{i}"
+            if base in colunas_unicas: base = f"{base}_{i}"
             colunas_unicas.append(base)
         df_raw.columns = colunas_unicas
         
-        # 3. Mapear colunas essenciais
         col_data = next((c for c in colunas_unicas if 'DATA' in c), None)
         col_hist = next((c for c in colunas_unicas if 'HIST' in c and 'COD' not in c), None)
-        if not col_hist:
-            col_hist = next((c for c in colunas_unicas if 'DESCR' in c or 'LANC' in c), None)
+        if not col_hist: col_hist = next((c for c in colunas_unicas if 'DESCR' in c or 'LANC' in c), None)
         
         col_valor = next((c for c in colunas_unicas if 'VALOR' in c), None)
-        col_inf   = next((c for c in colunas_unicas if 'INF' in c), None) # Coluna com C/D/*
+        col_inf   = next((c for c in colunas_unicas if 'INF' in c), None) 
         col_det   = next((c for c in colunas_unicas if 'DETALH' in c or 'COMPL' in c), None)
 
-        if not col_data or not col_valor:
-            return pd.DataFrame()
+        if not col_data or not col_valor: return pd.DataFrame()
 
         dados = []
         for _, row in df_raw.iterrows():
-            # Data
             data_raw = converter_data_excel(str(row[col_data]))
-            if not data_raw:
-                continue
+            if not data_raw: continue
             
-            # Descrição
             desc_parts = []
-            if col_hist and pd.notna(row[col_hist]):
-                desc_parts.append(str(row[col_hist]).strip())
-            if col_det and pd.notna(row[col_det]):
-                desc_parts.append(str(row[col_det]).strip())
+            if col_hist and pd.notna(row[col_hist]): desc_parts.append(str(row[col_hist]).strip())
+            if col_det and pd.notna(row[col_det]): desc_parts.append(str(row[col_det]).strip())
             
             desc_limpa = padronizar_texto(" ".join(desc_parts))
-            if not desc_limpa or desc_limpa == 'NAN':
-                desc_limpa = "SEM DESCRICAO"
+            if not desc_limpa or desc_limpa == 'NAN': desc_limpa = "SEM DESCRICAO"
+            if eh_linha_de_saldo(desc_limpa): continue
             
-            if eh_linha_de_saldo(desc_limpa):
-                continue
-            
-            # Valor e Sinal
             val_raw = str(row[col_valor]).strip()
-            if pd.isna(row[col_valor]) or val_raw.upper() in ['NAN', '']:
-                continue
+            if pd.isna(row[col_valor]) or val_raw.upper() in ['NAN', '']: continue
             
-            # Limpeza agressiva do valor (remove asteriscos e espaços)
             val_clean = val_raw.replace('*', '').replace(' ', '').strip()
             val_num_str = re.sub(r'[^\d.,]', '', val_clean)
-            
-            if not val_num_str:
-                continue
+            if not val_num_str: continue
             
             try:
-                if ',' in val_num_str and '.' in val_num_str:
-                    val_num_str = val_num_str.replace('.', '').replace(',', '.')
-                elif ',' in val_num_str:
-                    val_num_str = val_num_str.replace(',', '.')
+                if ',' in val_num_str and '.' in val_num_str: val_num_str = val_num_str.replace('.', '').replace(',', '.')
+                elif ',' in val_num_str: val_num_str = val_num_str.replace(',', '.')
                 valor_num = float(val_num_str)
-            except ValueError:
-                continue
+            except ValueError: continue
             
-            if valor_num == 0:
-                continue
+            if valor_num == 0: continue
             
-            # Lógica de Sinal: Prioridade total na coluna Inf.
-            sinal = '+' # Padrão
-            is_ignorado = False
-            
+            sinal = '+'
             if col_inf and pd.notna(row[col_inf]):
                 inf_val = str(row[col_inf]).upper().strip()
-                if inf_val == 'D':
-                    sinal = '-'
-                elif inf_val == 'C':
-                    sinal = '+'
-                elif inf_val == '*':
-                    # Linhas com asterisco geralmente são bloqueadas/contestadas. 
-                    # Se quiser incluí-las, remova esta linha.
-                    is_ignorado = True 
+                if inf_val == 'D': sinal = '-'
+                elif inf_val == 'C': sinal = '+'
+                elif inf_val == '*': sinal = '*' # Vai para a Quarentena
             
-            if is_ignorado:
-                continue
-            
-            dados.append({
-                'Data': data_raw,
-                'Descricao': desc_limpa,
-                'Valor': abs(valor_num),
-                'Sinal': sinal
-            })
+            dados.append({'Data': data_raw, 'Descricao': desc_limpa, 'Valor': abs(valor_num), 'Sinal': sinal})
             
         return pd.DataFrame(dados)
-        
     except Exception as e:
         logging.exception(f"Erro BB Excel: {e}")
         return pd.DataFrame()
 
-
-# ==========================================
-# LEITOR BRADESCO CORRIGIDO (Metadados e Colunas C/D Separadas)
-# ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bradesco(file_bytes, nome_arquivo):
     try:
         df_full = ler_planilha_robusto(file_bytes, nome_arquivo)
-        if df_full.empty:
-            return pd.DataFrame()
+        if df_full.empty: return pd.DataFrame()
         
-        # 1. Detectar cabeçalho ignorando linhas de metadados
+        # 1. Tenta o modelo Power Query primeiro (Rápido e Limpo)
+        df_pq = extrair_modelo_power_query(df_full)
+        if not df_pq.empty:
+            return df_pq
+            
+        # 2. Fallback para extrato bruto
         header_idx = -1
         for idx, row in df_full.iterrows():
             row_vals = [str(x).upper() for x in row.values if pd.notna(x) and str(x).strip().upper() not in ['NAN', '']]
             row_str = " ".join(row_vals)
             
-            # O Bradesco tem "Data", "Lançamento", "Crédito", "Débito"
             if 'DATA' in row_str and ('LANC' in row_str or 'HIST' in row_str):
-                # Validação extra: deve ter crédito ou débito nas colunas
                 if 'CRED' in row_str or 'DEB' in row_str:
                     header_idx = idx
                     break
         
-        if header_idx == -1:
-            return pd.DataFrame()
+        if header_idx == -1: return pd.DataFrame()
         
-        # 2. Preparar dados
         df_raw = df_full.iloc[header_idx+1:].copy()
         colunas_limpas = [padronizar_texto(str(c)) for c in df_full.iloc[header_idx].values]
         
         colunas_unicas = []
         for i, col in enumerate(colunas_limpas):
             base = col if col and col != 'NAN' else f"COL_{i}"
-            if base in colunas_unicas:
-                base = f"{base}_{i}"
+            if base in colunas_unicas: base = f"{base}_{i}"
             colunas_unicas.append(base)
         df_raw.columns = colunas_unicas
         
-        # 3. Mapear colunas
         col_data = next((c for c in colunas_unicas if 'DATA' in c), None)
         col_lanc = next((c for c in colunas_unicas if 'LANC' in c or 'HIST' in c or 'DESCR' in c), None)
         col_cred = next((c for c in colunas_unicas if 'CRED' in c), None)
         col_deb  = next((c for c in colunas_unicas if 'DEB' in c), None)
         
-        if not col_data:
-            return pd.DataFrame()
+        if not col_data: return pd.DataFrame()
         
         dados = []
         for _, row in df_raw.iterrows():
-            # Parar no totalizador
             check_str = str(row[col_data]).upper() + " " + str(row[col_lanc]).upper() if col_lanc else ""
-            if 'TOTAL' in check_str:
-                break
+            if 'TOTAL' in check_str: break
             
             data_val = converter_data_excel(str(row[col_data]))
-            if not data_val:
-                continue
+            if not data_val: continue
             
             desc_raw = str(row[col_lanc]).strip() if col_lanc and pd.notna(row[col_lanc]) else ""
             desc_limpa = padronizar_texto(desc_raw)
             
-            if eh_linha_de_saldo(desc_limpa) or not desc_limpa or desc_limpa == 'NAN':
-                continue
+            if eh_linha_de_saldo(desc_limpa) or not desc_limpa or desc_limpa == 'NAN': continue
             
             valor_final = 0.0
             sinal_final = '+'
             tem_valor = False
             
-            # Lógica: Bradesco tem colunas separadas. Verifica Crédito primeiro.
             if col_cred and pd.notna(row[col_cred]):
                 v_cred = str(row[col_cred]).strip()
                 if v_cred and v_cred.upper() != 'NAN' and v_cred != '0':
                     v_clean = re.sub(r'[^\d.,]', '', v_cred)
                     if v_clean:
                         try:
-                            if ',' in v_clean and '.' in v_clean:
-                                v_clean = v_clean.replace('.', '').replace(',', '.')
-                            elif ',' in v_clean:
-                                v_clean = v_clean.replace(',', '.')
+                            if ',' in v_clean and '.' in v_clean: v_clean = v_clean.replace('.', '').replace(',', '.')
+                            elif ',' in v_clean: v_clean = v_clean.replace(',', '.')
                             valor_final = float(v_clean)
                             sinal_final = '+'
                             tem_valor = True
-                        except ValueError:
-                            pass
+                        except ValueError: pass
             
-            # Se não achou crédito, verifica Débito
             if not tem_valor and col_deb and pd.notna(row[col_deb]):
                 v_deb = str(row[col_deb]).strip()
                 if v_deb and v_deb.upper() != 'NAN' and v_deb != '0':
                     v_clean = re.sub(r'[^\d.,]', '', v_deb)
                     if v_clean:
                         try:
-                            if ',' in v_clean and '.' in v_clean:
-                                v_clean = v_clean.replace('.', '').replace(',', '.')
-                            elif ',' in v_clean:
-                                v_clean = v_clean.replace(',', '.')
+                            if ',' in v_clean and '.' in v_clean: v_clean = v_clean.replace('.', '').replace(',', '.')
+                            elif ',' in v_clean: v_clean = v_clean.replace(',', '.')
                             valor_final = float(v_clean)
                             sinal_final = '-'
                             tem_valor = True
-                        except ValueError:
-                            pass
+                        except ValueError: pass
             
             if tem_valor and valor_final > 0:
+                sinal = '*' if '*' in desc_raw else sinal_final
                 dados.append({
-                    'Data': data_val,
-                    'Descricao': desc_limpa,
-                    'Valor': abs(valor_final),
-                    'Sinal': sinal_final
+                    'Data': data_val, 'Descricao': desc_limpa, 'Valor': abs(valor_final), 'Sinal': sinal
                 })
                 
         return pd.DataFrame(dados)
-        
     except Exception as e:
         logging.exception(f"Erro Bradesco Excel: {e}")
         return pd.DataFrame()
@@ -1042,7 +715,6 @@ def gerar_pdf_do_ofx(file_bytes, nome_arquivo):
         ofx_text = file_bytes.decode('latin-1', errors='ignore')
         
     ofx = OfxParser.parse(io.BytesIO(ofx_text.encode('utf-8')))
-    
     pdf = FPDF()
     pdf.add_page()
     
@@ -1051,7 +723,6 @@ def gerar_pdf_do_ofx(file_bytes, nome_arquivo):
         return unicodedata.normalize('NFKD', str(txt)).encode('ASCII', 'ignore').decode('ASCII')
         
     pdf.set_font("Arial", 'B', 14)
-    
     banco_nome = safe_text(ofx.account.institution.organization) if ofx.account.institution else "BANCO DESCONHECIDO"
     conta_id = safe_text(ofx.account.account_id) if ofx.account else "N/A"
     
@@ -1077,10 +748,8 @@ def gerar_pdf_do_ofx(file_bytes, nome_arquivo):
         valor = float(tx.amount)
         
         valor_str = f"{abs(valor):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-        if valor > 0:
-            valor_str = "+ " + valor_str
-        else:
-            valor_str = "- " + valor_str
+        if valor > 0: valor_str = "+ " + valor_str
+        else: valor_str = "- " + valor_str
             
         pdf.cell(25, 6, data_str, border=1, align='C')
         pdf.cell(130, 6, desc, border=1)
@@ -1157,7 +826,6 @@ if df_empresas.empty:
     st.error("Nenhuma empresa ativa encontrada no banco de dados.")
     st.stop()
 
-
 # CRIANDO O SISTEMA DE ABAS
 tab_conciliacao, tab_conversor = st.tabs(["🏦 Conciliação Bancária", "🧰 Conversor OFX -> PDF"])
 
@@ -1167,14 +835,12 @@ with tab_conversor:
     
     if HAS_FPDF:
         ofx_upload = st.file_uploader("Selecione o arquivo .OFX", type=["ofx"], key="uploader_ofx_pdf")
-        
         if ofx_upload:
             if st.button("Gerar PDF Formatado", type="primary"):
                 with st.spinner("Lendo OFX e desenhando PDF..."):
                     try:
                         pdf_gerado_bytes = gerar_pdf_do_ofx(ofx_upload.getvalue(), ofx_upload.name)
                         st.success("Conversão concluída com sucesso!")
-                        
                         st.download_button(
                             label="📥 BAIXAR EXTRATO PDF",
                             data=pdf_gerado_bytes,
@@ -1193,10 +859,9 @@ with tab_conciliacao:
     # =============================================================================
     # PASSO 1 E 2: UPLOAD E PRÉ-SELEÇÃO
     # =============================================================================
-    uploaded_files  = st.file_uploader("1. Arraste seus extratos (PDF, OFX, XLS, XLSX, CSV)", type=["pdf", "ofx", "xls", "xlsx", "csv"], accept_multiple_files=True)
+    uploaded_files  = st.file_uploader("1. Arraste seus extratos (Excel via Power Query, PDF, OFX)", type=["pdf", "ofx", "xls", "xlsx", "csv"], accept_multiple_files=True)
     
-    forcar_universal = st.checkbox("🔄 Forçar Conversão Universal (OFX) em todos os arquivos lidos", value=False, help="Ligue isso caso o arquivo esteja com um layout estranho. Desligue (Padrão) para preservar detalhes como Histórico + CNPJ em arquivos Excel.")
-    
+    forcar_universal = st.checkbox("🔄 Forçar Conversão Universal (OFX) em todos os arquivos lidos", value=False, help="Ligue isso caso o arquivo esteja com um layout estranho.")
     indice_sugerido = 0
 
     if uploaded_files:
@@ -1256,7 +921,6 @@ with tab_conciliacao:
     # =============================================================================
     if uploaded_files and conta_banco_fixa != 'N/A':
         if st.button("⚙️ Processar Extratos"):
-            
             st.session_state.inicio_operacao = time.time()
             st.session_state.tempo_conclusao = None
             st.session_state.lancamentos_manuais = [] 
@@ -1272,31 +936,14 @@ with tab_conciliacao:
                     if forcar_universal:
                         banco_alvo = banco_selecionado if banco_selecionado != "DESCONHECIDO" else "DESCONHECIDO"
                         df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
-                        if not df_ex.empty:
-                            lista_dfs.append(df_ex)
-                        else:
-                            st.warning(f"O Extrator Universal não encontrou nada no arquivo: {file.name}")
+                        if not df_ex.empty: lista_dfs.append(df_ex)
+                        else: st.warning(f"O Extrator Universal não encontrou nada no arquivo: {file.name}")
                             
                     else:
                         if extensao.endswith('.pdf'):
                             banco_pdf = identificar_banco_no_pdf(file.getvalue())
                             banco_alvo = banco_selecionado if banco_selecionado != "DESCONHECIDO" else banco_pdf
-                            
-                            if banco_alvo == 'SICOOB':
-                                df_ex, ign = extrair_pdf_sicoob(file.getvalue())
-                                if df_ex.empty:
-                                    df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
-                            else:
-                                df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
-                                
-                                if df_ex.empty:
-                                    logging.info("Motor inteligente retornou vazio, acionando fallback legado...")
-                                    if banco_pdf == 'CAIXA' or banco_selecionado == 'CAIXA':
-                                        df_ex, ign = extrair_pdf_caixa(file.getvalue())
-                                    elif banco_pdf == 'ITAU' or banco_selecionado == 'ITAU':
-                                        df_ex, ign = extrair_pdf_itau(file.getvalue())
-                                    else:
-                                        df_ex, ign = extrair_por_recintos(file.getvalue())
+                            df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
                             
                             if not df_ex.empty:
                                 lista_dfs.append(df_ex)
@@ -1312,25 +959,18 @@ with tab_conciliacao:
                             else:
                                 df_ex = extrair_planilha_bb(file.getvalue(), file.name)
                                 
-                            if not df_ex.empty:
-                                lista_dfs.append(df_ex)
-                            else:
-                                st.warning(f"⚠️ O Caçador não encontrou a tabela no arquivo: {file.name}")
+                            if not df_ex.empty: lista_dfs.append(df_ex)
+                            else: st.warning(f"⚠️ O Caçador não encontrou a tabela no arquivo: {file.name}")
                                 
                         elif extensao.endswith('.ofx'):
                             df_ex = extrair_texto_ofx(file.getvalue())
-                            if not df_ex.empty:
-                                lista_dfs.append(df_ex)
-                            else:
-                                st.warning(f"⚠️ Extrator OFX não encontrou transações em: {file.name}")
+                            if not df_ex.empty: lista_dfs.append(df_ex)
+                            else: st.warning(f"⚠️ Extrator OFX não encontrou transações em: {file.name}")
 
                 if lista_dfs:
                     df_consolidado = pd.concat(lista_dfs, ignore_index=True)
                     df_consolidado['Valor'] = pd.to_numeric(df_consolidado['Valor'], errors='coerce').fillna(0.0)
-                    df_consolidado['Sinal'] = df_consolidado['Sinal'].astype(str).apply(lambda x: '+' if '+' in x else '-')
-                    
                     df_consolidado = df_consolidado[~df_consolidado['Descricao'].apply(eh_linha_de_saldo)].reset_index(drop=True)
-                    
                     st.session_state.df_bruto = df_consolidado
                 else:
                     st.session_state.df_bruto = pd.DataFrame()
@@ -1353,13 +993,60 @@ with tab_conciliacao:
         st.error("Configure a conta contábil antes de processar.")
 
     # =============================================================================
-    # PASSO 5: RESULTADOS + MESA DE TREINAMENTO
+    # PASSO 5: RESULTADOS + TRIAGE + MESA DE TREINAMENTO
     # =============================================================================
     if not st.session_state.df_bruto.empty:
         st.divider()
 
+        # ==========================================
+        # MÓDULO DE TRIAGE (QUARENTENA DE RESSALVAS)
+        # ==========================================
+        df_excecoes = st.session_state.df_bruto[st.session_state.df_bruto['Sinal'] == '*']
+        
+        if not df_excecoes.empty:
+            st.error(f"⚠️ Ação Requerida: O robô identificou **{len(df_excecoes)} lançamento(s)** com ressalvas (*) no extrato. Por favor, defina o destino de cada um antes de prosseguir com a conciliação.")
+            
+            with st.expander("🔍 Analisar Lançamentos Pendentes (*)", expanded=True):
+                with st.form("form_ressalvas"):
+                    st.markdown("O sistema encontrou lançamentos bloqueados ou em análise pelo banco e não soube classificar o saldo. Marque abaixo se deseja excluir a linha (mais comum), forçar como Entrada (+) ou Saída (-).")
+                    
+                    decisoes = {}
+                    for idx, row in df_excecoes.iterrows():
+                        st.markdown(f"**Data:** {row['Data']} | **Descrição:** {row['Descricao']} | **Valor:** R$ {row['Valor']:.2f}")
+                        decisoes[idx] = st.radio(
+                            "Decisão para este lançamento:",
+                            options=["🗑️ Excluir (Ignorar)", "🟢 Considerar como Entrada (+)", "🔴 Considerar como Saída (-)"],
+                            key=f"decisao_{idx}",
+                            horizontal=True
+                        )
+                        st.write("---")
+                    
+                    if st.form_submit_button("✅ Confirmar Todas as Decisões", type="primary"):
+                        df_temp = st.session_state.df_bruto.copy()
+                        for idx, decisao in decisoes.items():
+                            if "Excluir" in decisao:
+                                st.session_state.linhas_ignoradas_regras.append(idx)
+                                df_temp.at[idx, 'Sinal'] = 'IGNORADO' # Tira da lista de asteriscos
+                            elif "Entrada" in decisao:
+                                df_temp.at[idx, 'Sinal'] = '+'
+                            elif "Saída" in decisao:
+                                df_temp.at[idx, 'Sinal'] = '-'
+                        
+                        st.session_state.df_bruto = df_temp
+                        # Roda as regras novamente agora que as ressalvas foram decididas
+                        aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
+                        st.rerun()
+            
+            # Trava a execução da página aqui para forçar a resolução
+            st.stop()
+            
+
+        # ==========================================
+        # CONTINUAÇÃO NORMAL SE NÃO HOUVER RESSALVAS
+        # ==========================================
         df_validos = st.session_state.df_bruto[
-            ~st.session_state.df_bruto.index.isin(st.session_state.linhas_ignoradas_regras)
+            (~st.session_state.df_bruto.index.isin(st.session_state.linhas_ignoradas_regras)) &
+            (st.session_state.df_bruto['Sinal'] != '*')
         ]
         
         total_e               = float(df_validos[df_validos['Sinal'] == '+']['Valor'].sum())
@@ -1368,10 +1055,8 @@ with tab_conciliacao:
         if 'lancamentos_manuais' in st.session_state and st.session_state.lancamentos_manuais:
             for m_item in st.session_state.lancamentos_manuais:
                 val_m = float(str(m_item['Valor']).replace('.', '').replace(',', '.'))
-                if m_item['Debito'] == conta_banco_fixa: 
-                    total_e += val_m
-                else:
-                    total_s += val_m
+                if m_item['Debito'] == conta_banco_fixa: total_e += val_m
+                else: total_s += val_m
 
         saldo_final_calculado = saldo_anterior_informado + total_e - total_s
 
@@ -1381,7 +1066,6 @@ with tab_conciliacao:
         c3.metric("🔴 Saídas Válidas",        formatar_moeda(total_s))
         c4.metric("⚖️ Saldo Final Calculado", formatar_moeda(saldo_final_calculado))
 
-        # Detetive e Auditoria
         with st.expander("➕ Adicionar / Excluir Lançamentos Manuais (Ajuste de Saldo)", expanded=False):
             st.info("Utilize as opções abaixo se for necessário compensar alguma diferença detectada pelo Detetive.")
             col_ajuste1, col_ajuste2 = st.columns(2)
@@ -1404,8 +1088,7 @@ with tab_conciliacao:
                             'Cod_Historico': "",
                             'Historico': m_desc.upper()
                         }
-                        if 'lancamentos_manuais' not in st.session_state:
-                            st.session_state.lancamentos_manuais = []
+                        if 'lancamentos_manuais' not in st.session_state: st.session_state.lancamentos_manuais = []
                         st.session_state.lancamentos_manuais.append(novo_item)
                         aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
                         st.rerun()
@@ -1500,8 +1183,7 @@ with tab_conciliacao:
                         with st.expander(f"🎯 Visão de Raio-X: Esta regra vai automatizar {impacto} operação(ões) pendente(s).", expanded=False):
                             st.dataframe(
                                 df_impactados[['Data', 'Descricao', 'Valor', 'Sinal']].style.format({"Valor": "R$ {:.2f}"}),
-                                use_container_width=True,
-                                hide_index=True
+                                use_container_width=True, hide_index=True
                             )
 
                 with st.form("form_treino"):
@@ -1517,7 +1199,6 @@ with tab_conciliacao:
                             try:
                                 cod_h_val = cod_h if cod_h.strip() else None
                                 txt_h_val = txt_h if txt_h.strip() else None
-
                                 conn = get_connection()
                                 cursor = conn.cursor()
                                 cursor.execute(
@@ -1533,8 +1214,7 @@ with tab_conciliacao:
                             finally:
                                 if conn: conn.close()
                             st.rerun()
-                        else:
-                            st.error("Preencha a conta de contrapartida.")
+                        else: st.error("Preencha a conta de contrapartida.")
 
                     if b2.form_submit_button("🗑️ Ignorar Lixo"):
                         conn = None
@@ -1569,8 +1249,7 @@ with tab_conciliacao:
             st.success("🎉 Todos os lançamentos pendentes foram mapeados! Exportação liberada.")
             if st.session_state.prontos:
                 df_prontos = pd.DataFrame(st.session_state.prontos)
-                if 'idx_original' in df_prontos.columns:
-                    df_prontos = df_prontos.drop(columns=['idx_original'])
+                if 'idx_original' in df_prontos.columns: df_prontos = df_prontos.drop(columns=['idx_original'])
                 if 'Debito' in df_prontos.columns:
                     idx_debito = df_prontos.columns.get_loc('Debito')
                     df_prontos.insert(idx_debito, ' ', '')
@@ -1592,15 +1271,12 @@ with tab_conciliacao:
     st.divider()
     
     with st.expander("➕ Cadastrar Novo Banco Oficial", expanded=False):
-        st.info("Caso receba arquivo de um banco novo, cadastre-o aqui para salvar no sistema.")
         with st.form("form_novo_banco"):
             nome_novo_banco = st.text_input("Nome do Banco (Ex: INTER, SICREDI, BTG)")
-            
             if st.form_submit_button("Adicionar à Lista"):
                 nome_formatado = padronizar_texto(nome_novo_banco).strip()
                 if nome_formatado:
-                    if nome_formatado in bancos_disponiveis:
-                        st.warning("Este banco já está na lista oficial.")
+                    if nome_formatado in bancos_disponiveis: st.warning("Este banco já está na lista oficial.")
                     else:
                         conn = None
                         try:
@@ -1609,16 +1285,13 @@ with tab_conciliacao:
                             cursor.execute("INSERT INTO bancos_customizados (nome) VALUES (%s)", (nome_formatado,))
                             conn.commit()
                             st.success(f"Banco '{nome_formatado}' adicionado com sucesso! Atualize a página.")
-                        except mysql.connector.Error as err:
-                            st.error(f"Erro ao cadastrar banco. Detalhe: {err}")
+                        except mysql.connector.Error as err: st.error(f"Erro ao cadastrar banco. Detalhe: {err}")
                         finally:
                             if conn: conn.close()
-                else:
-                    st.error("Digite um nome válido.")
+                else: st.error("Digite um nome válido.")
 
     with st.expander("📊 Gerenciar Contas Contábeis por Banco", expanded=False):
         df_contas_banco = carregar_contas_por_banco(id_empresa)
-
         st.subheader("Contas Cadastradas")
         if not df_contas_banco.empty:
             for _, c in df_contas_banco.iterrows():
@@ -1651,9 +1324,8 @@ with tab_conciliacao:
                     current_nome_banco     = linha_conta.iloc[0]['nome_banco']
                     current_conta_contabil = linha_conta.iloc[0]['conta_contabil']
 
-            banco_idx     = bancos_disponiveis.index(current_nome_banco) if current_nome_banco in bancos_disponiveis else 0
-
-            novo_nome_banco     = st.selectbox("Nome do Banco", bancos_disponiveis, index=banco_idx)
+            banco_idx = bancos_disponiveis.index(current_nome_banco) if current_nome_banco in bancos_disponiveis else 0
+            novo_nome_banco = st.selectbox("Nome do Banco", bancos_disponiveis, index=banco_idx)
             nova_conta_contabil = st.text_input("Conta Contábil", value=current_conta_contabil)
 
             col_cb1, col_cb2 = st.columns(2)
@@ -1681,8 +1353,7 @@ with tab_conciliacao:
                     finally:
                         if conn: conn.close()
                     st.rerun()
-                else:
-                    st.error("Preencha todos os campos.")
+                else: st.error("Preencha todos os campos.")
 
             if col_cb2.form_submit_button("Cancelar"):
                 st.session_state.editando_conta_banco_id = None
