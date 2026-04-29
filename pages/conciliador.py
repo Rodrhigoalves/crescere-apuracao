@@ -299,9 +299,9 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
             # --- Lógica OCR ---
             if not texto_teste or len(texto_teste.strip()) < 10:
                 if HAS_OCR:
-                    st.toast("📷 PDF de imagem detectado. OCR ativado (pode demorar).")
-                else:
-                    return pd.DataFrame(), ign
+                    st.toast("📷 PDF de imagem detectado. Extrator nativo acionado, aguardando OCR...")
+                # Mantemos o retorno vazio para forçar o tratamento no fallback legado caso seja ilegível.
+                return pd.DataFrame(), ign
                     
             # --- Lógica de Geometria e Tabelas ---
             ano_atual = str(pd.Timestamp.now().year)
@@ -315,8 +315,9 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
                         linha = [str(item).strip() if item else "" for item in linha]
                         if not linha or len(linha) < 2: continue
                         
-                        # Expressão regular ajustada: ignora qualquer coisa antes da data na coluna 0
-                        match_data = re.search(r'^.*?(\d{2}/\d{2}(?:/\d{4})?)', linha[0])
+                        # Ajuste: Busca a data olhando o conjunto inicial para flexibilizar a detecção
+                        texto_busca = " ".join(linha[:2])
+                        match_data = re.search(r'(\d{2}/\d{2}(?:/\d{4})?)', texto_busca)
                         
                         if match_data:
                             if transacao_atual:
@@ -336,20 +337,19 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
                                 sinal = '+'
                             
                             desc = padronizar_texto(linha[1])
-                            # Aplica trava de saldo imediatamente
-                            if eh_linha_de_saldo(desc):
-                                transacao_atual = None
-                            else:
-                                transacao_atual = {
-                                    'Data': data_f,
-                                    'Descricao': desc,
-                                    'Valor': abs(val),
-                                    'Sinal': sinal
-                                }
+                            
+                            # Ajuste: Remoção da trava prematura de saldo!
+                            # O consolidado fará a filtragem global de forma mais confiável no final do fluxo.
+                            transacao_atual = {
+                                'Data': data_f,
+                                'Descricao': desc,
+                                'Valor': abs(val),
+                                'Sinal': sinal
+                            }
                         elif transacao_atual and len(linha) > 1 and linha[1]:
-                            # Fusão de Históricos
+                            # Fusão de Históricos contínuos
                             texto_extra = padronizar_texto(linha[1])
-                            if texto_extra and not eh_linha_de_saldo(texto_extra):
+                            if texto_extra:
                                 transacao_atual['Descricao'] += f" {texto_extra}"
                                 
                     if transacao_atual:
