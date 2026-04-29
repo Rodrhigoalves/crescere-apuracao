@@ -216,13 +216,10 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
     st.session_state.linhas_ignoradas_regras = todas_ignoradas
 
 # =============================================================================
-# DEFESAS CONTRA EXCEL BANCÁRIO
+# DEFESAS CONTRA EXCEL BANCÁRIO BLINDADAS
 # =============================================================================
 def converter_data_excel(data_raw):
-    """
-    Motor blindado de conversão de data. Resolve problemas com datas transformadas 
-    em números de série pelo Excel (ex: 45321) e remove resíduos como horas.
-    """
+    """Motor blindado de conversão de data, limpa horas e serial de Excel"""
     data_raw = str(data_raw).strip()
     if data_raw.upper() == 'NAN' or data_raw == '': 
         return None
@@ -252,28 +249,41 @@ def converter_data_excel(data_raw):
 
 def ler_planilha_robusto(file_bytes, nome_arquivo):
     """
-    Se o banco mandar um HTML disfarçado de XLS (comum no Bradesco e Itaú), 
-    juntamos todas as tabelas ocultas em uma só para não perder nada.
+    Motor definitivo de leitura. Tenta de todas as formas conhecidas (Excel, HTML e CSV)
+    Garante que colunas únicas não sejam condensadas num bloco só devido a separador errado.
     """
     nome_min = nome_arquivo.lower()
-    if nome_min.endswith('.csv'):
-        try: return pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str, encoding='utf-8')
-        except: return pd.read_csv(io.BytesIO(file_bytes), sep=';', header=None, dtype=str, encoding='latin1')
-    else:
+    
+    # 1. Tentar ler como Excel Real (se for .xls ou .xlsx)
+    if nome_min.endswith(('.xlsx', '.xls')):
         try: 
-            return pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+            df = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+            if not df.empty and df.shape[1] > 1: return df
         except Exception:
+            pass
+
+    # 2. Tentar ler como HTML disfarçado (Comum em Itaú e Bradesco)
+    for enc in ['utf-8', 'latin1']:
+        try:
+            dfs = pd.read_html(io.BytesIO(file_bytes), encoding=enc, decimal=',', thousands='.')
+            if dfs: 
+                df_concat = pd.concat(dfs, ignore_index=True).astype(str)
+                if not df_concat.empty and df_concat.shape[1] > 1: return df_concat
+        except:
+            pass
+            
+    # 3. Tentar ler como CSV ou TXT (mesmo que a extensão seja .xls)
+    # Tenta vários separadores até descobrir o correto para o banco
+    for sep in [';', ',', '\t']:
+        for enc in ['utf-8', 'latin1', 'cp1252']:
             try:
-                dfs = pd.read_html(io.BytesIO(file_bytes), encoding='utf-8', decimal=',', thousands='.')
-                if dfs: return pd.concat(dfs, ignore_index=True).astype(str)
+                df = pd.read_csv(io.BytesIO(file_bytes), sep=sep, header=None, dtype=str, encoding=enc)
+                if not df.empty and df.shape[1] > 1: # Só aceita se quebrou em mais de 1 coluna
+                    return df
             except:
                 pass
-            try:
-                dfs = pd.read_html(io.BytesIO(file_bytes), encoding='latin1', decimal=',', thousands='.')
-                if dfs: return pd.concat(dfs, ignore_index=True).astype(str)
-            except:
-                pass
-            return pd.DataFrame()
+                
+    return pd.DataFrame()
 
 # =============================================================================
 # 3. INTELIGÊNCIA: AUTO-LEITURA E EXTRAÇÃO
@@ -788,7 +798,7 @@ def extrair_texto_ofx(file_bytes):
     return pd.DataFrame(dados_extraidos)
 
 # ==========================================
-# O LEITOR CAÇADOR DO BANCO DO BRASIL (COM FUSÃO LIMPA E CHECAGEM DE COLUNA INF.)
+# O LEITOR CAÇADOR DO BANCO DO BRASIL (CORRIGIDO PARA CAPTURAR SINAL 'INF.')
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
@@ -801,7 +811,6 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
             row_vals = [str(x).upper() for x in row.values if pd.notna(x) and str(x).strip().upper() != 'NAN']
             row_str = padronizar_texto(" ".join(row_vals))
             
-            # Condição ampla para encontrar a linha título
             if 'DATA' in row_str and ('HIST' in row_str or 'LANC' in row_str or 'DESCR' in row_str) and ('VALOR' in row_str or 'R$' in row_str or 'CRED' in row_str or 'DEB' in row_str):
                 header_idx = idx
                 break
@@ -826,8 +835,8 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         col_detalhe = next((c for c in colunas_unicas if any(w in c for w in ['DETALHE', 'COMPLEMENTO', 'DOCTO'])), None)
         col_valor = next((c for c in colunas_unicas if 'VALOR' in c), None)
         
-        # O pulo do gato: Achar a coluna de Informação (C ou D)
-        col_inf = next((c for c in colunas_unicas if c == 'INF' or c == 'I' or 'SINAL' in c or 'TIPO' in c), None)
+        # Correção aqui: Verifica se "INF" ou "SINAL" faz parte do nome da coluna (ex: INF.)
+        col_inf = next((c for c in colunas_unicas if 'INF' in c or 'SINAL' in c or 'TIPO' in c), None)
 
         if not col_data or not col_valor: return pd.DataFrame()
 
@@ -842,7 +851,6 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
             texto_detalhe = str(row[col_detalhe]).strip() if (col_detalhe and pd.notna(row[col_detalhe])) else ""
             if texto_detalhe.upper() == 'NAN': texto_detalhe = ""
             
-            # ESTRATÉGIA FUSÃO (Sem números, sem símbolos chatos)
             desc_raw = f"{texto_historico} {texto_detalhe}".strip()
             desc_limpa = re.sub(r'\d+', '', desc_raw)
             desc_limpa = re.sub(r'[^\w\s]', ' ', desc_limpa) 
@@ -855,7 +863,7 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
 
             is_credit = True
 
-            # Lê o sinal a partir da coluna Inf (C/D)
+            # Confirma o sinal do lançamento (Crédito ou Débito) baseando-se na coluna de Informação "INF."
             if col_inf and pd.notna(row[col_inf]):
                 inf_val = str(row[col_inf]).upper().strip()
                 if 'D' in inf_val or '-' in inf_val:
@@ -867,7 +875,6 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
             valor_limpo = re.sub(r'[^\d.,]', '', valor_bruto)
             if not valor_limpo: continue
 
-            # Corrige números com mais de um separador (ex: 1.200,50 vira 1200.50)
             if ',' in valor_limpo and '.' in valor_limpo: 
                 valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
             elif ',' in valor_limpo: 
@@ -891,7 +898,7 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         return pd.DataFrame()
 
 # ==========================================
-# O LEITOR CAÇADOR DO BRADESCO (COM COLUNAS DE SINAL SEPARADAS)
+# O LEITOR CAÇADOR DO BRADESCO
 # ==========================================
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bradesco(file_bytes, nome_arquivo):
@@ -940,7 +947,6 @@ def extrair_planilha_bradesco(file_bytes, nome_arquivo):
             valor_final = 0.0
             sinal_final = '+'
             
-            # Checa em qual coluna o dinheiro "caiu" para definir o sinal
             if col_cred and col_deb:
                 v_cred = str(row[col_cred]).strip() if pd.notna(row[col_cred]) else ""
                 v_deb = str(row[col_deb]).strip() if pd.notna(row[col_deb]) else ""
@@ -1079,7 +1085,6 @@ def carregar_contas_por_banco(id_empresa):
     finally:
         if conn: conn.close()
 
-# Inicia as tabelas de banco customizados silenciosamente caso não existam
 inicializar_tabela_bancos()
 
 # =============================================================================
@@ -1152,7 +1157,7 @@ with tab_conciliacao:
     # =============================================================================
     uploaded_files  = st.file_uploader("1. Arraste seus extratos (PDF, OFX, XLS, XLSX, CSV)", type=["pdf", "ofx", "xls", "xlsx", "csv"], accept_multiple_files=True)
     
-    # CHAVE DE CONTROLE (O NOVO TOGGLE)
+    # CHAVE DE CONTROLE (TOGGLE)
     forcar_universal = st.checkbox("🔄 Forçar Conversão Universal (OFX) em todos os arquivos lidos", value=False, help="Ligue isso caso o arquivo esteja com um layout estranho. Desligue (Padrão) para preservar detalhes como Histórico + CNPJ em arquivos Excel.")
     
     indice_sugerido = 0
@@ -1191,7 +1196,6 @@ with tab_conciliacao:
     empresa_data        = df_empresas[df_empresas['display_nome'] == empresa_sel_display].iloc[0].to_dict()
     id_empresa          = int(empresa_data['id'])
 
-    # JUNÇÃO DOS BANCOS NATIVOS + CUSTOMIZADOS
     bancos_nativos = list(BANCOS_KEYWORDS.keys())
     bancos_custom = carregar_bancos_adicionais()
     bancos_disponiveis = sorted(list(set(bancos_nativos + bancos_custom + [st.session_state.banco_detectado])))
@@ -1211,7 +1215,7 @@ with tab_conciliacao:
     saldo_final_informado = col_saldos2.number_input("Saldo Final (Opcional)", value=0.00, step=100.00, format="%.2f")
 
     # =============================================================================
-    # PASSO 4: PROCESSAMENTO INTELIGENTE (COM OU SEM TOGGLE)
+    # PASSO 4: PROCESSAMENTO
     # =============================================================================
     if uploaded_files and conta_banco_fixa != 'N/A':
         if st.button("⚙️ Processar Extratos"):
@@ -1228,7 +1232,6 @@ with tab_conciliacao:
                 for file in uploaded_files:
                     extensao = file.name.lower()
                     
-                    # SE A CHAVE "FORÇAR UNIVERSAL" ESTIVER ATIVA, TRATA TUDO COMO PDF PELO MOTOR UNIVERSAL
                     if forcar_universal:
                         banco_alvo = banco_selecionado if banco_selecionado != "DESCONHECIDO" else "DESCONHECIDO"
                         df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
@@ -1237,7 +1240,6 @@ with tab_conciliacao:
                         else:
                             st.warning(f"O Extrator Universal não encontrou nada no arquivo: {file.name}")
                             
-                    # CASO CONTRÁRIO, RESPEITA A NATUREZA DO ARQUIVO (Padrão)
                     else:
                         if extensao.endswith('.pdf'):
                             banco_pdf = identificar_banco_no_pdf(file.getvalue())
@@ -1271,13 +1273,12 @@ with tab_conciliacao:
                             if banco_selecionado == 'BRADESCO':
                                 df_ex = extrair_planilha_bradesco(file.getvalue(), file.name)
                             else:
-                                # Funciona de forma excelente para BB e demais planilhas tradicionais
                                 df_ex = extrair_planilha_bb(file.getvalue(), file.name)
                                 
                             if not df_ex.empty:
                                 lista_dfs.append(df_ex)
                             else:
-                                st.warning(f"⚠️ O Caçador de Excel não encontrou a tabela no arquivo: {file.name}")
+                                st.warning(f"⚠️ O Caçador não encontrou a tabela no arquivo: {file.name}")
                                 
                         elif extensao.endswith('.ofx'):
                             df_ex = extrair_texto_ofx(file.getvalue())
@@ -1347,7 +1348,6 @@ with tab_conciliacao:
         with st.expander("➕ Adicionar / Excluir Lançamentos Manuais (Ajuste de Saldo)", expanded=False):
             st.info("Utilize as opções abaixo se for necessário compensar alguma diferença detectada pelo Detetive.")
             col_ajuste1, col_ajuste2 = st.columns(2)
-            # ... (Funcionalidades manuais permanecem as mesmas que estavam rodando no seu sistema)
             with col_ajuste1:
                 st.write("**Inserir Manuais**")
                 m_data = st.text_input("Data (DD/MM/AAAA)")
@@ -1555,7 +1555,7 @@ with tab_conciliacao:
     st.divider()
     
     with st.expander("➕ Cadastrar Novo Banco Oficial", expanded=False):
-        st.info("Caso você receba o arquivo de um banco que não está na lista principal, cadastre-o aqui. Ele ficará salvo no sistema permanentemente.")
+        st.info("Caso receba arquivo de um banco novo, cadastre-o aqui para salvar no sistema.")
         with st.form("form_novo_banco"):
             nome_novo_banco = st.text_input("Nome do Banco (Ex: INTER, SICREDI, BTG)")
             
@@ -1571,7 +1571,7 @@ with tab_conciliacao:
                             cursor = conn.cursor()
                             cursor.execute("INSERT INTO bancos_customizados (nome) VALUES (%s)", (nome_formatado,))
                             conn.commit()
-                            st.success(f"Banco '{nome_formatado}' adicionado com sucesso! Atualize a página para ele aparecer na seleção.")
+                            st.success(f"Banco '{nome_formatado}' adicionado com sucesso! Atualize a página.")
                         except mysql.connector.Error as err:
                             st.error(f"Erro ao cadastrar banco. Detalhe: {err}")
                         finally:
