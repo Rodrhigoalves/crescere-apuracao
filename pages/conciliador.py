@@ -172,9 +172,6 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
 
     prontos, pendentes, linhas_ignoradas_regras = [], [], []
 
-    if 'linhas_ignoradas_regras' not in st.session_state:
-        st.session_state.linhas_ignoradas_regras = []
-
     for idx, row in df_bruto.iterrows():
         if idx in st.session_state.linhas_ignoradas_regras:
             continue
@@ -213,10 +210,11 @@ def aplicar_regras_aos_extratos(df_bruto, id_empresa, banco_selecionado, conta_b
     if 'lancamentos_manuais' in st.session_state and st.session_state.lancamentos_manuais:
         prontos.extend(st.session_state.lancamentos_manuais)
 
-    st.session_state.prontos                 = prontos
-    st.session_state.pendentes               = pd.DataFrame(pendentes)
+    st.session_state.prontos        = prontos
+    st.session_state.pendentes      = pd.DataFrame(pendentes)
     
-    todas_ignoradas = list(set(st.session_state.linhas_ignoradas_regras + linhas_ignoradas_regras))
+    # FIX: Separa os ignorados manualmente dos ignorados por regra
+    todas_ignoradas = list(st.session_state.ignoradas_manuais_set.union(set(linhas_ignoradas_regras)))
     st.session_state.linhas_ignoradas_regras = todas_ignoradas
 
 # =============================================================================
@@ -403,14 +401,20 @@ def buscar_conta_por_banco(id_empresa, nome_banco):
     finally:
         if conn: conn.close()
 
-@st.cache_data(show_spinner=False)
+# FIX: Removido st.cache_data para evitar cache obsoleto com novos arquivos
 def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
     dados = []
     ign = {"criticas": [], "comuns": []}
     
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            texto_teste = pdf.pages[0].extract_text()
+            texto_teste = ""
+            # FIX: Testa até as 3 primeiras páginas para bancos com capa (Bradesco, Sicoob)
+            for page in pdf.pages[:3]:
+                ext_txt = page.extract_text()
+                if ext_txt:
+                    texto_teste += ext_txt
+                    
             if not texto_teste or len(texto_teste.strip()) < 10:
                 return pd.DataFrame(), ign
                     
@@ -458,7 +462,7 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
     if len(dados) < 2: return pd.DataFrame(), ign
     return pd.DataFrame(dados), ign
 
-@st.cache_data(show_spinner=False)
+# FIX: Removido st.cache_data
 def extrair_texto_ofx(file_bytes):
     dados_extraidos = []
     try:
@@ -519,14 +523,15 @@ def extrair_texto_ofx(file_bytes):
 # ==========================================
 # LEITORES DE EXCEL (Integrados com Power Query)
 # ==========================================
-@st.cache_data(show_spinner=False)
+# FIX: Removido st.cache_data
 def extrair_planilha_bb(file_bytes, nome_arquivo):
     try:
         df_full = ler_planilha_robusto(file_bytes, nome_arquivo)
         if df_full.empty: return pd.DataFrame()
         
         df_pq = extrair_modelo_power_query(df_full)
-        if not df_pq.empty:
+        # FIX: Exigir mais de 2 linhas validadas para aceitar via Power Query e não engolir cabeçalhos
+        if not df_pq.empty and len(df_pq) > 2:
             return df_pq
         
         header_idx = -1
@@ -601,14 +606,15 @@ def extrair_planilha_bb(file_bytes, nome_arquivo):
         logging.exception(f"Erro BB Excel: {e}")
         return pd.DataFrame()
 
-@st.cache_data(show_spinner=False)
+# FIX: Removido st.cache_data
 def extrair_planilha_bradesco(file_bytes, nome_arquivo):
     try:
         df_full = ler_planilha_robusto(file_bytes, nome_arquivo)
         if df_full.empty: return pd.DataFrame()
         
         df_pq = extrair_modelo_power_query(df_full)
-        if not df_pq.empty:
+        # FIX: Exigir mais de 2 linhas validadas para aceitar via Power Query e não engolir cabeçalhos
+        if not df_pq.empty and len(df_pq) > 2:
             return df_pq
             
         header_idx = -1
@@ -798,6 +804,7 @@ defaults = {
     'prontos':                 [],
     'pendentes':               pd.DataFrame(),
     'linhas_ignoradas_regras': [],
+    'ignoradas_manuais_set':   set(), # FIX: Nova estrutura para persistir ignorados manuais
     'criticas':                [],
     'comuns':                  [],
     'undo_stack':              [],
@@ -914,6 +921,7 @@ with tab_conciliacao:
             st.session_state.tempo_conclusao = None
             st.session_state.lancamentos_manuais = [] 
             st.session_state.linhas_ignoradas_regras = [] 
+            st.session_state.ignoradas_manuais_set = set() # FIX: Reset da memória manual a cada nova carga
             
             with st.spinner("Lendo e classificando extratos..."):
                 lista_dfs, criticas, comuns = [], [], []
@@ -924,9 +932,19 @@ with tab_conciliacao:
                     
                     if forcar_universal:
                         banco_alvo = banco_selecionado if banco_selecionado != "DESCONHECIDO" else "DESCONHECIDO"
-                        df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
-                        if not df_ex.empty: lista_dfs.append(df_ex)
-                        else: st.warning(f"O Extrator Universal não encontrou nada no arquivo: {file.name}")
+                        
+                        # FIX: Se forçou universal mas inseriu csv/excel, não tenta quebrar abrindo pdfplumber
+                        if extensao.endswith('.pdf'):
+                            df_ex, ign = motor_conversor_pdf_para_ofx(file.getvalue(), banco_alvo)
+                            if not df_ex.empty: lista_dfs.append(df_ex)
+                            else: st.warning(f"O Extrator Universal não encontrou nada no arquivo PDF: {file.name}")
+                        else:
+                            if banco_selecionado == 'BRADESCO':
+                                df_ex = extrair_planilha_bradesco(file.getvalue(), file.name)
+                            else:
+                                df_ex = extrair_planilha_bb(file.getvalue(), file.name)
+                            if not df_ex.empty: lista_dfs.append(df_ex)
+                            else: st.warning(f"O Extrator não encontrou a tabela no arquivo: {file.name}")
                             
                     else:
                         if extensao.endswith('.pdf'):
@@ -1014,7 +1032,7 @@ with tab_conciliacao:
                         df_temp = st.session_state.df_bruto.copy()
                         for idx, decisao in decisoes.items():
                             if "Excluir" in decisao:
-                                st.session_state.linhas_ignoradas_regras.append(idx)
+                                st.session_state.ignoradas_manuais_set.add(idx)
                                 df_temp.at[idx, 'Sinal'] = 'IGNORADO' # Tira da lista de asteriscos
                             elif "Entrada" in decisao:
                                 df_temp.at[idx, 'Sinal'] = '+'
@@ -1193,7 +1211,7 @@ with tab_conciliacao:
                         if str(idx_str).startswith('manual_'):
                             st.session_state.lancamentos_manuais = [m for m in st.session_state.lancamentos_manuais if m['idx_original'] != idx_str]
                         else:
-                            st.session_state.linhas_ignoradas_regras.append(int(idx_str))
+                            st.session_state.ignoradas_manuais_set.add(int(idx_str))
                     
                     aplicar_regras_aos_extratos(st.session_state.df_bruto, id_empresa, banco_selecionado, conta_banco_fixa)
                     st.toast("Lançamentos excluídos com sucesso! Saldo recalculado.")
