@@ -8,7 +8,6 @@ import unicodedata
 import uuid
 import os
 from thefuzz import fuzz
-from ofxparse import OfxParser
 import logging
 import time
 
@@ -88,11 +87,7 @@ def limpar_cnpj(cnpj_str):
         return ""
     return re.sub(r'[^0-9]', '', str(cnpj_str))
 
-def formatar_cnpj(cnpj_limpo):
-    if not cnpj_limpo or len(cnpj_limpo) != 14:
-        return cnpj_limpo
-    return f"{cnpj_limpo[:2]}.{cnpj_limpo[2:5]}.{cnpj_limpo[5:8]}/{cnpj_limpo[8:12]}-{cnpj_limpo[12:]}"
-
+# TAREFA 3: FILTRO RIGOROSO DE SALDOS (Permite AUT MAIS se não tiver SALDO)
 def eh_linha_de_saldo(descricao):
     d = padronizar_texto(descricao)
     if 'SALDO' in d or 'SDO' in d:
@@ -101,11 +96,7 @@ def eh_linha_de_saldo(descricao):
             'SALDO EM', 'SDO FINAL', 'SDO ANTERIOR', 'SDO CT', 'SALDO BLOQUEADO',
             'SALDO APLIC'
         ]
-        if any(b in d for b in bloqueios):
-            return True
-        if d == 'SALDO' or d == 'SDO':
-            return True
-        if d.startswith('SALDO ') or d.startswith('SDO '):
+        if any(b in d for b in bloqueios) or d == 'SALDO' or d == 'SDO' or d.startswith('SALDO ') or d.startswith('SDO '):
             return True
     return False
 
@@ -281,29 +272,22 @@ def buscar_conta_por_banco(id_empresa, nome_banco):
         if conn: conn.close()
 
 # ==========================================
-# NOVO MOTOR DE CONVERSÃO UNIVERSAL (PDF/OCR)
+# MOTOR DE CONVERSÃO UNIVERSAL (PDF/OCR) Fallback
 # ==========================================
 @st.cache_data(show_spinner=False)
 def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
-    """
-    Motor híbrido: Tenta extrair tabelas por geometria (resolve quebras de linha do Sicoob)
-    e possui gatilho para OCR caso o PDF seja uma imagem. Limpa sujeira antes da data (Itaú).
-    """
     dados = []
     ign = {"criticas": [], "comuns": []}
     
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             texto_teste = pdf.pages[0].extract_text()
-            
-            # --- Lógica OCR ---
             if not texto_teste or len(texto_teste.strip()) < 10:
                 if HAS_OCR:
                     st.toast("📷 PDF de imagem detectado. OCR ativado (pode demorar).")
                 else:
                     return pd.DataFrame(), ign
                     
-            # --- Lógica de Geometria e Tabelas ---
             ano_atual = str(pd.Timestamp.now().year)
             for page in pdf.pages:
                 tabelas = page.extract_tables()
@@ -315,7 +299,6 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
                         linha = [str(item).strip() if item else "" for item in linha]
                         if not linha or len(linha) < 2: continue
                         
-                        # Expressão regular ajustada: ignora qualquer coisa antes da data na coluna 0
                         match_data = re.search(r'^.*?(\d{2}/\d{2}(?:/\d{4})?)', linha[0])
                         
                         if match_data:
@@ -336,7 +319,6 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
                                 sinal = '+'
                             
                             desc = padronizar_texto(linha[1])
-                            # Aplica trava de saldo imediatamente
                             if eh_linha_de_saldo(desc):
                                 transacao_atual = None
                             else:
@@ -347,7 +329,6 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
                                     'Sinal': sinal
                                 }
                         elif transacao_atual and len(linha) > 1 and linha[1]:
-                            # Fusão de Históricos
                             texto_extra = padronizar_texto(linha[1])
                             if texto_extra and not eh_linha_de_saldo(texto_extra):
                                 transacao_atual['Descricao'] += f" {texto_extra}"
@@ -364,69 +345,89 @@ def motor_conversor_pdf_para_ofx(file_bytes, banco_nome):
     return pd.DataFrame(dados), ign
 
 # ==========================================
-# MOTORES LEGAIS E ESPECÍFICOS MANTIDOS
+# TAREFA 1: MOTOR ITAÚ RESTABELECIDO E ESTÁVEL (REGEX/TEXTO)
 # ==========================================
 @st.cache_data(show_spinner=False)
-def extrair_por_recintos(file_bytes):
-    texto_completo = ""
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
-            palavras = page.extract_words(x_tolerance=3, y_tolerance=3)
-            linhas_dict = {}
-            for p in palavras:
-                y = round(float(p['top']))
-                encontrou_y = next((k for k in linhas_dict if abs(k - y) <= 3), None)
-                if encontrou_y is not None: linhas_dict[encontrou_y].append(p)
-                else: linhas_dict[y] = [p]
-            for y_key in sorted(linhas_dict.keys()):
-                linha_ordenada = sorted(linhas_dict[y_key], key=lambda x: x['x0'])
-                texto_completo += " ".join([w['text'] for w in linha_ordenada]) + "\n"
-
-    RUIDO_CABECALHO = ["período:", "página", "cnpj", "emitido em", "extrato de conta", "dados da conta", "nome documento", "instituição agência", "contraparte stone"]
-    linhas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
+def extrair_pdf_itau(file_bytes):
     dados, ignoradas_raw = [], []
-    regex_data  = r'\d{2}/\d{2}/\d{2,4}'
-    regex_valor = r'-?\s*(?:R\$?\s*)?\d{1,3}(?:\.\d{3})*,\d{2}'
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            in_movimento = False
+            terminou_leitura = False
+            current_date = None
+            ano = str(pd.Timestamp.now().year)
+            
+            for page in pdf.pages:
+                if terminou_leitura: break
+                texto = page.extract_text()
+                if not texto: continue
+                
+                match_ano = re.search(r'\b(20[2-9]\d)\b', texto)
+                if match_ano: ano = match_ano.group(1)
 
-    for linha in linhas:
-        if any(x in linha.lower() for x in RUIDO_CABECALHO): continue
-        match_data = re.search(regex_data, linha)
-        valores    = re.findall(regex_valor, linha)
+                linhas = texto.split('\n')
+                for linha in linhas:
+                    linha_strip = linha.strip()
+                    linha_norm = padronizar_texto(linha_strip)
+                    
+                    if 'DATA' in linha_norm and 'DESCRICAO' in linha_norm and ('ENTRADA' in linha_norm or 'SAIDA' in linha_norm or 'CREDITO' in linha_norm):
+                        in_movimento = True
+                        continue
+                    
+                    if in_movimento:
+                        if eh_linha_de_saldo(linha_norm):
+                            if 'SALDO FINAL' in linha_norm or 'SDO FINAL' in linha_norm:
+                                terminou_leitura = True
+                                break
+                            continue
 
-        if match_data and valores:
-            data        = match_data.group(0)
-            valor_bruto = valores[0]
-            is_negativo = '-' in valor_bruto or bool(re.search(r'\sD$', linha.strip(), re.IGNORECASE))
-            is_positivo = '+' in valor_bruto or bool(re.search(r'\sC$', linha.strip(), re.IGNORECASE))
+                        if any(k in linha_norm for k in ['CHEQUE ESPECIAL', 'LIMITE']): continue
 
-            valor_str_limpo = re.search(r'\d{1,3}(?:\.\d{3})*,\d{2}', valor_bruto).group(0)
-            valor_num = float(valor_str_limpo.replace('.', '').replace(',', '.'))
+                        match_data = re.search(r'^(\d{2}/\d{2})\b', linha_strip)
+                        if match_data:
+                            current_date = f"{match_data.group(1)}/{ano}"
+                            linha_strip = linha_strip[match_data.end():].strip()
 
-            desc_limpa = linha.replace(data, '')
-            for v in valores: desc_limpa = desc_limpa.replace(v, '')
-            desc_limpa = re.sub(r'\b[DC]\b', '', desc_limpa, flags=re.IGNORECASE)
-            desc_limpa = padronizar_texto(desc_limpa.strip())
+                        if not current_date: continue
 
-            if eh_linha_de_saldo(desc_limpa):
-                continue
+                        matches = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})(-?)', linha_strip))
+                        if matches:
+                            v_match = None
+                            if len(matches) >= 2:
+                                m_last = matches[-1]
+                                m_penult = matches[-2]
+                                distancia = m_last.start() - m_penult.end()
+                                ta_no_fim = (len(linha_strip) - m_last.end()) <= 10
+                                if ta_no_fim and distancia <= 25:
+                                    v_match = m_penult
+                                    linha_strip = linha_strip[:m_last.start()].strip()
+                                else:
+                                    v_match = m_last
+                            else:
+                                v_match = matches[0]
 
-            if not desc_limpa or len(desc_limpa) < 2: desc_limpa = "SEM DESCRICAO"
+                            valor_str = v_match.group(1)
+                            sinal_str = v_match.group(2)
+                            sinal = '-' if sinal_str == '-' else '+'
+                            valor_num = float(valor_str.replace('.', '').replace(',', '.'))
+                            
+                            desc = linha_strip[:v_match.start()].strip()
+                            desc_limpa = padronizar_texto(desc)
+                            
+                            if desc_limpa and len(desc_limpa) >= 2:
+                                dados.append({'Data': current_date, 'Descricao': desc_limpa, 'Valor': abs(valor_num), 'Sinal': sinal})
+                            else:
+                                ignoradas_raw.append(linha_strip)
+                        else:
+                            ignoradas_raw.append(linha_strip)
+    except Exception as e:
+        logging.exception(f"Erro no Itaú: {e}")
+        
+    return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
 
-            desc_upper = desc_limpa.upper()
-            if is_negativo:   sinal = '-'
-            elif is_positivo: sinal = '+'
-            else: sinal = '+' if any(w in desc_upper for w in ['ENTRADA', 'DEPOSITO', 'DEPÓSITO', 'RECEBIMENTO', 'CREDITO', 'CRÉDITO', 'PIX RECEBIDO', 'RESGATE']) else '-'
-
-            dados.append({'Data': data, 'Descricao': desc_limpa, 'Valor': abs(valor_num), 'Sinal': sinal})
-        elif len(linha) > 8:
-            ignoradas_raw.append(linha)
-
-    ignoradas_unicas    = list(dict.fromkeys(ignoradas_raw))
-    ignoradas_com_valor = [l for l in ignoradas_unicas if re.search(r'\d,\d{2}', l)]
-    ignoradas_texto     = [l for l in ignoradas_unicas if not re.search(r'\d,\d{2}', l)]
-
-    return pd.DataFrame(dados), {"criticas": ignoradas_com_valor, "comuns": ignoradas_texto}
-
+# ==========================================
+# TAREFA 2: MOTOR SICOOB REFINADO (QUEBRA DE LINHA)
+# ==========================================
 def processar_bloco_sicoob(bloco, ano, dados):
     texto_bloco = " ".join(bloco)
     match_data = re.search(r'^(\d{2}/\d{2})\b', texto_bloco)
@@ -525,217 +526,65 @@ def extrair_pdf_sicoob(file_bytes):
         
     return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
 
+# Motores restantes...
 @st.cache_data(show_spinner=False)
-def extrair_pdf_itau(file_bytes):
+def extrair_por_recintos(file_bytes):
+    texto_completo = ""
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            palavras = page.extract_words(x_tolerance=3, y_tolerance=3)
+            linhas_dict = {}
+            for p in palavras:
+                y = round(float(p['top']))
+                encontrou_y = next((k for k in linhas_dict if abs(k - y) <= 3), None)
+                if encontrou_y is not None: linhas_dict[encontrou_y].append(p)
+                else: linhas_dict[y] = [p]
+            for y_key in sorted(linhas_dict.keys()):
+                linha_ordenada = sorted(linhas_dict[y_key], key=lambda x: x['x0'])
+                texto_completo += " ".join([w['text'] for w in linha_ordenada]) + "\n"
+
+    RUIDO_CABECALHO = ["período:", "página", "cnpj", "emitido em", "extrato de conta", "dados da conta", "nome documento", "instituição agência", "contraparte stone"]
+    linhas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
     dados, ignoradas_raw = [], []
-    try:
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            in_movimento = False
-            terminou_leitura = False
-            current_date = None
-            ano = str(pd.Timestamp.now().year)
-            
-            for page in pdf.pages:
-                if terminou_leitura: break
-                
-                texto = page.extract_text()
-                if not texto: continue
-                
-                match_ano = re.search(r'\b(20[2-9]\d)\b', texto)
-                if match_ano:
-                    ano = match_ano.group(1)
+    regex_data  = r'\d{2}/\d{2}/\d{2,4}'
+    regex_valor = r'-?\s*(?:R\$?\s*)?\d{1,3}(?:\.\d{3})*,\d{2}'
 
-                linhas = texto.split('\n')
-                for linha in linhas:
-                    linha_strip = linha.strip()
-                    linha_norm = padronizar_texto(linha_strip)
-                    
-                    if 'DATA' in linha_norm and 'DESCRICAO' in linha_norm and ('ENTRADA' in linha_norm or 'SAIDA' in linha_norm or 'CREDITO' in linha_norm):
-                        in_movimento = True
-                        continue
-                    
-                    if in_movimento:
-                        if eh_linha_de_saldo(linha_norm):
-                            if 'SALDO FINAL' in linha_norm or 'SDO FINAL' in linha_norm:
-                                terminou_leitura = True
-                                break
-                            continue
+    for linha in linhas:
+        if any(x in linha.lower() for x in RUIDO_CABECALHO): continue
+        match_data = re.search(regex_data, linha)
+        valores    = re.findall(regex_valor, linha)
 
-                        if any(k in linha_norm for k in ['CHEQUE ESPECIAL', 'LIMITE']):
-                            continue
+        if match_data and valores:
+            data        = match_data.group(0)
+            valor_bruto = valores[0]
+            is_negativo = '-' in valor_bruto or bool(re.search(r'\sD$', linha.strip(), re.IGNORECASE))
+            is_positivo = '+' in valor_bruto or bool(re.search(r'\sC$', linha.strip(), re.IGNORECASE))
 
-                        match_data = re.search(r'^(\d{2}/\d{2})\b', linha_strip)
-                        if match_data:
-                            current_date = f"{match_data.group(1)}/{ano}"
-                            linha_strip = linha_strip[match_data.end():].strip()
+            valor_str_limpo = re.search(r'\d{1,3}(?:\.\d{3})*,\d{2}', valor_bruto).group(0)
+            valor_num = float(valor_str_limpo.replace('.', '').replace(',', '.'))
 
-                        if not current_date:
-                            continue
+            desc_limpa = linha.replace(data, '')
+            for v in valores: desc_limpa = desc_limpa.replace(v, '')
+            desc_limpa = re.sub(r'\b[DC]\b', '', desc_limpa, flags=re.IGNORECASE)
+            desc_limpa = padronizar_texto(desc_limpa.strip())
 
-                        matches = list(re.finditer(r'(\d{1,3}(?:\.\d{3})*,\d{2})(-?)', linha_strip))
-                        if matches:
-                            v_match = None
-                            if len(matches) >= 2:
-                                m_last = matches[-1]
-                                m_penult = matches[-2]
-                                
-                                distancia = m_last.start() - m_penult.end()
-                                ta_no_fim = (len(linha_strip) - m_last.end()) <= 10
-                                
-                                if ta_no_fim and distancia <= 25:
-                                    v_match = m_penult
-                                    linha_strip = linha_strip[:m_last.start()].strip()
-                                else:
-                                    v_match = m_last
-                            else:
-                                v_match = matches[0]
+            if eh_linha_de_saldo(desc_limpa): continue
 
-                            valor_str = v_match.group(1)
-                            sinal_str = v_match.group(2)
-                            
-                            sinal = '-' if sinal_str == '-' else '+'
-                            valor_num = float(valor_str.replace('.', '').replace(',', '.'))
-                            
-                            desc = linha_strip[:v_match.start()].strip()
-                            desc_limpa = padronizar_texto(desc)
-                            
-                            if desc_limpa and len(desc_limpa) >= 2:
-                                dados.append({
-                                    'Data': current_date,
-                                    'Descricao': desc_limpa,
-                                    'Valor': abs(valor_num),
-                                    'Sinal': sinal
-                                })
-                            else:
-                                ignoradas_raw.append(linha_strip)
-                        else:
-                            ignoradas_raw.append(linha_strip)
-    except Exception as e:
-        logging.exception(f"Erro no Itaú: {e}")
-        
-    return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
+            if not desc_limpa or len(desc_limpa) < 2: desc_limpa = "SEM DESCRICAO"
+            desc_upper = desc_limpa.upper()
+            if is_negativo:   sinal = '-'
+            elif is_positivo: sinal = '+'
+            else: sinal = '+' if any(w in desc_upper for w in ['ENTRADA', 'DEPOSITO', 'DEPÓSITO', 'RECEBIMENTO', 'CREDITO', 'CRÉDITO', 'PIX RECEBIDO', 'RESGATE']) else '-'
 
-@st.cache_data(show_spinner=False)
-def extrair_pdf_caixa(file_bytes):
-    dados, ignoradas_raw = [], []
-    try:
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            for page in pdf.pages:
-                texto = page.extract_text()
-                if not texto: continue
-                
-                linhas = texto.split('\n')
-                for linha in linhas:
-                    linha_strip = linha.strip()
-                    linha_norm = padronizar_texto(linha_strip)
-                    
-                    if 'EXTRATO' in linha_norm or 'DATA MOV' in linha_norm or 'NR. DOC.' in linha_norm:
-                        continue
-                        
-                    if eh_linha_de_saldo(linha_norm):
-                        continue
+            dados.append({'Data': data, 'Descricao': desc_limpa, 'Valor': abs(valor_num), 'Sinal': sinal})
+        elif len(linha) > 8:
+            ignoradas_raw.append(linha)
 
-                    match = re.search(r'^(\d{2}/\d{2}/\d{4})\s+(.*?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD])(?:\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*([CD]))?$', linha_strip, re.IGNORECASE)
-                    
-                    if match:
-                        data = match.group(1)
-                        meio = match.group(2)
-                        valor_str = match.group(3)
-                        sinal_str = match.group(4).upper()
-                        
-                        partes = meio.split(maxsplit=1)
-                        if len(partes) > 1 and re.match(r'^\d+$', partes[0]):
-                            desc_limpa = padronizar_texto(partes[1])
-                        else:
-                            desc_limpa = padronizar_texto(meio)
-                            
-                        if eh_linha_de_saldo(desc_limpa):
-                            continue
-                            
-                        valor_num = float(valor_str.replace('.', '').replace(',', '.'))
-                        sinal = '+' if sinal_str == 'C' else '-'
-                        
-                        if desc_limpa and len(desc_limpa) >= 2:
-                            dados.append({
-                                'Data': data,
-                                'Descricao': desc_limpa,
-                                'Valor': abs(valor_num),
-                                'Sinal': sinal
-                            })
-                    else:
-                        if len(linha_strip) > 5:
-                            ignoradas_raw.append(linha_strip)
-    except Exception as e:
-        logging.exception(f"Erro na Caixa: {e}")
-        
-    return pd.DataFrame(dados), {"criticas": [], "comuns": ignoradas_raw}
+    ignoradas_unicas    = list(dict.fromkeys(ignoradas_raw))
+    ignoradas_com_valor = [l for l in ignoradas_unicas if re.search(r'\d,\d{2}', l)]
+    ignoradas_texto     = [l for l in ignoradas_unicas if not re.search(r'\d,\d{2}', l)]
 
-@st.cache_data(show_spinner=False)
-def extrair_texto_ofx(file_bytes):
-    dados_extraidos = []
-    try:
-        try:
-            texto_ofx = file_bytes.decode('utf-8')
-        except UnicodeDecodeError:
-            texto_ofx = file_bytes.decode('latin-1', errors='ignore')
-
-        blocos = re.findall(r'<STMTTRN>(.*?)</STMTTRN>', texto_ofx, re.DOTALL | re.IGNORECASE)
-        if not blocos:
-            blocos = re.split(r'<STMTTRN>', texto_ofx, flags=re.IGNORECASE)[1:]
-
-        def get_campo(campo, texto):
-            match = re.search(rf'<{campo}>\s*([^\n<]+)', texto, re.IGNORECASE)
-            return match.group(1).strip() if match else ""
-
-        for bloco in blocos:
-            data_raw  = get_campo('DTPOSTED', bloco)
-            valor_raw = get_campo('TRNAMT',   bloco)
-            memo      = get_campo('MEMO',     bloco)
-            name      = get_campo('NAME',     bloco)
-            trntype   = get_campo('TRNTYPE',  bloco)
-            fitid     = get_campo('FITID',    bloco)
-
-            data_fmt = re.sub(r'[^\d]', '', data_raw)[:8]
-            try:
-                data_fmt = pd.to_datetime(data_fmt, format='%Y%m%d').strftime('%d/%m/%Y')
-            except Exception:
-                data_fmt = data_raw
-
-            try:
-                valor = float(valor_raw.replace(',', '.'))
-            except (ValueError, AttributeError):
-                continue
-
-            VALORES_GENERICOS = {'', 'NONE', 'NULL', '-', 'N/A', 'NAO INFORMADO', 'NAO IDENTIFICADO'}
-            name_pad = padronizar_texto(name)
-            memo_pad = padronizar_texto(memo)
-
-            partes = []
-            if name_pad and name_pad not in VALORES_GENERICOS:
-                partes.append(name_pad)
-            if memo_pad and memo_pad not in VALORES_GENERICOS and memo_pad != name_pad:
-                if name_pad not in memo_pad and memo_pad not in name_pad:
-                    partes.append(memo_pad)
-                elif len(memo_pad) > len(name_pad):
-                    partes = [memo_pad]
-
-            if not partes:
-                partes.append(trntype.upper() if trntype else 'SEM DESCRICAO')
-
-            descricao_final = " | ".join(partes) if partes else "SEM DESCRICAO"
-
-            if eh_linha_de_saldo(descricao_final):
-                continue
-
-            dados_extraidos.append({
-                'Data':      data_fmt,
-                'Descricao': descricao_final,
-                'Valor':     abs(valor),
-                'Sinal':     '+' if valor > 0 else '-'
-            })
-    except Exception as e:
-        logging.exception("Erro na extração OFX")
-    return pd.DataFrame(dados_extraidos)
+    return pd.DataFrame(dados), {"criticas": ignoradas_com_valor, "comuns": ignoradas_texto}
 
 @st.cache_data(show_spinner=False)
 def extrair_planilha_bb(file_bytes, nome_arquivo):
@@ -1053,6 +902,7 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                         elif banco_pdf == 'SICOOB' or banco_selecionado == 'SICOOB':
                             df_ex, ign = extrair_pdf_sicoob(file.getvalue())
                         elif banco_pdf == 'ITAU' or banco_selecionado == 'ITAU':
+                            # TAREFA 1: USO DO MOTOR ESTÁVEL DO ITAÚ
                             df_ex, ign = extrair_pdf_itau(file.getvalue())
                         else:
                             df_ex, ign = extrair_por_recintos(file.getvalue())
@@ -1064,14 +914,15 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                     else:
                         houve_falha_pdf = True
                         st.error(f"⚠️ O sistema não conseguiu extrair transações do arquivo: {file.name}")
+                        # TAREFA 4: ÁREA DE CONTINGÊNCIA ESTRATÉGICA
                         st.markdown(
                             f"""
                             <div style="text-align: center; padding: 15px; margin: 15px 0; border: 2px dashed #ff4b4b; border-radius: 8px; background-color: #fff0f0;">
                                 <h4 style="color: #ff4b4b; margin-top:0;">Layout Desconhecido ou PDF Ilegível (Imagem)</h4>
-                                <p style="color: #333; margin-bottom: 15px;">Utilize nossa ferramenta de contingência para converter este PDF em OFX e suba o OFX gerado aqui no sistema.</p>
+                                <p style="color: #333; margin-bottom: 15px;">Utilize nossa ferramenta parceira para converter o PDF em OFX e importe novamente.</p>
                                 <a href="https://www.ofxfacil.com.br/pdf-ofx" target="_blank" style="text-decoration: none;">
                                     <button style="background-color: #ff4b4b; color: white; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 16px;">
-                                        🚀 Abrir Conversor Externo (OFX Fácil)
+                                        🚀 ACESSAR OFX FÁCIL
                                     </button>
                                 </a>
                             </div>
@@ -1088,13 +939,6 @@ if uploaded_files and conta_banco_fixa != 'N/A':
                         lista_dfs.append(df_ex)
                     else:
                         st.warning(f"⚠️ Extrator Excel/CSV não encontrou transações na planilha: {file.name}")
-                        
-                elif extensao.endswith('.ofx'):
-                    df_ex = extrair_texto_ofx(file.getvalue())
-                    if not df_ex.empty:
-                        lista_dfs.append(df_ex)
-                    else:
-                        st.warning(f"⚠️ Extrator OFX não encontrou transações em: {file.name}")
 
             if lista_dfs:
                 df_consolidado = pd.concat(lista_dfs, ignore_index=True)
