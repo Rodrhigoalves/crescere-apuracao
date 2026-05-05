@@ -230,6 +230,7 @@ BANCOS_KEYWORDS = {
     'SANTANDER': ['SANTANDER', 'BANCO SANTANDER'],
     'BB':        ['BANCO DO BRASIL', 'BB'],
     'NUBANK':    ['NUBANK', 'NU PAGAMENTOS'],
+    'PAGBANK':    ['PAGBANK', 'PagBank'],
 }
 
 def identificar_cnpj_no_pdf(file_bytes):
