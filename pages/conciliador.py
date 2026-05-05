@@ -231,6 +231,7 @@ BANCOS_KEYWORDS = {
     'BB':        ['BANCO DO BRASIL', 'BB'],
     'NUBANK':    ['NUBANK', 'NU PAGAMENTOS'],
     'PAGBANK':    ['PAGBANK', 'PagBank'],
+    'MERCADO PAGO':    ['MERCADO PAGO', 'Mercado Pago', 'mercado pago'],
 }
 
 def identificar_cnpj_no_pdf(file_bytes):
