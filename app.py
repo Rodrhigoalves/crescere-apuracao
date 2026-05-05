@@ -13,81 +13,22 @@ import uuid
 from contextlib import contextmanager
 import re
 
-# --- 1. CONFIGURAÇÕES VISUAIS E INJEÇÃO CSS (DUPLA CAMADA) ---
+# --- 1. CONFIGURAÇÕES VISUAIS E INJEÇÃO CSS ---
 st.set_page_config(page_title="Crescere - Apuração Fiscal", layout="wide", initial_sidebar_state="expanded")
 
-# SELETOR DE TEMA DE EMERGÊNCIA (Aparece no topo da Sidebar em todas as telas)
-with st.sidebar:
-    modo_visao = st.selectbox(
-        "🖥️ Visualização (Tema)",
-        ["Padrão (Escritório)", "Alto Contraste (Notebook)", "Modo Escuro"],
-        index=0,
-        help="Mude para 'Alto Contraste' caso o Windows 11 force um fundo branco sobre os formulários."
-    )
-    st.divider()
-
-if modo_visao == "Alto Contraste (Notebook)":
-    # Força cores ultra-contrastantes para vencer a acessibilidade do Windows 11
-    st.markdown("""
-    <style>
-        .stApp { background-color: #000000 !important; }
-        [data-testid="stHeader"] { background-color: rgba(0,0,0,0) !important; }
-        label, p, span, h1, h2, h3, h4 { color: #FFFFFF !important; }
-        
-        .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] {
-            background-color: #1e1e1e !important;
-            color: #FFFFFF !important;
-            border: 1px solid #555555 !important;
-            -webkit-text-fill-color: #FFFFFF !important;
-        }
-        
-        div[data-testid="stForm"], .stExpander, div[data-testid="stVerticalBlock"] > div > div[data-testid="stVerticalBlock"] {
-            background-color: #121212 !important;
-            border: 1px solid #333333 !important;
-        }
-        
-        .stButton>button, .stDownloadButton>button, a[data-testid="stLinkButton"]>button { background-color: #004b87 !important; color: white !important; border-radius: 4px; border: none; font-weight: bold !important; height: 45px; width: 100%; transition: all 0.2s; }
-        .stButton>button:hover { background-color: #003366 !important; transform: translateY(-1px); }
-        .btn-excluir button { background-color: #dc2626 !important; color: white !important; }
-        #MainMenu {visibility: hidden;} footer {visibility: hidden;}
-    </style>
-    """, unsafe_allow_html=True)
-    
-elif modo_visao == "Modo Escuro":
-    # Fundo escuro mais suave
-    st.markdown("""
-    <style>
-        .stApp { background-color: #0E1117 !important; }
-        label, p, span, h1, h2, h3, h4 { color: #FAFAFA !important; }
-        
-        .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] { 
-            background-color: #262730 !important; color: #FFFFFF !important; border: 1px solid #4B4C53 !important; 
-        }
-        div[data-testid="stForm"], .stExpander, div[data-testid="stVerticalBlock"] > div > div[data-testid="stVerticalBlock"] { 
-            background-color: #1E2129 !important; border: 1px solid #30363D !important; 
-        }
-        
-        .stButton>button, .stDownloadButton>button, a[data-testid="stLinkButton"]>button { background-color: #004b87 !important; color: white !important; border-radius: 4px; border: none; font-weight: 500; height: 45px; width: 100%; transition: all 0.2s; }
-        .btn-excluir button { background-color: #dc2626 !important; color: white !important; }
-        #MainMenu {visibility: hidden;} footer {visibility: hidden;}
-    </style>
-    """, unsafe_allow_html=True)
-    
-else:
-    # ORIGINAL CSS - Mantém a compatibilidade total e idêntica para o escritório
-    st.markdown("""
-    <style>
-        .stApp { background-color: #f4f6f9; }
-        .stButton>button, .stDownloadButton>button, a[data-testid="stLinkButton"]>button { background-color: #004b87; color: white; border-radius: 4px; border: none; font-weight: 500; height: 45px; width: 100%; transition: all 0.2s; }
-        .stButton>button:hover, .stDownloadButton>button:hover, a[data-testid="stLinkButton"]>button:hover { background-color: #003366; color: white; transform: translateY(-1px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .btn-excluir button { background-color: #dc2626 !important; color: white !important; }
-        .btn-excluir button:hover { background-color: #b91c1c !important; }
-        div[data-testid="stForm"], .stExpander, div[data-testid="stVerticalBlock"] > div > div[data-testid="stVerticalBlock"] { background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }
-        h1, h2, h3, h4 { color: #0f172a; font-weight: 600; font-family: 'Segoe UI', sans-serif; }
-        .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] { background-color: #f8fafc; border: 1px solid #cbd5e1; }
-        #MainMenu {visibility: hidden;} footer {visibility: hidden;}
-    </style>
-    """, unsafe_allow_html=True)
+st.markdown("""
+<style>
+    .stApp { background-color: #f4f6f9; }
+    .stButton>button, .stDownloadButton>button, a[data-testid="stLinkButton"]>button { background-color: #004b87; color: white; border-radius: 4px; border: none; font-weight: 500; height: 45px; width: 100%; transition: all 0.2s; }
+    .stButton>button:hover, .stDownloadButton>button:hover, a[data-testid="stLinkButton"]>button:hover { background-color: #003366; color: white; transform: translateY(-1px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    .btn-excluir button { background-color: #dc2626 !important; color: white !important; }
+    .btn-excluir button:hover { background-color: #b91c1c !important; }
+    div[data-testid="stForm"], .stExpander, div[data-testid="stVerticalBlock"] > div > div[data-testid="stVerticalBlock"] { background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }
+    h1, h2, h3, h4 { color: #0f172a; font-weight: 600; font-family: 'Segoe UI', sans-serif; }
+    .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] { background-color: #f8fafc; border: 1px solid #cbd5e1; }
+    #MainMenu {visibility: hidden;} footer {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
 
 # --- FUNÇÕES AUXILIARES DE LIMPEZA E FORMATAÇÃO ---
 def limpar_texto(v):
@@ -1336,7 +1277,7 @@ def modulo_imobilizado():
                                             if data_plan.month == 12: data_plan = date(data_plan.year + 1, 1, 1)
                                             else: data_plan = date(data_plan.year, data_plan.month + 1, 1)
 
-                            st.success("Bem registado com sucesso!"); st.rerun()
+                                st.success("Bem registado com sucesso!"); st.rerun()
                             except Exception as e: st.error(f"Erro ao salvar: {e}")
 
         with col_ras:
@@ -1582,7 +1523,7 @@ def modulo_imobilizado():
                             if dt_baixa <= data_posicao: continue
 
                         base_calc = float(r['valor_compra'])
-                        if pd.notnull(r.get('taxa_customizada')) and float(r.get('taxa_customizada')) > 0: taxa_anual = float(r['taxa_customizada']) / 100.0
+                        if pd.notnull(r.get('taxa_customizada')) and float(r['taxa_customizada']) > 0: taxa_anual = float(r['taxa_customizada']) / 100.0
                         elif pd.notnull(r.get('taxa_anual_percentual')): taxa_anual = float(r['taxa_anual_percentual']) / 100.0
                         else: taxa_anual = 0.0
 
