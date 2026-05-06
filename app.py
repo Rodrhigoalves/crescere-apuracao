@@ -1997,7 +1997,7 @@ def modulo_usuarios():
                                     VALUES (%s, %s, %s, 'ATIVO', %s)
                                     ON DUPLICATE KEY UPDATE status='ATIVO', concedido_por=VALUES(concedido_por)
                                 """
-                                cursor_perm.execute(query_upsert, (int(u_contab) if u_contab else None, int(u_id), int(eid), 'ATIVO', int(st.session_state.usuario_id)))
+                                cursor_perm.execute(query_upsert, (int(u_contab) if u_contab else None, int(u_id), int(eid), int(st.session_state.usuario_id)))
 
                             ids_revogados = [int(eid) for eid in ids_atuais if eid not in ids_selecionados]
                             if ids_revogados:
